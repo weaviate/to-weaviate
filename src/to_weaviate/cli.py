@@ -716,7 +716,7 @@ def _progress_output(
 
 
 def _target_host(settings: WeaviateSettings) -> str:
-    """The normalized host and port of the WEAVIATE_URL endpoint."""
+    """The normalized host and port that `connect` uses for WEAVIATE_URL."""
     return settings.http.normalized
 
 

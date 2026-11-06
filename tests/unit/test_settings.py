@@ -245,3 +245,21 @@ def test_settings_hold_the_parsed_endpoints():
     assert s.grpc is not None
     assert (s.grpc.host, s.grpc.port, s.grpc.secure) == ("grpc.example.com", 443, True)
     assert weaviate_settings({"WEAVIATE_URL": "https://c.weaviate.cloud"}).grpc is None
+
+
+@pytest.mark.parametrize(
+    ("url", "grpc", "expected"),
+    [
+        ("http://c.weaviate.cloud", None, ("c.weaviate.cloud", 443, True)),
+        ("https://c.weaviate.cloud", None, ("c.weaviate.cloud", 443, True)),
+        ("c.weaviate.cloud", None, ("c.weaviate.cloud", 443, True)),
+        ("http://localhost:8099", None, ("localhost", 8099, True)),
+        ("http://weaviate.test", "weaviate.test:50051", ("weaviate.test", 80, False)),
+        ("weaviate.test", "weaviate.test:50051", ("weaviate.test", 80, False)),
+        ("https://weaviate.test", "weaviate.test:50051", ("weaviate.test", 443, True)),
+    ],
+)
+def test_http_endpoint_without_grpc_url_is_port_443_over_tls(url, grpc, expected):
+    env = {"WEAVIATE_URL": url, "WEAVIATE_GRPC_URL": grpc or ""}
+    http = weaviate_settings(env).http
+    assert (http.host, http.port, http.secure) == expected

@@ -246,8 +246,10 @@ class WeaviateSettings:
 
     Both have no path other than `/`. A `grpc_url` scheme is http or https.
     `http` is the endpoint of `url` and `grpc` the endpoint of `grpc_url`; a
-    URL without a scheme is http. Without `grpc_url`, `target.connect`
-    connects to Weaviate Cloud, and `http` gets https as the default scheme.
+    URL without a scheme is http. `target.connect` and the stored target
+    host read both. Without `grpc_url`, `connect` uses
+    `connect_to_weaviate_cloud`, which connects over TLS to port 443 whatever
+    the scheme says, so `http` is secure and a URL without a port gets 443.
     """
 
     url: str
@@ -265,8 +267,11 @@ class WeaviateSettings:
                 "WEAVIATE_GRPC_URL", self.grpc_url, HTTP_SCHEMES | {""}, any_path=False
             )
             grpc = _endpoint(parts, "http")
-        default_scheme = "http" if grpc is not None else "https"
-        object.__setattr__(self, "http", _endpoint(http, default_scheme))
+        if grpc is None:
+            endpoint = Endpoint(http.hostname or "", http.port or 443, True)
+        else:
+            endpoint = _endpoint(http, "http")
+        object.__setattr__(self, "http", endpoint)
         object.__setattr__(self, "grpc", grpc)
 
 
