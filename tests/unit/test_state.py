@@ -4,9 +4,10 @@ import time
 from pathlib import Path
 
 import pytest
+from fakes import old_state_file
 
 from to_weaviate.sources.base import Partition
-from to_weaviate.state import CollectionProgress, State
+from to_weaviate.state import CollectionProgress, State, Target
 from to_weaviate.target.writer import Reject
 
 REF = "default/c1"
@@ -199,6 +200,61 @@ def test_rejects_file_failure_leaves_no_rows_and_retry_writes_lines(tmp_path):
     lines = rejects_file.read_text().splitlines()
     assert [json.loads(line)["source_id"] for line in lines] == ["r1", "r2"]
     assert state.progress()[0].rejects == 2
+
+
+def test_targets_are_stored_per_ref_and_survive_reopen(tmp_path):
+    state = make_state(tmp_path)
+    assert state.targets() == {}
+    state.set_target(REF, Target("localhost:8099", "Docs", None))
+    state.set_target("other", Target("c.weaviate.cloud:443", "Other", "t"))
+    state.set_target(REF, Target("localhost:8099", "Docs", None))
+    assert make_state(tmp_path).targets() == {
+        REF: Target("localhost:8099", "Docs", None),
+        "other": Target("c.weaviate.cloud:443", "Other", "t"),
+    }
+
+
+def test_set_target_replaces_the_stored_target(tmp_path):
+    state = make_state(tmp_path)
+    state.set_target(REF, Target("a:80", "Docs", None))
+    state.set_target(REF, Target("b:80", "Docs", "t"))
+    assert state.targets() == {REF: Target("b:80", "Docs", "t")}
+
+
+@pytest.mark.parametrize(
+    ("cursor", "copied"),
+    [
+        (None, 0),  # finished, every record rejected
+        ("5", 0),  # one page read, every record rejected
+        ("5", 5),
+    ],
+)
+def test_has_progress_after_an_advance(tmp_path, cursor, copied):
+    state = make_state(tmp_path)
+    state.init_collection(REF, parts("a", "b"), 10)
+    assert not state.has_progress(REF)
+    state.advance(REF, "a", cursor, copied)
+    assert state.has_progress(REF)
+    assert not state.has_progress("other")
+
+
+def test_has_progress_is_false_without_partitions(tmp_path):
+    state = make_state(tmp_path)
+    state.init_collection(REF, [], 0)
+    assert not state.has_progress(REF)
+
+
+def test_state_file_without_targets_opens_and_stores_a_target(tmp_path):
+    path = tmp_path / "state" / "state.sqlite"
+    old_state_file(path, REF, 10, Partition("0-10", "0", "10"), cursor="5", copied=5)
+    state = make_state(tmp_path)
+    assert state.targets() == {}
+    assert state.pending(REF) == [(Partition("0-10", "0", "10"), "5")]
+    assert state.has_progress(REF)
+    state.set_target(REF, Target("localhost:8099", "Docs", None))
+    assert make_state(tmp_path).targets() == {
+        REF: Target("localhost:8099", "Docs", None)
+    }
 
 
 class OverlapProxy:

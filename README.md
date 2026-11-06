@@ -74,6 +74,12 @@ Creates the target collections, then copies the records. Progress goes to
 Each record that the tool cannot convert or that Weaviate refuses goes to
 `rejects.jsonl` with the reason.
 
+`state.sqlite` also records the target of each source collection: the
+Weaviate host and port, the collection and the tenant. When `WEAVIATE_URL`
+or the target in `plan.yaml` names another target, or the target collection
+no longer exists, `copy` stops with `state_mismatch`. To copy to another
+target, use another `--dir`.
+
 - `--collection NAME`: copy only this plan entry. Repeatable.
 - `--parallelism N`: reads per collection, 1 to 8. Default: 5.
 - `--consistency ONE|QUORUM|ALL`: the write consistency level.
@@ -89,7 +95,8 @@ and `report.json`.
 
 ### `status`
 
-Shows the copy progress from `state.sqlite`. It needs no credentials.
+Shows the copy progress and the recorded target of each collection from
+`state.sqlite`. It needs no credentials.
 
 ## Migration directory
 
@@ -119,7 +126,7 @@ The exit code is the same with and without `--json`:
 |---|---|---|
 | 0 | success | |
 | 1 | rejected records or a failed verification | `rejects`, `verification_failed` |
-| 2 | usage error or invalid plan | `usage`, `invalid_plan`, `plan_mismatch`, `target_rejected_schema` |
+| 2 | usage error, invalid plan, or a state of another target | `usage`, `invalid_plan`, `plan_mismatch`, `target_rejected_schema`, `state_mismatch` |
 | 3 | missing credential or authentication failure | `missing_credential`, `auth_failed` |
 | 4 | source or target unreachable | `source_unreachable`, `target_unreachable` |
 | 5 | internal error | `internal_error` |

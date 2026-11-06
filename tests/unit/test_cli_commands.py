@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fakes import (
@@ -9,9 +10,12 @@ from fakes import (
     FakeWriter,
     cli_records,
     invoke,
+    old_state_file,
 )
+from typer.testing import Result
 
 from to_weaviate.plan import load_plan, save_plan
+from to_weaviate.sources.base import Partition
 from to_weaviate.target.schema import SchemaRejected
 
 DIR = Path(".to-weaviate")
@@ -507,3 +511,262 @@ def test_status_exits_0_with_rejects():
     assert invoke(fakes, "copy").exit_code == 1
     r = invoke(fakes, "status")
     assert r.exit_code == 0 and "rejects 1" in r.stdout
+
+
+STATE_HINT = (
+    "To resume, set WEAVIATE_URL and the target name back. To copy to the new "
+    "target, use another --dir."
+)
+
+
+def retarget(directory: Path, name: str, tenant: str | None = None) -> None:
+    """Set the target name and tenant of the only plan entry."""
+    plan = load_plan(directory / "plan.yaml")
+    entry = plan.collections[0]
+    target = entry.target.model_copy(update={"name": name, "tenant": tenant})
+    entry = entry.model_copy(update={"target": target})
+    save_plan(plan.model_copy(update={"collections": [entry]}), directory / "plan.yaml")
+
+
+def mismatch(r: Result) -> dict[str, Any]:
+    """The error document of a state_mismatch run."""
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert (d["status"], d["code"], d["hint"]) == (
+        "error",
+        "state_mismatch",
+        STATE_HINT,
+    )
+    return d
+
+
+def test_copy_refuses_a_renamed_target_after_a_full_copy(tmp_path):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    assert invoke(fakes, "copy").exit_code == 0
+    writes = fakes.writer.calls
+    retarget(tmp_path / DIR, "Docs2")
+    d = mismatch(invoke(fakes, "copy", "--json"))
+    assert d["message"] == (
+        "The state in .to-weaviate holds a copy of docs to localhost:8099, "
+        "collection Docs. The plan and WEAVIATE_URL now name localhost:8099, "
+        "collection Docs2."
+    )
+    assert fakes.writer.calls == writes and fakes.schema.ensured == ["Docs"]
+    assert ("Docs2", None) not in fakes.writer.stored
+
+
+def test_copy_refuses_another_weaviate_url(tmp_path):
+    source = FakeSource(cli_records(10))
+    assert invoke(inspected(FakeFactories(source)), "copy").exit_code == 0
+    reads = source.read_calls
+    other = FakeFactories(source)
+    url = "https://admin:SENTINEL@Prod.Example.com"
+    d = mismatch(invoke(other, "copy", "--json", WEAVIATE_URL=url))
+    assert d["message"] == (
+        "The state in .to-weaviate holds a copy of docs to localhost:8099, "
+        "collection Docs. The plan and WEAVIATE_URL now name prod.example.com:443, "
+        "collection Docs."
+    )
+    assert other.writer.calls == 0 and other.schema.ensured == []
+    assert source.read_calls == reads
+    assert b"SENTINEL" not in (tmp_path / DIR / "state.sqlite").read_bytes()
+
+
+def test_copy_refuses_a_tenant_change(tmp_path):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    retarget(tmp_path / DIR, "Docs", tenant="a")
+    assert invoke(fakes, "copy").exit_code == 0
+    retarget(tmp_path / DIR, "Docs", tenant="b")
+    d = mismatch(invoke(fakes, "copy", "--json"))
+    assert "collection Docs, tenant a. The plan" in d["message"]
+    assert d["message"].endswith("collection Docs, tenant b.")
+
+
+@pytest.mark.parametrize("partial", [True, False])
+def test_copy_refuses_a_target_without_the_collection(partial):
+    source = FakeSource(cli_records(10), page_size=2)
+    writer = FakeWriter(fail_on_call=3 if partial else None)
+    fakes = inspected(FakeFactories(source, writer=writer))
+    first = invoke(fakes, "copy", "--parallelism", "1")
+    assert first.exit_code == (5 if partial else 0), first.output
+    reads = source.read_calls
+    replaced = FakeFactories(source)
+    d = mismatch(invoke(replaced, "copy", "--json"))
+    assert d["message"] == (
+        "The state in .to-weaviate holds a copy of docs to localhost:8099, "
+        "collection Docs. That collection does not exist in the target now."
+    )
+    assert replaced.writer.calls == 0 and replaced.schema.ensured == []
+    assert source.read_calls == reads
+
+
+def test_copy_refuses_a_target_without_the_tenant(tmp_path):
+    source = FakeSource(cli_records(10))
+    fakes = inspected(FakeFactories(source))
+    retarget(tmp_path / DIR, "Docs", tenant="a")
+    assert invoke(fakes, "copy").exit_code == 0
+    replaced = FakeFactories(source)
+    replaced.writer.stored[("Docs", "b")] = {}
+    d = mismatch(invoke(replaced, "copy", "--json"))
+    assert d["message"].endswith(
+        "collection Docs, tenant a. That collection or tenant does not exist in "
+        "the target now."
+    )
+    assert replaced.writer.calls == 0 and replaced.schema.ensured == []
+
+
+def test_copy_without_progress_accepts_a_target_without_the_collection():
+    source = FakeSource(cli_records(10))
+    fakes = inspected(FakeFactories(source, writer=FakeWriter(fail_on_call=1)))
+    assert invoke(fakes, "copy", "--parallelism", "1").exit_code == 5
+    replaced = FakeFactories(source)
+    r = invoke(replaced, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert len(replaced.writer.objects) == 10
+
+
+def test_copy_refuses_a_target_that_the_state_holds_for_another_source(tmp_path):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    assert invoke(fakes, "copy").exit_code == 0
+    writes = fakes.writer.calls
+    plan = load_plan(tmp_path / DIR / "plan.yaml")
+    entry = plan.collections[0]
+    source = entry.source.model_copy(update={"ref": "other", "name": "other"})
+    entries = [entry.model_copy(update={"source": source})]
+    save_plan(
+        plan.model_copy(update={"collections": entries}), tmp_path / DIR / "plan.yaml"
+    )
+    found = json.loads((tmp_path / DIR / "inspect.json").read_text())
+    found["collections"].append(
+        {**found["collections"][0], "ref": "other", "name": "other"}
+    )
+    (tmp_path / DIR / "inspect.json").write_text(json.dumps(found))
+    d = mismatch(invoke(fakes, "copy", "--json"))
+    assert d["message"] == (
+        "The state in .to-weaviate holds a copy of docs to localhost:8099, "
+        "collection Docs. The plan now copies other there."
+    )
+    assert fakes.writer.calls == writes
+
+
+def duplicate_source(directory: Path) -> None:
+    """Add a second plan entry for the source of the first, into Docs2."""
+    plan = load_plan(directory / "plan.yaml")
+    first = plan.collections[0]
+    twin = first.model_copy(
+        update={"target": first.target.model_copy(update={"name": "Docs2"})}
+    )
+    save_plan(
+        plan.model_copy(update={"collections": [first, twin]}),
+        directory / "plan.yaml",
+    )
+
+
+def test_check_refuses_two_entries_of_one_source(tmp_path):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    duplicate_source(tmp_path / DIR)
+    r = invoke(fakes, "check", "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert d["code"] == "invalid_plan"
+    assert [(e["code"], e["collection"]) for e in d["errors"]] == [
+        ("duplicate_source", "Docs"),
+        ("duplicate_source", "Docs2"),
+    ]
+
+
+@pytest.mark.parametrize("names", [[], ["--collection", "Docs2"]])
+def test_copy_refuses_two_entries_of_one_source(tmp_path, names):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    duplicate_source(tmp_path / DIR)
+    r = invoke(fakes, "copy", "--json", *names)
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert d["code"] == "invalid_plan"
+    assert {e["code"] for e in d["errors"]} == {"duplicate_source"}
+    assert fakes.schema_calls == 0 and fakes.source.read_calls == 0
+
+
+# (URL of the first run, URL of the resume, WEAVIATE_GRPC_URL, stored host)
+SAME_URLS = [
+    ("http://localhost:8099", "HTTP://LocalHost:8099", None, "localhost:8099"),
+    ("http://localhost:8099", "http://localhost:8099/", None, "localhost:8099"),
+    ("http://localhost:8099", "http://localhost.:8099", None, "localhost:8099"),
+    ("http://weaviate.test", "http://weaviate.test:80", None, "weaviate.test:80"),
+    ("https://c.weaviate.cloud", "c.weaviate.cloud", None, "c.weaviate.cloud:443"),
+    (
+        "https://c.weaviate.cloud/",
+        "https://c.weaviate.cloud:443",
+        None,
+        "c.weaviate.cloud:443",
+    ),
+    (
+        "localhost:8099",
+        "http://localhost:8099",
+        "http://localhost:50099",
+        "localhost:8099",
+    ),
+]
+
+
+@pytest.mark.parametrize(("first", "second", "grpc", "host"), SAME_URLS)
+def test_copy_resumes_with_the_same_url_in_another_form(first, second, grpc, host):
+    source = FakeSource(cli_records(10), page_size=2)
+    fakes = inspected(FakeFactories(source, writer=FakeWriter(fail_on_call=3)))
+    r = invoke(
+        fakes, "copy", "--parallelism", "1", WEAVIATE_URL=first, WEAVIATE_GRPC_URL=grpc
+    )
+    assert r.exit_code == 5, r.output
+    r = invoke(fakes, "copy", "--json", WEAVIATE_URL=second, WEAVIATE_GRPC_URL=grpc)
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["collections"][0]["copied"] == 10
+    assert len(fakes.writer.objects) == 10
+    status = json.loads(invoke(fakes, "status", "--json").stdout)
+    assert status["collections"][0]["stored_target"]["host"] == host
+
+
+def test_copy_resumes_a_state_without_targets_and_stores_the_target(tmp_path):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    old_state_file(
+        tmp_path / DIR / "state.sqlite",
+        FakeSource.REF,
+        10,
+        Partition("0-10", "0", "10"),
+        cursor="5",
+        copied=5,
+    )
+    # The earlier run created the collection in the target.
+    fakes.writer.stored[("Docs", None)] = {}
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["collections"][0]["copied"] == 10
+    written = sorted(o.properties["source_id"] for o in fakes.writer.objects.values())
+    assert written == [f"id-{i}" for i in range(5, 10)]
+    status = json.loads(invoke(fakes, "status", "--json").stdout)
+    assert status["collections"][0]["stored_target"] == {
+        "host": "localhost:8099",
+        "collection": "Docs",
+        "tenant": None,
+    }
+    retarget(tmp_path / DIR, "Docs2")
+    mismatch(invoke(fakes, "copy", "--json"))
+
+
+def test_status_prints_the_stored_target(tmp_path):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    retarget(tmp_path / DIR, "Docs", tenant="a")
+    url = "http://admin:SENTINEL@LocalHost:8099/"
+    assert invoke(fakes, "copy", WEAVIATE_URL=url).exit_code == 0
+    text = invoke(fakes, "status", WEAVIATE_URL=None, CHROMA_API_KEY=None)
+    assert text.exit_code == 0, text.output
+    assert text.stdout.splitlines()[:2] == [
+        "docs -> Docs: copied 10 of 10, rejects 0, done",
+        "  stored target: localhost:8099, collection Docs, tenant a",
+    ]
+    js = invoke(fakes, "status", "--json", WEAVIATE_URL=None, CHROMA_API_KEY=None)
+    assert json.loads(js.stdout)["collections"][0]["stored_target"] == {
+        "host": "localhost:8099",
+        "collection": "Docs",
+        "tenant": "a",
+    }
+    assert "SENTINEL" not in text.output + js.output

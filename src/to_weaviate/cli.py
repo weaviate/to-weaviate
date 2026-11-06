@@ -95,6 +95,7 @@ from to_weaviate.settings import (
     WeaviateSettings,
     chroma_settings,
     load_env,
+    normalized_host,
     weaviate_settings,
     without_userinfo,
 )
@@ -102,7 +103,7 @@ from to_weaviate.sources.base import FieldStats, Source, SourceCollection
 from to_weaviate.sources.chroma.client import ChromaClient, ChromaError
 from to_weaviate.sources.chroma.mapping import vectorizer_for
 from to_weaviate.sources.chroma.source import ChromaSource
-from to_weaviate.state import CollectionProgress, State
+from to_weaviate.state import CollectionProgress, State, Target
 from to_weaviate.target.connect import connect
 from to_weaviate.target.reader import TargetReader, WeaviateReader
 from to_weaviate.target.schema import (
@@ -152,6 +153,10 @@ DEBUG_VARIABLE = "TO_WEAVIATE_DEBUG"
 SCHEMA_HINT = (
     "A free Weaviate Cloud cluster accepts only the hfresh index. Run "
     "to-weaviate inspect chroma --index hfresh --force, or edit plan.yaml."
+)
+STATE_HINT = (
+    "To resume, set WEAVIATE_URL and the target name back. To copy to the new "
+    "target, use another --dir."
 )
 
 
@@ -638,18 +643,93 @@ def _rows(
     return rows
 
 
+def _target_text(target: Target) -> str:
+    tenant = f", tenant {target.tenant}" if target.tenant else ""
+    return f"{target.host}, collection {target.name}{tenant}"
+
+
 def _progress_output(
-    entries: list[CollectionPlan], rows: list[dict[str, Any]]
+    entries: list[CollectionPlan],
+    rows: list[dict[str, Any]],
+    targets: dict[str, Target] | None = None,
 ) -> tuple[dict[str, Any], str]:
+    """The progress document and text. `targets` adds each stored target to both."""
     total = sum(row["total"] for row in rows)
-    lines = [
-        f"{entry.source.name} -> {row['target']}: copied {row['copied']} of "
-        f"{row['total']}, rejects {row['rejects']}, "
-        f"{'done' if row['done'] else 'not done'}"
-        for entry, row in zip(entries, rows, strict=True)
-    ]
+    lines = []
+    for entry, row in zip(entries, rows, strict=True):
+        lines.append(
+            f"{entry.source.name} -> {row['target']}: copied {row['copied']} of "
+            f"{row['total']}, rejects {row['rejects']}, "
+            f"{'done' if row['done'] else 'not done'}"
+        )
+        target = (targets or {}).get(entry.source.ref)
+        if target is not None:
+            row["stored_target"] = {
+                "host": target.host,
+                "collection": target.name,
+                "tenant": target.tenant,
+            }
+            lines.append(f"  stored target: {_target_text(target)}")
     lines.append(f"Total: {total} records")
     return {"collections": rows, "total": total}, "\n".join(lines)
+
+
+def _target_host(settings: WeaviateSettings) -> str:
+    """The normalized WEAVIATE_URL host, with the scheme that `connect` assumes."""
+    return normalized_host(settings.url, "http" if settings.grpc_url else "https")
+
+
+def _state_mismatch(directory: Path, copy: str, now: str) -> CliError:
+    return CliError(
+        "state_mismatch",
+        f"The state in {directory} holds a copy of {copy}. {now}",
+        STATE_HINT,
+    )
+
+
+def _planned_targets(
+    state: State,
+    reader: TargetReader,
+    entries: list[CollectionPlan],
+    host: str,
+    source_names: dict[str, str],
+    directory: Path,
+) -> dict[str, Target]:
+    """The target of each entry by source ref, after a check against the state.
+
+    Raises state_mismatch when the state holds a copy of the entry's source to
+    another target, a copy of another source to this target, or progress of
+    the entry while its collection or tenant does not exist in the target. A
+    ref without a stored target and without progress is a first run.
+    """
+    stored = state.targets()
+    planned: dict[str, Target] = {}
+    for entry in entries:
+        ref, name = entry.source.ref, entry.source.name
+        target = Target(host, collection_key(entry.target.name), entry.target.tenant)
+        previous = stored.get(ref)
+        if previous is not None and previous != target:
+            raise _state_mismatch(
+                directory,
+                f"{name} to {_target_text(previous)}",
+                f"The plan and WEAVIATE_URL now name {_target_text(target)}.",
+            )
+        other = next((r for r, t in stored.items() if r != ref and t == target), None)
+        if other is not None:
+            raise _state_mismatch(
+                directory,
+                f"{source_names.get(other, other)} to {_target_text(target)}",
+                f"The plan now copies {name} there.",
+            )
+        if state.has_progress(ref) and not reader.exists(entry):
+            missing = "collection or tenant" if target.tenant else "collection"
+            raise _state_mismatch(
+                directory,
+                f"{name} to {_target_text(target)}",
+                f"That {missing} does not exist in the target now.",
+            )
+        planned[ref] = target
+    return planned
 
 
 def _select(entries: list[CollectionPlan], names: list[str]) -> list[CollectionPlan]:
@@ -699,12 +779,24 @@ def _copy(
     source = factories.source(source_settings)
     schema = factories.schema(target_settings)
     writer = factories.writer(target_settings, consistency)
-    for group in selected.values():
-        schema.ensure(group)
+    reader = factories.reader(target_settings)
+    source_names = {c.ref: c.name for c in inspected.values()}
+    source_names.update({e.source.ref: e.source.name for e in plan.collections})
     state = State(directory / STATE_FILE)
     try:
+        targets = _planned_targets(
+            state,
+            reader,
+            entries,
+            _target_host(target_settings),
+            source_names,
+            directory,
+        )
+        for group in selected.values():
+            schema.ensure(group)
         events = Events(directory / EVENTS_FILE)
         for entry in entries:
+            state.set_target(entry.source.ref, targets[entry.source.ref])
             info(json_output, f"Copying {entry.source.name} to {entry.target.name}")
             result = copy_collection(
                 source,
@@ -741,14 +833,16 @@ def _status(directory: Path, json_output: bool) -> None:
     plan = _load_plan(directory)
     path = directory / STATE_FILE
     progress: dict[str, CollectionProgress] = {}
+    targets: dict[str, Target] = {}
     if path.exists():
         state = State(path)
         try:
             progress = {p.ref: p for p in state.progress()}
+            targets = state.targets()
         finally:
             state.close()
     rows = _rows(plan.collections, progress)
-    document, text = _progress_output(plan.collections, rows)
+    document, text = _progress_output(plan.collections, rows, targets)
     emit(json_output, {"status": "success", **document}, text)
 
 

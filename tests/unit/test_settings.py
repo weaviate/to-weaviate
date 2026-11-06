@@ -4,6 +4,7 @@ from to_weaviate.settings import (
     MissingCredential,
     chroma_settings,
     load_env,
+    normalized_host,
     url_passwords,
     weaviate_settings,
     without_userinfo,
@@ -87,3 +88,30 @@ def test_without_userinfo(url, expected):
 )
 def test_url_passwords(url, expected):
     assert url_passwords(url) == expected
+
+
+@pytest.mark.parametrize(
+    ("url", "default_scheme", "expected"),
+    [
+        ("http://localhost:8099", "http", "localhost:8099"),
+        ("HTTP://LocalHost:8099", "http", "localhost:8099"),
+        ("http://admin:pw@localhost:8099", "http", "localhost:8099"),
+        ("http://localhost:8099/v1/schema", "http", "localhost:8099"),
+        ("http://localhost:8099/?a=1#top", "http", "localhost:8099"),
+        ("http://localhost.:8099", "http", "localhost:8099"),
+        ("http://weaviate.test", "http", "weaviate.test:80"),
+        ("http://weaviate.test:80", "http", "weaviate.test:80"),
+        ("https://c.weaviate.cloud", "http", "c.weaviate.cloud:443"),
+        ("https://C.Weaviate.Cloud.:443/", "http", "c.weaviate.cloud:443"),
+        ("localhost:8099", "http", "localhost:8099"),
+        ("user:pw@weaviate.test", "http", "weaviate.test:80"),
+        ("c.weaviate.cloud", "https", "c.weaviate.cloud:443"),
+        ("http://[::1]:8099", "http", "[::1]:8099"),
+    ],
+)
+def test_normalized_host(url, default_scheme, expected):
+    assert normalized_host(url, default_scheme) == expected
+
+
+def test_normalized_host_defaults_to_http():
+    assert normalized_host("weaviate.test") == "weaviate.test:80"
