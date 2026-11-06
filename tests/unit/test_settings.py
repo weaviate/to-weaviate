@@ -1,12 +1,14 @@
 import pytest
 
 from to_weaviate.settings import (
+    InvalidSetting,
     MissingCredential,
     chroma_settings,
     load_env,
     normalized_host,
     stored_url,
     url_passwords,
+    url_tokens,
     weaviate_settings,
     without_userinfo,
 )
@@ -131,3 +133,115 @@ def test_normalized_host(url, default_scheme, expected):
 
 def test_normalized_host_defaults_to_http():
     assert normalized_host("weaviate.test") == "weaviate.test:80"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://TOKEN@host", ["TOKEN"]),
+        ("https://to%40ken@host:8000/p", ["to%40ken", "to@ken"]),
+        ("TOKEN@host:8099", ["TOKEN"]),
+        ("http://TOKEN@[::1", ["TOKEN"]),
+        ("https://user:pw@host", []),
+        ("https://user:@host", []),
+        ("http://host:8099", []),
+        ("", []),
+    ],
+)
+def test_url_tokens(url, expected):
+    assert url_tokens(url) == expected
+
+
+def load(var, url):
+    """The settings that read `var`, loaded with `var` set to `url`."""
+    env = {"WEAVIATE_URL": "http://localhost:8099", var: url}
+    return chroma_settings(env) if var == "CHROMA_URL" else weaviate_settings(env)
+
+
+@pytest.mark.parametrize(
+    ("var", "url"),
+    [
+        *[
+            (var, f"http://admin:hunter2{char}x@localhost:{port}")
+            for var, port in (
+                ("CHROMA_URL", 8001),
+                ("WEAVIATE_URL", 8099),
+                ("WEAVIATE_GRPC_URL", 50099),
+            )
+            for char in "#?/"
+        ],
+        ("CHROMA_URL", "http://admin:1234#x@localhost:8001"),
+        ("CHROMA_URL", "http://admin:1234?x@localhost:8001"),
+        ("CHROMA_URL", "http://admin:1234/x@localhost:8001"),
+        ("CHROMA_URL", "https://chroma.example.com/#top"),
+        ("CHROMA_URL", "https://chroma.example.com#"),
+        ("CHROMA_URL", "https://chroma.example.com/a@b"),
+        ("CHROMA_URL", "https://chroma.example.com/?a=b@c"),
+        ("CHROMA_URL", "localhost:8001"),
+        ("CHROMA_URL", "ftp://localhost:8001"),
+        ("CHROMA_URL", "http://[::1"),
+        ("CHROMA_URL", "http://localhost:80a"),
+        ("CHROMA_URL", "http://localhost:99999"),
+        ("WEAVIATE_URL", "http://localhost:8099/v1"),
+        ("WEAVIATE_URL", "localhost:8099/v1/schema"),
+        ("WEAVIATE_URL", "http://localhost:8099#top"),
+        ("WEAVIATE_URL", "http://localhost:port"),
+        ("WEAVIATE_URL", "http://[::1"),
+        ("WEAVIATE_GRPC_URL", "grpcs://localhost:50099"),
+        ("WEAVIATE_GRPC_URL", "grpc://localhost:50099"),
+        ("WEAVIATE_GRPC_URL", "http://localhost:50099/grpc"),
+        ("WEAVIATE_GRPC_URL", "http://[::1:50099"),
+    ],
+)
+def test_refused_url(var, url):
+    with pytest.raises(InvalidSetting) as e:
+        load(var, url)
+    assert str(e.value) == f"{var} is not a valid URL."
+    assert e.value.hint == "Percent-encode #, ?, / and @ in a password."
+    assert e.value.__cause__ is None
+    assert e.value.__context__ is None or e.value.__suppress_context__
+
+
+@pytest.mark.parametrize(
+    ("var", "url"),
+    [
+        ("CHROMA_URL", "https://user:p%40ss@chroma.example.com/prefix?a=1"),
+        ("CHROMA_URL", "HTTP://LocalHost:8001/"),
+        ("CHROMA_URL", "https://TOKEN@chroma.example.com"),
+        ("WEAVIATE_URL", "localhost:8099"),
+        ("WEAVIATE_URL", "admin:pw@localhost:8099/"),
+        ("WEAVIATE_URL", "https://TOKEN@c.weaviate.cloud"),
+        ("WEAVIATE_URL", "http://[::1]:8099"),
+        ("WEAVIATE_GRPC_URL", "localhost:50099"),
+        ("WEAVIATE_GRPC_URL", "https://grpc-user:pw@grpc.example.com/"),
+    ],
+)
+def test_accepted_url(var, url):
+    assert load(var, url) is not None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://api.trychroma.com.",
+        "https://API.TryChroma.com",
+        "https://EU.API.TRYCHROMA.COM.:443/",
+    ],
+)
+def test_chroma_cloud_host_ignores_case_and_a_trailing_dot(url):
+    with pytest.raises(MissingCredential) as e:
+        chroma_settings({"CHROMA_URL": url})
+    assert e.value.var == "CHROMA_API_KEY"
+
+
+def test_settings_hold_the_parsed_endpoints():
+    s = weaviate_settings(
+        {
+            "WEAVIATE_URL": "admin:pw@LocalHost:8099",
+            "WEAVIATE_GRPC_URL": "https://Grpc.Example.com",
+        }
+    )
+    assert (s.http.host, s.http.port, s.http.secure) == ("localhost", 8099, False)
+    assert s.grpc is not None
+    assert (s.grpc.host, s.grpc.port, s.grpc.secure) == ("grpc.example.com", 443, True)
+    assert weaviate_settings({"WEAVIATE_URL": "https://c.weaviate.cloud"}).grpc is None

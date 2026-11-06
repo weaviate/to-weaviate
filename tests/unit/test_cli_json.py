@@ -321,7 +321,7 @@ def test_embedding_config_secrets_are_not_stored_or_sent(tmp_path):
 
 def test_source_url_query_and_fragment_are_not_stored_or_printed(tmp_path):
     fakes = FakeFactories(FakeSource(cli_records(10)))
-    url = "https://user:SENTINEL-D@chroma.example.com/?token=SENTINEL-Q#SENTINEL-F"
+    url = "https://user:SENTINEL-D@chroma.example.com/?token=SENTINEL-Q"
     runs = [
         invoke(fakes, "inspect", "chroma", CHROMA_URL=url),
         invoke(fakes, "inspect", "chroma", "--force", "--json", CHROMA_URL=url),
@@ -349,9 +349,95 @@ def test_malformed_url_variable_does_not_break_the_error_report(debug):
         WEAVIATE_API_KEY="SENTINEL-B",
         TO_WEAVIATE_DEBUG=debug,
     )
-    assert r.exit_code == 5
-    assert json.loads(r.stdout)["code"] == "internal_error"
+    assert r.exit_code == 2
+    assert json.loads(r.stdout)["code"] == "usage"
     assert "SENTINEL" not in r.stdout and "SENTINEL" not in r.stderr
+
+
+URL_HINT = "Percent-encode #, ?, / and @ in a password."
+# (variable, value, sentinel): a password with an unencoded #, ? or /, and a
+# source URL with a fragment.
+REFUSED_URLS = [
+    *[
+        (var, f"http://admin:hunter2{char}x@localhost:{port}", "hunter2")
+        for var, port in (
+            ("WEAVIATE_URL", 8099),
+            ("WEAVIATE_GRPC_URL", 50099),
+            ("CHROMA_URL", 8001),
+        )
+        for char in "#?/"
+    ],
+    (
+        "CHROMA_URL",
+        "https://user:SENTINEL-D@chroma.example.com/?token=SENTINEL-Q#SENTINEL-F",
+        "SENTINEL",
+    ),
+]
+
+
+@pytest.mark.parametrize("debug", [None, "1"])
+@pytest.mark.parametrize(("var", "url", "sentinel"), REFUSED_URLS)
+def test_refused_url_variable_is_a_usage_error_without_its_value(
+    tmp_path, var, url, sentinel, debug
+):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    cmd = ["inspect", "chroma", "--force"] if var == "CHROMA_URL" else ["check"]
+    js = invoke(fakes, *cmd, "--json", TO_WEAVIATE_DEBUG=debug, **{var: url})
+    text = invoke(fakes, *cmd, TO_WEAVIATE_DEBUG=debug, **{var: url})
+    assert js.exit_code == text.exit_code == 2, js.output
+    d = json.loads(js.stdout)
+    assert (d["code"], d["message"], d["hint"]) == (
+        "usage",
+        f"{var} is not a valid URL.",
+        URL_HINT,
+    )
+    assert f"Error: {var} is not a valid URL." in text.stderr
+    for r in (js, text):
+        assert sentinel not in r.stdout and sentinel not in r.stderr
+    for f in tmp_path.rglob("*"):
+        if f.is_file():
+            assert sentinel.encode() not in f.read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("cmd", "var", "error"),
+    [
+        (
+            ["check"],
+            "WEAVIATE_URL",
+            WeaviateConnectionError(
+                "no answer from https://MADE-UP-TOKEN@weaviate.test"
+            ),
+        ),
+        (
+            ["inspect", "chroma", "--force"],
+            "CHROMA_URL",
+            ChromaError(None, "ConnectError: https://MADE-UP-TOKEN@chroma.example.com"),
+        ),
+    ],
+)
+def test_url_userinfo_without_a_colon_is_not_printed(cmd, var, error):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    fakes.source_error = fakes.target_error = error
+    host = "weaviate.test" if var == "WEAVIATE_URL" else "chroma.example.com"
+    r = invoke(fakes, *cmd, "--json", **{var: f"https://MADE-UP-TOKEN@{host}"})
+    assert r.exit_code == 4, r.output
+    assert "MADE-UP-TOKEN" not in r.output and "***" in r.output
+
+
+@pytest.mark.parametrize(
+    "url", ["https://api.trychroma.com.", "https://API.TryChroma.com."]
+)
+def test_chroma_cloud_url_with_a_trailing_dot_needs_the_key(url):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    r = invoke(
+        fakes, "inspect", "chroma", "--json", CHROMA_URL=url, CHROMA_API_KEY=None
+    )
+    assert r.exit_code == 3, r.output
+    d = json.loads(r.stdout)
+    assert d["code"] == "missing_credential" and "CHROMA_API_KEY" in d["hint"]
 
 
 def test_status_ignores_a_malformed_weaviate_url():

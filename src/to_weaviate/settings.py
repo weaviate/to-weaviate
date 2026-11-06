@@ -2,7 +2,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import SplitResult, unquote, urlparse, urlsplit, urlunsplit
+from urllib.parse import SplitResult, unquote, urlsplit, urlunsplit
 
 from dotenv import dotenv_values
 
@@ -48,6 +48,20 @@ API_KEY_MAP = {
 
 
 URL_VARIABLES = ("CHROMA_URL", "WEAVIATE_URL", "WEAVIATE_GRPC_URL")
+URL_HINT = "Percent-encode #, ?, / and @ in a password."
+HTTP_SCHEMES = frozenset({"http", "https"})
+
+
+class InvalidSetting(Exception):
+    """A variable holds a value that the tool refuses.
+
+    The message names the variable and never holds the value. `hint` says
+    how to fix it.
+    """
+
+    def __init__(self, message: str, hint: str) -> None:
+        super().__init__(message)
+        self.hint = hint
 
 
 def _split(url: str) -> tuple[SplitResult, str]:
@@ -95,26 +109,97 @@ def stored_url(url: str) -> str:
     return bare[: min(ends)] if ends else bare
 
 
+@dataclass(frozen=True)
+class Endpoint:
+    """A host, a port and whether TLS is used.
+
+    `host` is in lower case, without userinfo. An IPv6 host has no brackets.
+    """
+
+    host: str
+    port: int
+    secure: bool
+
+    @property
+    def normalized(self) -> str:
+        """`host:port`, equal for two ways to write one server.
+
+        The host has no trailing dot. An IPv6 host is in brackets.
+        """
+        host = self.host.removesuffix(".")
+        if ":" in host:
+            host = f"[{host}]"
+        return f"{host}:{self.port}"
+
+
+def _endpoint(parts: SplitResult, default_scheme: str) -> Endpoint:
+    """The endpoint of `parts`; a URL without a scheme gets `default_scheme`.
+
+    A URL without a port gets 443 for https and 80 for any other scheme.
+    """
+    secure = (parts.scheme or default_scheme) == "https"
+    return Endpoint(parts.hostname or "", parts.port or (443 if secure else 80), secure)
+
+
 def normalized_host(url: str, default_scheme: str = "http") -> str:
     """The `host:port` of `url`, equal for two ways to write one server.
 
-    The host is in lower case, without userinfo and without a trailing dot. An
-    IPv6 host is in brackets. The path, query and fragment are dropped. A URL
-    without a port gets 443 for https and 80 for any other scheme, as
-    `target.connect` does. A URL without a scheme gets `default_scheme`. For
-    WEAVIATE_URL that is http when WEAVIATE_GRPC_URL is set, because `connect`
-    adds http://, and https when it is not, because `connect` then connects
-    to Weaviate Cloud over https on port 443.
+    See `Endpoint.normalized`. The userinfo, path, query and fragment are
+    dropped. A URL without a port gets 443 for https and 80 for any other
+    scheme. A URL without a scheme gets `default_scheme`.
 
     Raises ValueError when `url` cannot be split or its port is not a number.
     """
-    parts, _ = _split(url)
-    scheme = parts.scheme or default_scheme
-    host = (parts.hostname or "").removesuffix(".")
-    if ":" in host:
-        host = f"[{host}]"
-    port = parts.port or (443 if scheme == "https" else 80)
-    return f"{host}:{port}"
+    return _endpoint(_split(url)[0], default_scheme).normalized
+
+
+def _parsed_url(
+    var: str, url: str, schemes: frozenset[str] | None, any_path: bool
+) -> SplitResult:
+    """`url` split, or InvalidSetting when the tool refuses it.
+
+    Refused for every variable: a value that cannot be split, a port that is
+    not a number, a fragment, and an `@` in the path or the query. An
+    unencoded `#`, `?` or `/` in a password gives these shapes. `schemes` are
+    the accepted schemes, with "" for none; None accepts any scheme. Without
+    `any_path`, the path is empty or `/`.
+    """
+    message = f"{var} is not a valid URL."
+    try:
+        parts, _ = _split(url)
+        parts.port  # noqa: B018 - raises ValueError for a port that is not a number
+    except ValueError:
+        # The ValueError can quote the port text, which can be a password.
+        raise InvalidSetting(message, URL_HINT) from None
+    if (
+        "#" in url
+        or "@" in parts.path + parts.query
+        or (schemes is not None and parts.scheme not in schemes)
+        or (not any_path and parts.path not in ("", "/"))
+    ):
+        raise InvalidSetting(message, URL_HINT)
+    return parts
+
+
+def _userinfo(url: str) -> str | None:
+    """The userinfo of `url`, or None. Never raises."""
+    try:
+        netloc = _split(url)[0].netloc
+    except ValueError:
+        return _plain_userinfo(url)[0]
+    return netloc.rpartition("@")[0] if "@" in netloc else None
+
+
+def url_tokens(url: str) -> list[str]:
+    """The userinfo of `url` when it has no colon, as written and decoded.
+
+    A userinfo without a colon, as in `https://TOKEN@host`, is a token.
+    Never raises.
+    """
+    userinfo = _userinfo(url)
+    if not userinfo or ":" in userinfo:
+        return []
+    return list(dict.fromkeys([userinfo, unquote(userinfo)]))
 
 
 def url_passwords(url: str) -> list[str]:
@@ -138,19 +223,51 @@ class MissingCredential(Exception):
 
 @dataclass(frozen=True)
 class ChromaSettings:
+    """Raises InvalidSetting when `url` is refused. CHROMA_URL needs http or https.
+
+    `host` is the host of `url` in lower case, without a trailing dot.
+    """
+
     url: str
     api_key: str | None = field(repr=False)
     tenant: str | None
     database: str | None
     token_header: str
+    host: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        parts = _parsed_url("CHROMA_URL", self.url, HTTP_SCHEMES, any_path=True)
+        object.__setattr__(self, "host", (parts.hostname or "").removesuffix("."))
 
 
 @dataclass(frozen=True)
 class WeaviateSettings:
+    """Raises InvalidSetting when `url` or `grpc_url` is refused.
+
+    Both have no path other than `/`. A `grpc_url` scheme is http or https.
+    `http` is the endpoint of `url` and `grpc` the endpoint of `grpc_url`; a
+    URL without a scheme is http. Without `grpc_url`, `target.connect`
+    connects to Weaviate Cloud, and `http` gets https as the default scheme.
+    """
+
     url: str
     api_key: str | None = field(repr=False)
     grpc_url: str | None
     headers: dict[str, str] = field(repr=False)
+    http: Endpoint = field(init=False)
+    grpc: Endpoint | None = field(init=False)
+
+    def __post_init__(self) -> None:
+        http = _parsed_url("WEAVIATE_URL", self.url, None, any_path=False)
+        grpc = None
+        if self.grpc_url:
+            parts = _parsed_url(
+                "WEAVIATE_GRPC_URL", self.grpc_url, HTTP_SCHEMES | {""}, any_path=False
+            )
+            grpc = _endpoint(parts, "http")
+        default_scheme = "http" if grpc is not None else "https"
+        object.__setattr__(self, "http", _endpoint(http, default_scheme))
+        object.__setattr__(self, "grpc", grpc)
 
 
 def load_env(cwd: Path) -> dict[str, str]:
@@ -165,23 +282,21 @@ def _get(env: Mapping[str, str], name: str) -> str | None:
     return value or None
 
 
-def _is_chroma_cloud(url: str) -> bool:
-    host = urlparse(url).hostname or ""
+def _is_chroma_cloud(host: str) -> bool:
     return host == CHROMA_CLOUD_DOMAIN or host.endswith("." + CHROMA_CLOUD_DOMAIN)
 
 
 def chroma_settings(env: Mapping[str, str]) -> ChromaSettings:
-    url = _get(env, "CHROMA_URL") or DEFAULT_CHROMA_URL
-    api_key = _get(env, "CHROMA_API_KEY")
-    if api_key is None and _is_chroma_cloud(url):
-        raise MissingCredential("CHROMA_API_KEY")
-    return ChromaSettings(
-        url=url,
-        api_key=api_key,
+    settings = ChromaSettings(
+        url=_get(env, "CHROMA_URL") or DEFAULT_CHROMA_URL,
+        api_key=_get(env, "CHROMA_API_KEY"),
         tenant=_get(env, "CHROMA_TENANT"),
         database=_get(env, "CHROMA_DATABASE"),
         token_header=_get(env, "CHROMA_TOKEN_HEADER") or DEFAULT_TOKEN_HEADER,
     )
+    if settings.api_key is None and _is_chroma_cloud(settings.host):
+        raise MissingCredential("CHROMA_API_KEY")
+    return settings
 
 
 def weaviate_settings(env: Mapping[str, str]) -> WeaviateSettings:

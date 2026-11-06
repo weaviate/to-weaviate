@@ -69,3 +69,13 @@ def test_secret_values_include_url_passwords():
     values = secret_values(env)
     assert {"p%40ss", "p@ss", "wpass", "gpass"} <= set(values)
     assert not {"user", "admin", "grpc-user"} & set(values)
+
+
+def test_secret_values_include_userinfo_without_a_colon():
+    env = {
+        "CHROMA_URL": "https://ch%40token@chroma.example.com",
+        "WEAVIATE_URL": "https://W-TOKEN@c.weaviate.cloud",
+        "WEAVIATE_GRPC_URL": "G-TOKEN@localhost:50099",
+    }
+    values = secret_values(env)
+    assert {"ch%40token", "ch@token", "W-TOKEN", "G-TOKEN"} <= set(values)

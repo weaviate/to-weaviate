@@ -92,11 +92,11 @@ from to_weaviate.plan import (
 )
 from to_weaviate.settings import (
     ChromaSettings,
+    InvalidSetting,
     MissingCredential,
     WeaviateSettings,
     chroma_settings,
     load_env,
-    normalized_host,
     stored_url,
     weaviate_settings,
     without_userinfo,
@@ -220,6 +220,8 @@ def _as_cli_error(exc: Exception) -> CliError:
             str(exc),
             f"Set {exc.var} in the environment or in .env.",
         )
+    if isinstance(exc, InvalidSetting):
+        return CliError("usage", str(exc), exc.hint)
     if isinstance(exc, ChromaError):
         if exc.status in (401, 403):
             return _refused("Chroma", "CHROMA_API_KEY", exc.status == 403)
@@ -714,8 +716,8 @@ def _progress_output(
 
 
 def _target_host(settings: WeaviateSettings) -> str:
-    """The normalized WEAVIATE_URL host, with the scheme that `connect` assumes."""
-    return normalized_host(settings.url, "http" if settings.grpc_url else "https")
+    """The normalized host and port of the WEAVIATE_URL endpoint."""
+    return settings.http.normalized
 
 
 def _state_mismatch(directory: Path, copy: str, now: str) -> CliError:
