@@ -1,4 +1,3 @@
-import fcntl
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -826,12 +825,14 @@ LOCK_HINT = "Wait for it to end, or use another --dir."
 @contextmanager
 def held_lock(directory: Path) -> Iterator[None]:
     """Hold the copy lock of `directory` the way a running copy holds it."""
+    fcntl = pytest.importorskip("fcntl")
     with (directory / "copy.lock").open("a") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         yield
 
 
 def test_copy_refuses_a_directory_that_another_copy_holds(tmp_path):
+    pytest.importorskip("fcntl")
     source = FakeSource(cli_records(10), page_size=2)
     fakes = inspected(FakeFactories(source, writer=FakeWriter(fail_on_call=3)))
     assert invoke(fakes, "copy", "--parallelism", "1").exit_code == 5
@@ -851,6 +852,7 @@ def test_copy_refuses_a_directory_that_another_copy_holds(tmp_path):
 
 
 def test_status_and_verify_run_while_a_copy_holds_the_directory(tmp_path):
+    pytest.importorskip("fcntl")
     fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
     assert invoke(fakes, "copy").exit_code == 0
     with held_lock(tmp_path / DIR):

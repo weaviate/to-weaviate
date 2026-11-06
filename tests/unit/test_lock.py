@@ -31,6 +31,7 @@ with exclusive_lock(path), exclusive_lock(path):
 
 
 def test_a_second_lock_is_refused_until_the_first_ends(tmp_path):
+    pytest.importorskip("fcntl")
     path = tmp_path / "copy.lock"
     with exclusive_lock(path):
         with pytest.raises(Locked), exclusive_lock(path):
@@ -48,6 +49,7 @@ def test_an_existing_unlocked_file_does_not_block(tmp_path):
 
 
 def test_a_killed_holder_leaves_no_lock(tmp_path):
+    pytest.importorskip("fcntl")
     path = tmp_path / "copy.lock"
     with subprocess.Popen(
         [sys.executable, "-c", HOLDER, str(path)], stdout=subprocess.PIPE, text=True
