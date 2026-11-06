@@ -2,7 +2,7 @@ import math
 import random
 from collections import Counter
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, ClassVar
 
 from to_weaviate.sources.base import (
     FieldStats,
@@ -57,8 +57,10 @@ def _records(response: dict[str, Any]) -> list[Record]:
 
 
 class ChromaSource:
-    name = "chroma"
-    capabilities = frozenset({"vectors", "vector_search", "filter"})
+    name: ClassVar[str] = "chroma"
+    capabilities: ClassVar[frozenset[str]] = frozenset(
+        {"vectors", "vector_search", "filter"}
+    )
 
     def __init__(self, client: ChromaClient, tenant: str) -> None:
         self._client = client

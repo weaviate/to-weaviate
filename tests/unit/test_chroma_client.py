@@ -245,3 +245,25 @@ def test_collections_reads_all_pages():
     assert [r.url.params["limit"] for r in seen] == ["1000", "1000"]
     assert [r.url.params["offset"] for r in seen] == ["0", "1000"]
     assert seen[0].url.path == "/api/v2/tenants/t/databases/d/collections"
+
+
+def test_close_closes_the_http_client():
+    client, _ = make(lambda request: httpx.Response(200, json=1))
+    client.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        client.count("t", "d", "c")
+
+
+def test_transport_errors_after_the_retries_raise_chroma_error():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        raise httpx.ConnectError("down")
+
+    client, sleeps = make(handler)
+    with pytest.raises(ChromaError) as e:
+        client.identity()
+    assert e.value.status is None and isinstance(e.value.__cause__, httpx.ConnectError)
+    assert str(e.value) == "ConnectError: down"
+    assert len(calls) == 6 and len(sleeps) == 5

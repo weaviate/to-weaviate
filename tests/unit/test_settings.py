@@ -4,7 +4,9 @@ from to_weaviate.settings import (
     MissingCredential,
     chroma_settings,
     load_env,
+    url_passwords,
     weaviate_settings,
+    without_userinfo,
 )
 
 
@@ -51,3 +53,37 @@ def test_environ_wins_over_dotenv(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text("WEAVIATE_URL=from-file\n")
     monkeypatch.setenv("WEAVIATE_URL", "from-env")
     assert load_env(tmp_path)["WEAVIATE_URL"] == "from-env"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://user:pw@host:8000/path?q=1", "https://host:8000/path?q=1"),
+        ("https://user@host", "https://host"),
+        ("user:pw@host:8099", "host:8099"),
+        ("http://host:8099", "http://host:8099"),
+        ("host:8099", "host:8099"),
+        ("http://[::1", "http://[::1"),
+        ("user:pw@[::1:50051", "[::1:50051"),
+        ("http://user:p%40ss@[::1", "http://[::1"),
+        ("http://user:pw@[::1/path@x", "http://[::1/path@x"),
+    ],
+)
+def test_without_userinfo(url, expected):
+    assert without_userinfo(url) == expected
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://user:pw@host:8000", ["pw"]),
+        ("https://user@host", []),
+        ("http://host:8099", []),
+        ("http://[::1", []),
+        ("user:pw@[::1:50051", ["pw"]),
+        ("http://user:p%40ss@[::1", ["p%40ss", "p@ss"]),
+        ("http://user@[::1", []),
+    ],
+)
+def test_url_passwords(url, expected):
+    assert url_passwords(url) == expected
