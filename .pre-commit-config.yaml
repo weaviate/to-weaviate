@@ -10,4 +10,4 @@ repos:
     hooks:
       - id: mypy
         files: ^src/
-        additional_dependencies: [typer, pydantic>=2, types-PyYAML, httpx, python-dotenv]
+        additional_dependencies: [typer, pydantic>=2, types-PyYAML, httpx, python-dotenv, weaviate-client]
