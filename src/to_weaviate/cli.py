@@ -1,8 +1,601 @@
+import atexit
+import dataclasses
+import json
+import sys
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Annotated, Any, Literal
+
+import httpx
 import typer
+import weaviate
+import yaml
+from pydantic import ValidationError
+from weaviate.exceptions import (
+    AuthenticationFailedError,
+    InsufficientPermissionsError,
+    UnexpectedStatusCodeError,
+    WeaviateConnectionError,
+    WeaviateGRPCUnavailableError,
+    WeaviateStartUpError,
+    WeaviateTimeoutError,
+)
 
 from to_weaviate import __version__
+from to_weaviate.engine.check import (
+    Decision,
+    Finding,
+    decisions,
+    module_findings,
+    plan_findings,
+    provider_keys,
+    target_groups,
+    vectorizer_findings,
+)
+from to_weaviate.engine.copy import copy_collection
+from to_weaviate.events import Events
+from to_weaviate.output import CliError, emit, info
+from to_weaviate.plan import (
+    CollectionPlan,
+    IndexPlan,
+    Plan,
+    SourcePlan,
+    VectorizerPlan,
+    draft_plan,
+    load_plan,
+    save_plan,
+)
+from to_weaviate.settings import (
+    ChromaSettings,
+    MissingCredential,
+    WeaviateSettings,
+    chroma_settings,
+    load_env,
+    weaviate_settings,
+)
+from to_weaviate.sources.base import FieldStats, Source, SourceCollection
+from to_weaviate.sources.chroma.client import ChromaClient, ChromaError
+from to_weaviate.sources.chroma.mapping import vectorizer_for
+from to_weaviate.sources.chroma.source import ChromaSource
+from to_weaviate.state import CollectionProgress, State
+from to_weaviate.target.connect import connect
+from to_weaviate.target.schema import (
+    PlanMismatch,
+    Schema,
+    SchemaRejected,
+    WeaviateSchema,
+)
+from to_weaviate.target.writer import WeaviateWriter, Writer
 
-app = typer.Typer(help="Migrate your data to Weaviate from other vector databases.")
+SourceFactory = Callable[[ChromaSettings], Source]
+WriterFactory = Callable[[WeaviateSettings, str | None], Writer]
+ReaderFactory = Callable[[WeaviateSettings], Any]
+SchemaFactory = Callable[[WeaviateSettings], Schema]
+
+VectorsMode = Literal["keep", "embed", "both"]
+IndexType = Literal["default", "hnsw", "flat", "dynamic", "hfresh"]
+QuantizerType = Literal["default", "none", "rq", "sq", "pq", "bq"]
+Consistency = Literal["ONE", "QUORUM", "ALL"]
+
+DEFAULT_DIR = Path(".to-weaviate")
+INSPECT_FILE = "inspect.json"
+PLAN_FILE = "plan.yaml"
+STATE_FILE = "state.sqlite"
+EVENTS_FILE = "events.jsonl"
+REJECTS_FILE = "rejects.jsonl"
+DEFAULT_PARALLELISM = 5
+MAX_PARALLELISM = 8
+MAX_MESSAGE_CHARS = 500
+
+INSPECT_HINT = "Run to-weaviate inspect chroma to create it."
+REINSPECT_HINT = "Run to-weaviate inspect chroma --force to inspect again."
+EDIT_PLAN_HINT = (
+    "Edit plan.yaml, or run to-weaviate inspect chroma --force to draft it again."
+)
+CHROMA_HINT = "Check CHROMA_URL and that the Chroma server is running."
+WEAVIATE_HINT = (
+    "Check WEAVIATE_URL, WEAVIATE_GRPC_URL and that the Weaviate server is running."
+)
+SCHEMA_HINT = (
+    "A free Weaviate Cloud cluster accepts only the hfresh index. Run "
+    "to-weaviate inspect chroma --index hfresh --force, or edit plan.yaml."
+)
+
+
+@dataclass(frozen=True)
+class _Factories:
+    source: SourceFactory
+    writer: WriterFactory
+    reader: ReaderFactory
+    schema: SchemaFactory
+
+
+def _short(text: str) -> str:
+    """One line of at most MAX_MESSAGE_CHARS characters."""
+    line = " ".join(text.split())
+    if len(line) <= MAX_MESSAGE_CHARS:
+        return line
+    return line[: MAX_MESSAGE_CHARS - 3] + "..."
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+def _validation_text(exc: ValidationError) -> str:
+    parts = []
+    for error in exc.errors():
+        loc = ".".join(str(part) for part in error["loc"])
+        parts.append(f"{loc}: {error['msg']}" if loc else error["msg"])
+    return "; ".join(parts)
+
+
+def _refused(service: str, key: str, forbidden: bool) -> CliError:
+    reason = (
+        "the API key lacks a permission"
+        if forbidden
+        else "the API key is missing or wrong"
+    )
+    return CliError(
+        "auth_failed",
+        f"{service} refused the request: {reason}.",
+        f"Check {key} in the environment or in .env.",
+    )
+
+
+def _as_cli_error(exc: Exception) -> CliError | None:
+    """The CliError for a known failure, or None to let `exc` propagate.
+
+    Authentication messages do not repeat the server's text, because a server
+    can echo the credential it refused.
+    """
+    if isinstance(exc, CliError):
+        return exc
+    if isinstance(exc, MissingCredential):
+        return CliError(
+            "missing_credential",
+            str(exc),
+            f"Set {exc.var} in the environment or in .env.",
+        )
+    if isinstance(exc, ChromaError):
+        if exc.status in (401, 403):
+            return _refused("Chroma", "CHROMA_API_KEY", exc.status == 403)
+        return CliError("source_unreachable", _short(str(exc)), CHROMA_HINT)
+    if isinstance(exc, httpx.TransportError):
+        return CliError(
+            "source_unreachable",
+            _short(f"Chroma could not be reached: {exc}"),
+            CHROMA_HINT,
+        )
+    if isinstance(exc, AuthenticationFailedError):
+        return _refused("Weaviate", "WEAVIATE_API_KEY", False)
+    if isinstance(exc, InsufficientPermissionsError):
+        return _refused("Weaviate", "WEAVIATE_API_KEY", True)
+    if isinstance(exc, UnexpectedStatusCodeError) and exc.status_code in (401, 403):
+        return _refused("Weaviate", "WEAVIATE_API_KEY", exc.status_code == 403)
+    if isinstance(
+        exc,
+        WeaviateConnectionError
+        | WeaviateStartUpError
+        | WeaviateTimeoutError
+        | WeaviateGRPCUnavailableError,
+    ):
+        return CliError(
+            "target_unreachable",
+            _short(f"Weaviate could not be reached: {exc}"),
+            WEAVIATE_HINT,
+        )
+    if isinstance(exc, SchemaRejected):
+        return CliError(
+            "target_rejected_schema",
+            _short(f"Weaviate refused to create the collection: {exc}"),
+            SCHEMA_HINT,
+        )
+    if isinstance(exc, PlanMismatch):
+        return CliError(
+            "plan_mismatch",
+            _short(str(exc)),
+            "The target collection exists with other settings. Edit plan.yaml "
+            "to match it, or choose another target name.",
+        )
+    return None
+
+
+@contextmanager
+def _handled(json_output: bool) -> Iterator[None]:
+    """Report a known failure as text or as a JSON document, then exit."""
+    try:
+        yield
+    except Exception as exc:
+        error = _as_cli_error(exc)
+        if error is None:
+            raise
+        emit(json_output, error.document(), error.text)
+        if not json_output:
+            print(f"Error: {error.message}", file=sys.stderr)
+            print(f"Hint: {error.hint}", file=sys.stderr)
+        raise typer.Exit(error.exit_code) from None
+
+
+def _load_plan(directory: Path) -> Plan:
+    path = directory / PLAN_FILE
+    if not path.exists():
+        raise CliError("usage", f"{path} does not exist.", INSPECT_HINT)
+    try:
+        return load_plan(path)
+    except (ValidationError, yaml.YAMLError) as exc:
+        detail = _validation_text(exc) if isinstance(exc, ValidationError) else str(exc)
+        raise CliError(
+            "invalid_plan",
+            _short(f"{path} is not a valid plan: {detail}"),
+            EDIT_PLAN_HINT,
+        ) from exc
+
+
+def _source_collection(raw: dict[str, Any]) -> SourceCollection:
+    fields = [FieldStats(**f) for f in raw["fields"]]
+    return SourceCollection(**{**raw, "fields": fields})
+
+
+def _load_inspected(directory: Path) -> dict[str, SourceCollection] | None:
+    """Inspected collections by ref, or None when the file is missing."""
+    path = directory / INSPECT_FILE
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text())
+        collections = [_source_collection(c) for c in raw["collections"]]
+    except (ValueError, KeyError, TypeError) as exc:
+        raise CliError(
+            "usage", _short(f"{path} cannot be read: {exc}"), REINSPECT_HINT
+        ) from exc
+    return {c.ref: c for c in collections}
+
+
+def _option_value(text: str) -> Any:
+    if text.isascii() and text.isdigit():
+        return int(text)
+    if text in ("true", "false"):
+        return text == "true"
+    return text
+
+
+def _vectorizer_plan(module: str | None, options: list[str]) -> VectorizerPlan | None:
+    parsed: dict[str, Any] = {}
+    for option in options:
+        key, sep, value = option.partition("=")
+        if not sep or not key:
+            raise CliError(
+                "usage",
+                f"--vectorizer-option {option} is not KEY=VALUE.",
+                "Write each option as --vectorizer-option KEY=VALUE.",
+            )
+        parsed[key] = _option_value(value)
+    if module is None:
+        if parsed:
+            raise CliError(
+                "usage",
+                "--vectorizer-option needs --vectorizer.",
+                "Name the module, for example --vectorizer text2vec-openai.",
+            )
+        return None
+    return VectorizerPlan(module=module, options=parsed)
+
+
+def _index_plan(
+    index: IndexType, quantizer: QuantizerType, bits: int | None
+) -> IndexPlan:
+    if bits is not None and quantizer != "rq":
+        raise CliError(
+            "usage",
+            f"--quantizer-bits applies only to --quantizer rq, not {quantizer}.",
+            "Remove --quantizer-bits, or use --quantizer rq.",
+        )
+    try:
+        return IndexPlan.model_validate(
+            {"type": index, "quantizer": {"type": quantizer, "bits": bits}}
+        )
+    except ValidationError as exc:
+        raise CliError(
+            "usage",
+            _short(f"--index {index} --quantizer {quantizer}: {_validation_text(exc)}"),
+            "A quantizer needs a named --index; --quantizer-bits takes 1, 4 or 8.",
+        ) from exc
+
+
+def _vectors_text(entry: CollectionPlan) -> str:
+    parts = []
+    for v in entry.target.vectors:
+        module = v.vectorizer.module if v.vectorizer else "no vectorizer"
+        parts.append(f"{v.name} ({v.mode}, {module})")
+    return ", ".join(parts)
+
+
+def _inspect_chroma(
+    factories: _Factories,
+    directory: Path,
+    databases: list[str],
+    names: list[str],
+    sample_pages: int | None,
+    vectors: VectorsMode,
+    vectorizer: str | None,
+    vectorizer_options: list[str],
+    index: IndexType,
+    quantizer: QuantizerType,
+    quantizer_bits: int | None,
+    force: bool,
+    json_output: bool,
+) -> None:
+    plan_path = directory / PLAN_FILE
+    if plan_path.exists() and not force:
+        raise CliError(
+            "usage",
+            f"{plan_path} exists.",
+            "Run the command again with --force to replace it.",
+        )
+    vectorizer_plan = _vectorizer_plan(vectorizer, vectorizer_options)
+    index_plan = _index_plan(index, quantizer, quantizer_bits)
+    settings = chroma_settings(load_env(Path.cwd()))
+    source = factories.source(settings)
+    info(json_output, f"Inspecting Chroma at {settings.url}")
+    collections = source.inspect(databases or None, names or None, sample_pages)
+    missing = sorted(set(names) - {c.name for c in collections})
+    if missing:
+        raise CliError(
+            "usage",
+            f"Chroma has no collection named {', '.join(missing)}.",
+            "Check the --collection names, and --database for another database.",
+        )
+    try:
+        plan = draft_plan(
+            SourcePlan(type="chroma", url=settings.url, tenant=settings.tenant),
+            collections,
+            vectors,
+            vectorizer_plan,
+            index=index_plan,
+            vectorizer_for=vectorizer_for,
+        )
+    except ValidationError as exc:
+        raise CliError(
+            "usage", _short(_validation_text(exc)), "Change --index or --quantizer."
+        ) from exc
+    directory.mkdir(parents=True, exist_ok=True)
+    inspect_document = {"collections": [dataclasses.asdict(c) for c in collections]}
+    (directory / INSPECT_FILE).write_text(json.dumps(inspect_document, indent=2))
+    save_plan(plan, plan_path)
+
+    found = decisions(plan, {c.ref: c for c in collections})
+    document, text = _inspect_output(plan, found, plan_path)
+    emit(json_output, document, text)
+
+
+def _inspect_output(
+    plan: Plan, found: list[Decision], plan_path: Path
+) -> tuple[dict[str, Any], str]:
+    rows = [
+        {
+            "ref": e.source.ref,
+            "source": e.source.name,
+            "target": e.target.name,
+            "count": e.source.count,
+            "dimension": e.source.dimension,
+            "distance": e.source.distance,
+            "vectors": [
+                {
+                    "name": v.name,
+                    "mode": v.mode,
+                    "vectorizer": v.vectorizer.module if v.vectorizer else None,
+                }
+                for v in e.target.vectors
+            ],
+            "notes": e.notes,
+        }
+        for e in plan.collections
+    ]
+    lines: list[str] = []
+    for e in plan.collections:
+        lines.append(f"{e.source.name} -> {e.target.name}")
+        lines.append(f"  count: {e.source.count}")
+        lines.append(f"  dimension: {e.source.dimension}")
+        lines.append(f"  distance: {e.source.distance}")
+        lines.append(f"  vectors: {_vectors_text(e)}")
+        lines.extend(f"  note: {note}" for note in e.notes)
+    if found:
+        lines.append("Decisions:")
+        lines.extend(f"  {d.collection} ({d.kind}): {d.detail}" for d in found)
+    lines.append(f"Review {plan_path}, then run to-weaviate check.")
+    document = {
+        "status": "success",
+        "plan": str(plan_path),
+        "collections": rows,
+        "total": sum(e.source.count for e in plan.collections),
+        "decisions": [dataclasses.asdict(d) for d in found],
+    }
+    return document, "\n".join(lines)
+
+
+def _findings_text(errors: list[Finding], warnings: list[Finding]) -> list[str]:
+    return [
+        f"{kind} {f.code} {f.collection}: {f.message}"
+        for kind, items in (("error", errors), ("warning", warnings))
+        for f in items
+    ]
+
+
+def _check(factories: _Factories, directory: Path, json_output: bool) -> None:
+    plan = _load_plan(directory)
+    inspected = _load_inspected(directory)
+    errors, warnings = plan_findings(plan, inspected, vectorizer_for)
+    settings = weaviate_settings(load_env(Path.cwd()))
+    for header, variable in provider_keys(plan):
+        if header not in settings.headers:
+            raise MissingCredential(variable)
+    info(json_output, f"Checking the target at {settings.url}")
+    schema = factories.schema(settings)
+    errors.extend(module_findings(plan, schema.modules()))
+    for name, group in target_groups(plan.collections).items():
+        for difference in schema.differences(group) or []:
+            errors.append(Finding("plan_mismatch", name, difference))
+    document: dict[str, Any] = {
+        "errors": [dataclasses.asdict(f) for f in errors],
+        "warnings": [dataclasses.asdict(f) for f in warnings],
+    }
+    lines = _findings_text(errors, warnings)
+    if errors:
+        raise CliError(
+            "invalid_plan",
+            f"The plan has {_plural(len(errors), 'error')}.",
+            EDIT_PLAN_HINT,
+            fields=document,
+            text="\n".join(lines),
+        )
+    lines.append(f"No errors, {_plural(len(warnings), 'warning')}.")
+    emit(json_output, {"status": "success", **document}, "\n".join(lines))
+
+
+def _rows(
+    entries: list[CollectionPlan], progress: dict[str, CollectionProgress]
+) -> list[dict[str, Any]]:
+    rows = []
+    for entry in entries:
+        p = progress.get(entry.source.ref)
+        rows.append(
+            {
+                "ref": entry.source.ref,
+                "target": entry.target.name,
+                "total": p.total if p else entry.source.count,
+                "copied": p.copied if p else 0,
+                "rejects": p.rejects if p else 0,
+                "done": p.done if p else False,
+            }
+        )
+    return rows
+
+
+def _progress_output(
+    entries: list[CollectionPlan], rows: list[dict[str, Any]]
+) -> tuple[dict[str, Any], str]:
+    total = sum(row["total"] for row in rows)
+    lines = [
+        f"{entry.source.name} -> {row['target']}: copied {row['copied']} of "
+        f"{row['total']}, rejects {row['rejects']}, "
+        f"{'done' if row['done'] else 'not done'}"
+        for entry, row in zip(entries, rows, strict=True)
+    ]
+    lines.append(f"Total: {total} records")
+    return {"collections": rows, "total": total}, "\n".join(lines)
+
+
+def _select(entries: list[CollectionPlan], names: list[str]) -> list[CollectionPlan]:
+    if not names:
+        return entries
+    known = {n for e in entries for n in (e.source.name, e.target.name)}
+    unknown = [n for n in names if n not in known]
+    if unknown:
+        raise CliError(
+            "usage",
+            f"--collection {', '.join(unknown)} matches no plan entry.",
+            "Use a source or target collection name from plan.yaml.",
+        )
+    return [e for e in entries if e.source.name in names or e.target.name in names]
+
+
+def _copy(
+    factories: _Factories,
+    directory: Path,
+    names: list[str],
+    parallelism: int,
+    consistency: Consistency | None,
+    json_output: bool,
+) -> None:
+    if not 1 <= parallelism <= MAX_PARALLELISM:
+        raise CliError(
+            "usage",
+            f"--parallelism {parallelism} is outside 1 to {MAX_PARALLELISM}.",
+            f"Use a --parallelism from 1 to {MAX_PARALLELISM}.",
+        )
+    plan = _load_plan(directory)
+    inspected = _load_inspected(directory)
+    if inspected is None:
+        raise CliError(
+            "usage", f"{directory / INSPECT_FILE} does not exist.", INSPECT_HINT
+        )
+    missing = [e.source.name for e in plan.collections if e.source.ref not in inspected]
+    if missing:
+        raise CliError(
+            "usage",
+            f"{INSPECT_FILE} has no inspection of {', '.join(missing)}.",
+            REINSPECT_HINT,
+        )
+    entries = _select(plan.collections, names)
+    groups = target_groups(plan.collections)
+    selected = {e.target.name: groups[e.target.name] for e in entries}
+    invalid = vectorizer_findings(selected)
+    if invalid:
+        raise CliError(
+            "invalid_plan",
+            _short("; ".join(f"{f.collection}: {f.message}" for f in invalid)),
+            "Edit plan.yaml. to-weaviate check lists every error.",
+        )
+    env = load_env(Path.cwd())
+    source_settings = chroma_settings(env)
+    target_settings = weaviate_settings(env)
+    source = factories.source(source_settings)
+    schema = factories.schema(target_settings)
+    writer = factories.writer(target_settings, consistency)
+    for group in selected.values():
+        schema.ensure(group)
+    state = State(directory / STATE_FILE)
+    try:
+        events = Events(directory / EVENTS_FILE)
+        for entry in entries:
+            info(json_output, f"Copying {entry.source.name} to {entry.target.name}")
+            result = copy_collection(
+                source,
+                writer,
+                state,
+                events,
+                entry,
+                inspected[entry.source.ref],
+                parallelism,
+            )
+            info(
+                json_output,
+                f"Copied {entry.source.name}: {_plural(result.copied, 'record')}, "
+                f"{_plural(result.rejects, 'reject')}",
+            )
+        progress = {p.ref: p for p in state.progress()}
+    finally:
+        state.close()
+    rows = _rows(entries, progress)
+    document, text = _progress_output(entries, rows)
+    rejects = sum(row["rejects"] for row in rows)
+    if rejects:
+        raise CliError(
+            "rejects",
+            f"{_plural(rejects, 'record')} rejected.",
+            f"See {directory / REJECTS_FILE} for each record and the reason.",
+            fields=document,
+            text=text,
+        )
+    emit(json_output, {"status": "success", **document}, text)
+
+
+def _status(directory: Path, json_output: bool) -> None:
+    plan = _load_plan(directory)
+    path = directory / STATE_FILE
+    progress: dict[str, CollectionProgress] = {}
+    if path.exists():
+        state = State(path)
+        try:
+            progress = {p.ref: p for p in state.progress()}
+        finally:
+            state.close()
+    rows = _rows(plan.collections, progress)
+    document, text = _progress_output(plan.collections, rows)
+    emit(json_output, {"status": "success", **document}, text)
 
 
 def _version_callback(value: bool) -> None:
@@ -11,7 +604,6 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-@app.callback()
 def main(
     version: bool = typer.Option(
         False,
@@ -22,3 +614,182 @@ def main(
     ),
 ) -> None:
     pass
+
+
+DirOption = Annotated[Path, typer.Option("--dir", help="Migration directory.")]
+JsonOption = Annotated[
+    bool, typer.Option("--json", help="Print one JSON document on stdout.")
+]
+NamesOption = Annotated[
+    list[str] | None,
+    typer.Option("--collection", metavar="NAME", help="Collection name. Repeatable."),
+]
+
+
+def build_app(
+    source_factory: SourceFactory,
+    writer_factory: WriterFactory,
+    reader_factory: ReaderFactory,
+    schema_factory: SchemaFactory,
+) -> typer.Typer:
+    factories = _Factories(
+        source_factory, writer_factory, reader_factory, schema_factory
+    )
+    # Locals can hold values read from the environment, so tracebacks omit them.
+    app = typer.Typer(
+        help="Migrate your data to Weaviate from other vector databases.",
+        no_args_is_help=True,
+        pretty_exceptions_show_locals=False,
+    )
+    app.callback()(main)
+    inspect_app = typer.Typer(
+        help="Inspect a source and draft plan.yaml.", no_args_is_help=True
+    )
+    app.add_typer(inspect_app, name="inspect")
+
+    @inspect_app.command("chroma")
+    def inspect_chroma(
+        database: Annotated[
+            list[str] | None,
+            typer.Option("--database", metavar="NAME", help="Database. Repeatable."),
+        ] = None,
+        collection: NamesOption = None,
+        sample_pages: Annotated[
+            int | None,
+            typer.Option(
+                "--sample-pages",
+                min=1,
+                metavar="N",
+                help="Metadata pages to sample per collection. Default: all.",
+            ),
+        ] = None,
+        vectors: Annotated[
+            VectorsMode,
+            typer.Option("--vectors", help="Keep the source vectors, embed, or both."),
+        ] = "keep",
+        vectorizer: Annotated[
+            str | None,
+            typer.Option("--vectorizer", metavar="MODULE", help="Weaviate module."),
+        ] = None,
+        vectorizer_option: Annotated[
+            list[str] | None,
+            typer.Option(
+                "--vectorizer-option",
+                metavar="KEY=VALUE",
+                help="Vectorizer module option. Repeatable.",
+            ),
+        ] = None,
+        index: Annotated[
+            IndexType, typer.Option("--index", help="Vector index type.")
+        ] = "default",
+        quantizer: Annotated[
+            QuantizerType, typer.Option("--quantizer", help="Vector quantizer.")
+        ] = "default",
+        quantizer_bits: Annotated[
+            int | None,
+            typer.Option("--quantizer-bits", metavar="1|4|8", help="Bits for rq."),
+        ] = None,
+        force: Annotated[
+            bool, typer.Option("--force", help="Replace plan.yaml.")
+        ] = False,
+        directory: DirOption = DEFAULT_DIR,
+        json_output: JsonOption = False,
+    ) -> None:
+        """Inspect Chroma collections and write inspect.json and plan.yaml."""
+        with _handled(json_output):
+            _inspect_chroma(
+                factories,
+                directory,
+                database or [],
+                collection or [],
+                sample_pages,
+                vectors,
+                vectorizer,
+                vectorizer_option or [],
+                index,
+                quantizer,
+                quantizer_bits,
+                force,
+                json_output,
+            )
+
+    @app.command("check")
+    def check(
+        directory: DirOption = DEFAULT_DIR, json_output: JsonOption = False
+    ) -> None:
+        """Check plan.yaml against the target. Creates nothing."""
+        with _handled(json_output):
+            _check(factories, directory, json_output)
+
+    @app.command("copy")
+    def copy(
+        collection: NamesOption = None,
+        parallelism: Annotated[
+            int,
+            typer.Option(
+                "--parallelism",
+                metavar="N",
+                help=f"Reads per collection, 1 to {MAX_PARALLELISM}.",
+            ),
+        ] = DEFAULT_PARALLELISM,
+        consistency: Annotated[
+            Consistency | None,
+            typer.Option("--consistency", help="Write consistency level."),
+        ] = None,
+        directory: DirOption = DEFAULT_DIR,
+        json_output: JsonOption = False,
+    ) -> None:
+        """Create the target collections, then copy the records. Resumable."""
+        with _handled(json_output):
+            _copy(
+                factories,
+                directory,
+                collection or [],
+                parallelism,
+                consistency,
+                json_output,
+            )
+
+    @app.command("status")
+    def status(
+        directory: DirOption = DEFAULT_DIR, json_output: JsonOption = False
+    ) -> None:
+        """Show copy progress from state.sqlite. Needs no credentials."""
+        with _handled(json_output):
+            _status(directory, json_output)
+
+    return app
+
+
+_client: weaviate.WeaviateClient | None = None
+
+
+def _weaviate_client(settings: WeaviateSettings) -> weaviate.WeaviateClient:
+    """One client per process, shared by the writer, reader and schema."""
+    global _client
+    if _client is None:
+        _client = connect(settings)
+        atexit.register(_client.close)
+    return _client
+
+
+def _chroma_source(settings: ChromaSettings) -> Source:
+    client = ChromaClient(settings)
+    atexit.register(client.close)
+    tenant = settings.tenant or client.identity()["tenant"]
+    return ChromaSource(client, tenant)
+
+
+def _weaviate_writer(settings: WeaviateSettings, consistency: str | None) -> Writer:
+    return WeaviateWriter(_weaviate_client(settings), consistency)
+
+
+def _weaviate_reader(settings: WeaviateSettings) -> Any:
+    return _weaviate_client(settings)
+
+
+def _weaviate_schema(settings: WeaviateSettings) -> Schema:
+    return WeaviateSchema(_weaviate_client(settings))
+
+
+app = build_app(_chroma_source, _weaviate_writer, _weaviate_reader, _weaviate_schema)

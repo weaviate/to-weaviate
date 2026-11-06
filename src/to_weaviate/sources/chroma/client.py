@@ -76,6 +76,9 @@ class ChromaClient:
         )
         self._sleep = sleep
 
+    def close(self) -> None:
+        self._http.close()
+
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         def call() -> Any:
             response = self._http.request(method, path, **kwargs)

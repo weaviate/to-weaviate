@@ -1,8 +1,10 @@
+import inspect
 import time
 from collections.abc import Callable
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import weaviate
+from pydantic import ValidationError
 from weaviate.classes.config import (
     Configure,
     DataType,
@@ -51,12 +53,43 @@ _QUANTIZER_CLASSES: dict[type, str] = {
 }
 
 
-# The server reports both Google factories as the legacy module name.
-_GOOGLE_ALIASES = {"text2vec-google": "text2vec-palm"}
+# A server reports a Google vectorizer as text2vec-google or as the legacy
+# name text2vec-palm.
+_MODULE_NAMES = {"text2vec-google": frozenset({"text2vec-google", "text2vec-palm"})}
+
+# Arguments that `_vector` sets itself.
+_RESERVED_OPTIONS = frozenset(
+    {
+        "name",
+        "source_properties",
+        "vectorize_collection_name",
+        "quantizer",
+        "vector_index_config",
+    }
+)
 
 
 class PlanMismatch(Exception):
     pass
+
+
+class SchemaRejected(Exception):
+    """The server refused to create a collection; the message is the server's."""
+
+
+class Schema(Protocol):
+    """Target schema operations. `group` holds the entries of one target name."""
+
+    def modules(self) -> set[str]: ...
+
+    def differences(self, group: list[CollectionPlan]) -> list[str] | None: ...
+
+    def ensure(self, group: list[CollectionPlan]) -> Literal["created", "exists"]: ...
+
+
+def module_names(module: str) -> frozenset[str]:
+    """Names a server can report for the planned vectorizer `module`."""
+    return _MODULE_NAMES.get(module, frozenset({module}))
 
 
 def _val(x: Any) -> str:
@@ -125,12 +158,23 @@ def _vector(plan: VectorPlan) -> Any:
         raise PlanMismatch(
             f"vectorizer module {module} is not supported by this client"
         )
-    return factory(
-        **kwargs,
-        source_properties=["document"],
-        vectorize_collection_name=False,
-        **plan.vectorizer.options,
-    )
+    accepted = inspect.signature(factory).parameters
+    for key in plan.vectorizer.options:
+        if key in _RESERVED_OPTIONS or key not in accepted:
+            raise PlanMismatch(f"vectorizer option {key} is not accepted by {module}")
+    try:
+        return factory(
+            **kwargs,
+            source_properties=["document"],
+            vectorize_collection_name=False,
+            **plan.vectorizer.options,
+        )
+    except ValidationError as exc:
+        error = exc.errors()[0]
+        key = ".".join(str(part) for part in error["loc"])
+        raise PlanMismatch(
+            f"vectorizer option {key} of {module}: {error['msg']}"
+        ) from exc
 
 
 def _properties(group: list[CollectionPlan]) -> list[PropertyPlan]:
@@ -180,7 +224,7 @@ def _vector_differences(plan: VectorPlan, found: Any) -> list[str]:
         )
     planned = plan.vectorizer.module if plan.vectorizer else "none"
     actual = _val(found.vectorizer.vectorizer)
-    if actual != _GOOGLE_ALIASES.get(planned, planned):
+    if actual not in module_names(planned):
         out.append(f"vector {name}: vectorizer is {actual}, plan has {planned}")
     if plan.index.type != "default":
         actual_type = _val(index.vector_index_type())
@@ -259,3 +303,35 @@ def ensure_collection(
             sleep=sleep,
         )
     return result
+
+
+def _server_message(exc: UnexpectedStatusCodeError) -> str:
+    body: Any = exc.error
+    if isinstance(body, dict) and isinstance(body.get("error"), list):
+        texts = [
+            str(item["message"])
+            for item in body["error"]
+            if isinstance(item, dict) and item.get("message")
+        ]
+        if texts:
+            return "; ".join(texts)
+    return exc.message
+
+
+class WeaviateSchema:
+    def __init__(self, client: weaviate.WeaviateClient) -> None:
+        self._client = client
+
+    def modules(self) -> set[str]:
+        return set(self._client.get_meta().get("modules") or {})
+
+    def differences(self, group: list[CollectionPlan]) -> list[str] | None:
+        return differences(self._client, group)
+
+    def ensure(self, group: list[CollectionPlan]) -> Literal["created", "exists"]:
+        try:
+            return ensure_collection(self._client, group)
+        except UnexpectedStatusCodeError as exc:
+            if exc.status_code in (400, 422):
+                raise SchemaRejected(_server_message(exc)) from exc
+            raise

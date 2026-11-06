@@ -245,3 +245,10 @@ def test_collections_reads_all_pages():
     assert [r.url.params["limit"] for r in seen] == ["1000", "1000"]
     assert [r.url.params["offset"] for r in seen] == ["0", "1000"]
     assert seen[0].url.path == "/api/v2/tenants/t/databases/d/collections"
+
+
+def test_close_closes_the_http_client():
+    client, _ = make(lambda request: httpx.Response(200, json=1))
+    client.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        client.count("t", "d", "c")
