@@ -9,7 +9,7 @@ import pytest
 
 from to_weaviate.sources.base import Partition
 from to_weaviate.sources.chroma.client import CHROMA_MAX_PAGE
-from to_weaviate.sources.chroma.source import ChromaSource
+from to_weaviate.sources.chroma.source import ChromaSource, _sample_pages
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -355,6 +355,41 @@ def test_sample_of_at_least_the_count_reads_every_record(
         (300, 300),
         (600, 50),
     ]
+
+
+class EdgeRandom(random.Random):
+    """A Random whose randint returns the low or the high end of its range."""
+
+    def __init__(self, high):
+        super().__init__(0)
+        self.high = high
+
+    def randint(self, a, b):
+        return b if self.high else a
+
+
+# Every (count, size) with size below count below 100, plus larger pairs. In
+# (14866, 7702), page 11 of 26 can start at 6288; its part starts at 6289.
+BOUND_PAIRS = [(c, s) for c in range(2, 100) for s in range(1, c)] + [
+    (301, 300),
+    (1003, 307),
+    (10_001, 10_000),
+    (12_000, 10_000),
+    (14_866, 7_702),
+    (100_000, 300),
+    (100_000, 10_000),
+]
+
+
+def test_sample_page_lies_from_one_record_before_its_part_to_the_part_end():
+    # The extreme gaps give the earliest start and the latest end of each page.
+    for count, size in BOUND_PAIRS:
+        for high in (False, True):
+            pages = _sample_pages(count, size, EdgeRandom(high))
+            places = len(pages)
+            for i, (offset, limit) in enumerate(pages):
+                start, end = i * count // places, (i + 1) * count // places
+                assert start - 1 <= offset and offset + limit <= end, (count, size, i)
 
 
 def test_sample_of_an_empty_source_reads_no_page(source, fake_client, inspected):

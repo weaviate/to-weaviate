@@ -44,8 +44,10 @@ def _sample_pages(count: int, size: int, rng: random.Random) -> list[tuple[int, 
     starts after the records of the pages before it plus a gap drawn from
     `[i * slack // places, (i + 1) * slack // places]`, where `slack = count -
     size`. The gaps do not decrease, so the pages do not overlap, and the last
-    page ends at or before `count`. Page i ends inside the i-th of `places`
-    equal parts of `[0, count)` and starts at most one record before it.
+    page ends at or before `count`. Part i of `[0, count)` is
+    `[i * count // places, (i + 1) * count // places)`. Page i starts at most
+    one record before part i and ends at or before the end of part i. A page
+    of few records can lie wholly before its part.
     """
     if count <= size:
         return [
