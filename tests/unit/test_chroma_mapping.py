@@ -336,10 +336,28 @@ def test_stored_embedding_keeps_only_the_listed_keys():
         },
     }
     assert len(notes) == 1
-    for key in ("api_key_env_var", "default_headers", "extra", "organization_id"):
+    for key in ("api_key_env_var", "default_headers", "extra"):
         assert key in notes[0]
-    for value in ("made-up", "bob", "OPENAI_API_KEY"):
+    for value in ("made-up", "bob", "OPENAI_API_KEY", "organization_id"):
         assert value not in notes[0]
+
+
+def test_stored_embedding_names_only_the_dropped_keys_with_a_value():
+    nulls = {
+        "api_key_env_var": None,
+        "organization_id": None,
+        "api_version": None,
+        "deployment_id": None,
+        "default_headers": None,
+    }
+    stored, notes = stored_embedding(known("openai", model_name="m", **nulls))
+    assert stored == known("openai", model_name="m")
+    assert notes == []
+    _, notes = stored_embedding(
+        known("openai", model_name="m", **{**nulls, "organization_id": "made-up"})
+    )
+    assert len(notes) == 1 and "organization_id" in notes[0]
+    assert [key for key in nulls if key in notes[0]] == ["organization_id"]
 
 
 def test_stored_embedding_of_an_unmapped_function_keeps_no_config_key():

@@ -100,7 +100,7 @@ def stored_embedding(
 
     The stored form has the type, the name and the config keys in
     CONFIG_KEYS. A URL value has no userinfo, query or fragment. The note
-    names the dropped keys, never their values.
+    names the dropped keys whose value is not null, never their values.
     """
     if embedding is None:
         return None, []
@@ -109,8 +109,8 @@ def stored_embedding(
     kept = _stored_config(name, config)
     stored = {"type": embedding.get("type"), "name": name, "config": kept}
     dropped = sorted(
-        {key for key in embedding if key not in _EMBEDDING_KEYS}
-        | {key for key in config if key not in kept}
+        {k for k, v in embedding.items() if k not in _EMBEDDING_KEYS and v is not None}
+        | {k for k, v in config.items() if k not in kept and v is not None}
     )
     if not dropped:
         return stored, []
