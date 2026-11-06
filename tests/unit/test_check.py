@@ -180,3 +180,20 @@ def test_duplicate_source_names_each_target_collection_of_the_ref():
     assert "r1 -> Docs (tenant a), r1 -> docs (tenant b), r1 -> Other" in (
         errors[0].message
     )
+
+
+def test_a_url_option_that_keeps_its_userinfo_gives_a_warning():
+    base_url = "https://bob:made/up@proxy.example.com/v1"
+    plan = plan_of(
+        entry([embed("text2vec-openai", base_url=base_url)]),
+        entry([embed("text2vec-openai", base_url="https://h/v1")], name="Other"),
+    )
+    errors, warnings = plan_findings(plan, None, vectorizer_for)
+    assert warnings == [
+        Finding(
+            "dropped_option",
+            "Docs",
+            "vectorizer option base_url of text2vec-openai is not sent: its URL "
+            "holds userinfo that cannot be removed",
+        )
+    ]

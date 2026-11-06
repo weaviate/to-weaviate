@@ -93,6 +93,25 @@ def test_stored_url(url, expected):
 
 
 @pytest.mark.parametrize(
+    "url",
+    [
+        "https://bob:pa/ss@proxy.example.com/v1",
+        "https://bob:pa?ss@proxy.example.com/v1",
+        "https://bob:pa#ss@proxy.example.com/v1",
+        "http://bob:pa#ss@ollama:11434",
+        "https://bob:pa?ss@proxy.example.com",
+        "bob:pa/ss@proxy.example.com",
+        "https://proxy.example.com/users/a@b",
+        "https://proxy.example.com/v1?mail=a@b",
+        "https://proxy.example.com/v1#a@b",
+        "http://user:pw@[::1/path@x",
+    ],
+)
+def test_stored_url_stores_no_value_that_holds_an_at_sign_after_cleaning(url):
+    assert stored_url(url) is None
+
+
+@pytest.mark.parametrize(
     ("url", "expected"),
     [
         ("https://user:pw@host:8000", ["pw"]),

@@ -9,7 +9,12 @@ from to_weaviate.plan import (
     VectorizerPlan,
 )
 from to_weaviate.sources.base import SourceCollection
-from to_weaviate.target.schema import PlanMismatch, collection_kwargs, module_names
+from to_weaviate.target.schema import (
+    PlanMismatch,
+    collection_kwargs,
+    dropped_options,
+    module_names,
+)
 
 # Vectorizer module to the Weaviate header that carries its provider key and
 # the environment variable that `weaviate_settings` reads it from.
@@ -225,6 +230,27 @@ def vectorizer_findings(groups: Mapping[str, list[CollectionPlan]]) -> list[Find
     return out
 
 
+def dropped_option_findings(
+    groups: Mapping[str, list[CollectionPlan]],
+) -> list[Finding]:
+    """URL options that `collection_kwargs` leaves out, as warnings.
+
+    `collection_kwargs` sends the vectors of the first entry of a group.
+    """
+    return [
+        Finding(
+            "dropped_option",
+            name,
+            f"vectorizer option {key} of {vector.vectorizer.module} is not sent: "
+            "its URL holds userinfo that cannot be removed",
+        )
+        for name, group in groups.items()
+        for vector in group[0].target.vectors
+        if vector.vectorizer is not None
+        for key in dropped_options(vector.vectorizer)
+    ]
+
+
 def plan_findings(
     plan: Plan,
     inspected: Mapping[str, SourceCollection] | None,
@@ -235,7 +261,9 @@ def plan_findings(
     warnings: list[Finding] = []
     errors.extend(_duplicate_findings(plan.collections))
     errors.extend(_duplicate_source_findings(plan.collections))
-    errors.extend(vectorizer_findings(target_groups(plan.collections)))
+    groups = target_groups(plan.collections)
+    errors.extend(vectorizer_findings(groups))
+    warnings.extend(dropped_option_findings(groups))
     for entry in plan.collections:
         errors.extend(_keep_model_findings(entry, vectorizer_for))
         for prop in entry.target.properties:

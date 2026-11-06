@@ -98,13 +98,17 @@ def without_userinfo(url: str) -> str:
     return urlunsplit(parts._replace(netloc=netloc))[len(prefix) :]
 
 
-def stored_url(url: str) -> str:
-    """`url` without its userinfo, query and fragment. Never raises.
+def stored_url(url: str) -> str | None:
+    """`url` without its userinfo, query and fragment, or None. Never raises.
 
     The form of a URL that the tool writes to a file or prints, because a
-    query or a fragment can hold a token.
+    query or a fragment can hold a token. None when the value still holds an
+    `@` after its userinfo is removed: an unencoded `/`, `?` or `#` in a
+    password leaves the userinfo in place, so such a value is not stored.
     """
     bare = without_userinfo(url)
+    if "@" in bare:
+        return None
     ends = [i for i in (bare.find("?"), bare.find("#")) if i >= 0]
     return bare[: min(ends)] if ends else bare
 

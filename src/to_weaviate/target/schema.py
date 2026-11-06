@@ -30,6 +30,7 @@ from to_weaviate.plan import (
     QUANTIZER_FIELDS,
     CollectionPlan,
     PropertyPlan,
+    VectorizerPlan,
     VectorPlan,
 )
 from to_weaviate.retry import with_retry
@@ -168,6 +169,36 @@ def _quantizer(plan: VectorPlan) -> Any:
     return getattr(Configure.VectorIndex.Quantizer, q.type)(**fields)
 
 
+def _is_url(value: Any) -> bool:
+    return isinstance(value, str) and "://" in value
+
+
+def _sent_options(vectorizer: VectorizerPlan) -> dict[str, Any]:
+    """The options of `vectorizer` as Weaviate gets them.
+
+    Weaviate stores the options in the schema, so a URL option is sent
+    without its userinfo, query and fragment, whatever the plan holds. A URL
+    option that `stored_url` does not store is left out.
+    """
+    sent: dict[str, Any] = {}
+    for key, value in vectorizer.options.items():
+        if _is_url(value):
+            value = stored_url(value)
+            if value is None:
+                continue
+        sent[key] = value
+    return sent
+
+
+def dropped_options(vectorizer: VectorizerPlan) -> list[str]:
+    """The keys of the URL options of `vectorizer` that are not sent."""
+    return [
+        key
+        for key, value in vectorizer.options.items()
+        if _is_url(value) and stored_url(value) is None
+    ]
+
+
 def _vector(plan: VectorPlan) -> Any:
     kwargs: dict[str, Any] = {"name": plan.name}
     index = plan.index
@@ -196,12 +227,7 @@ def _vector(plan: VectorPlan) -> Any:
         raise PlanMismatch(
             f"vectorizer module {module} is not supported by this client"
         )
-    # Weaviate stores the options in the schema, so a URL option is sent
-    # without its userinfo, query and fragment, whatever the plan holds.
-    options = {
-        key: stored_url(value) if isinstance(value, str) and "://" in value else value
-        for key, value in plan.vectorizer.options.items()
-    }
+    options = _sent_options(plan.vectorizer)
     accepted = inspect.signature(factory).parameters
     for key in options:
         if key in _RESERVED_OPTIONS or key not in accepted:

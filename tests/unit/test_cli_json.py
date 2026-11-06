@@ -319,6 +319,67 @@ def test_embedding_config_secrets_are_not_stored_or_sent(tmp_path):
     assert [n for n in entry.notes if "api_key_env_var, default_headers" in n]
 
 
+@pytest.mark.parametrize("char", "/?#")
+def test_embedding_url_that_keeps_its_userinfo_is_not_stored_or_sent(tmp_path, char):
+    password = f"B5-MADE{char}UP-PW"
+    embedding = {
+        "type": "known",
+        "name": "openai",
+        "config": {
+            "model_name": "text-embedding-3-small",
+            "api_base": f"https://bob:{password}@proxy.example.com/v1",
+        },
+    }
+    fakes = FakeFactories(FakeSource(cli_records(10), embedding=embedding))
+    runs = [
+        invoke(fakes, "inspect", "chroma"),
+        invoke(fakes, "inspect", "chroma", "--force", "--json"),
+    ]
+    assert [r.exit_code for r in runs] == [0, 0], runs[0].output
+    directory = tmp_path / ".to-weaviate"
+    plan = load_plan(directory / "plan.yaml")
+    sent = repr(collection_kwargs(plan.collections))
+    texts = [(directory / name).read_text() for name in ("plan.yaml", "inspect.json")]
+    for text in [*texts, *(r.output for r in runs), sent]:
+        for value in ("@", "bob", password, *password.split(char)):
+            assert value not in text
+    entry = plan.collections[0]
+    assert entry.source.embedding == {
+        "type": "known",
+        "name": "openai",
+        "config": {"model_name": "text-embedding-3-small"},
+    }
+    assert [n for n in entry.notes if "api_base holds userinfo" in n]
+
+
+@pytest.mark.parametrize("char", "/?#")
+def test_check_notes_a_planned_url_option_that_is_not_sent(tmp_path, char):
+    password = f"B5-MADE{char}UP-PW"
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    embed = ["--vectors", "embed", "--vectorizer", "text2vec-openai"]
+    option = f"base_url=https://bob:{password}@proxy.example.com/v1"
+    args = [*embed, "--vectorizer-option", option]
+    assert invoke(fakes, "inspect", "chroma", *args).exit_code == 0
+    plan = load_plan(tmp_path / ".to-weaviate" / "plan.yaml")
+    runs = [
+        invoke(fakes, "check", OPENAI_API_KEY="openai-key"),
+        invoke(fakes, "check", "--json", OPENAI_API_KEY="openai-key"),
+    ]
+    assert [r.exit_code for r in runs] == [0, 0], runs[0].output
+    message = (
+        "vectorizer option base_url of text2vec-openai is not sent: its URL "
+        "holds userinfo that cannot be removed"
+    )
+    assert f"warning dropped_option Docs: {message}" in runs[0].stdout
+    assert json.loads(runs[1].stdout)["warnings"] == [
+        {"code": "dropped_option", "collection": "Docs", "message": message}
+    ]
+    sent = repr(collection_kwargs(plan.collections))
+    for text in [*(r.output for r in runs), sent]:
+        for value in ("bob", password, *password.split(char)):
+            assert value not in text
+
+
 def test_source_url_query_and_fragment_are_not_stored_or_printed(tmp_path):
     fakes = FakeFactories(FakeSource(cli_records(10)))
     url = "https://user:SENTINEL-D@chroma.example.com/?token=SENTINEL-Q"
