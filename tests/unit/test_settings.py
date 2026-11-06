@@ -326,3 +326,18 @@ def test_http_endpoint_without_grpc_url_is_port_443_over_tls(url, grpc, expected
     env = {"WEAVIATE_URL": url, "WEAVIATE_GRPC_URL": grpc or ""}
     http = weaviate_settings(env).http
     assert (http.host, http.port, http.secure) == expected
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "https://user:pw@chroma.example.com/p?token=x",
+            "https://chroma.example.com/p",
+        ),
+        ("https://TOKEN@chroma.example.com", "https://chroma.example.com"),
+        ("http://localhost:8001/", "http://localhost:8001/"),
+    ],
+)
+def test_chroma_settings_hold_the_stored_url(url, expected):
+    assert chroma_settings({"CHROMA_URL": url}).stored_url == expected

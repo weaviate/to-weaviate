@@ -91,14 +91,12 @@ from to_weaviate.plan import (
     save_plan,
 )
 from to_weaviate.settings import (
-    URL_HINT,
     ChromaSettings,
     InvalidSetting,
     MissingCredential,
     WeaviateSettings,
     chroma_settings,
     load_env,
-    stored_url,
     weaviate_settings,
     without_userinfo,
 )
@@ -487,18 +485,6 @@ def _no_collection(tenant: str, databases: list[str]) -> CliError:
     return CliError("usage", f"Chroma tenant {tenant} {where}.", NO_COLLECTION_HINT)
 
 
-def _source_url(settings: ChromaSettings) -> str:
-    """CHROMA_URL as inspect prints it and as the plan stores it.
-
-    ChromaSettings refuses a CHROMA_URL that `stored_url` does not store, so
-    the error here only keeps the result a str.
-    """
-    url = stored_url(settings.url)
-    if url is None:
-        raise InvalidSetting("CHROMA_URL is not a valid URL.", URL_HINT)
-    return url
-
-
 def _stored_collections(
     collections: list[SourceCollection],
 ) -> tuple[list[SourceCollection], dict[str, list[str]]]:
@@ -538,9 +524,8 @@ def _inspect_chroma(
     settings = chroma_settings(load_env(Path.cwd()))
     if not databases and settings.database is not None:
         databases = [settings.database]
-    source_url = _source_url(settings)
     source = factories.source(settings)
-    info(json_output, f"Inspecting Chroma at {source_url}")
+    info(json_output, f"Inspecting Chroma at {settings.stored_url}")
     collections = source.inspect(databases or None, names or None, sample_pages)
     missing = sorted(set(names) - {c.name for c in collections})
     if missing:
@@ -555,7 +540,7 @@ def _inspect_chroma(
     collections, source_notes = _stored_collections(collections)
     try:
         plan = draft_plan(
-            SourcePlan(type="chroma", url=source_url, tenant=settings.tenant),
+            SourcePlan(type="chroma", url=settings.stored_url, tenant=settings.tenant),
             collections,
             vectors,
             vectorizer_plan,

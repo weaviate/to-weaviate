@@ -147,11 +147,12 @@ def _endpoint(parts: SplitResult, default_scheme: str) -> Endpoint:
 
 def _parsed_url(
     var: str, url: str, schemes: frozenset[str] | None, any_path: bool
-) -> SplitResult:
-    """`url` split, or InvalidSetting when the tool refuses it.
+) -> tuple[SplitResult, str]:
+    """`url` split and its `stored_url` form, or InvalidSetting.
 
     Refused for every variable: a value that cannot be split, a port that is
-    not a number, a fragment, and an `@` in the path or the query. An
+    not a number, a fragment, and an `@` in the path or the query, which is
+    where `stored_url` finds an `@` once the userinfo is removed. An
     unencoded `#`, `?` or `/` in a password gives these shapes. `schemes` are
     the accepted schemes, with "" for none; None accepts any scheme. Without
     `any_path`, the path is empty or `/`.
@@ -163,14 +164,15 @@ def _parsed_url(
     except ValueError:
         # The ValueError can quote the port text, which can be a password.
         raise InvalidSetting(message, URL_HINT) from None
+    stored = stored_url(url)
     if (
         "#" in url
-        or "@" in parts.path + parts.query
+        or stored is None
         or (schemes is not None and parts.scheme not in schemes)
         or (not any_path and parts.path not in ("", "/"))
     ):
         raise InvalidSetting(message, URL_HINT)
-    return parts
+    return parts, stored
 
 
 def _userinfo(url: str) -> str | None:
@@ -218,6 +220,8 @@ class ChromaSettings:
     """Raises InvalidSetting when `url` is refused. CHROMA_URL needs http or https.
 
     `host` is the host of `url` in lower case, without a trailing dot.
+    `stored_url` is `url` without its userinfo, query and fragment: the form
+    that inspect prints and that the plan stores.
     """
 
     url: str
@@ -226,10 +230,12 @@ class ChromaSettings:
     database: str | None
     token_header: str
     host: str = field(init=False)
+    stored_url: str = field(init=False)
 
     def __post_init__(self) -> None:
-        parts = _parsed_url("CHROMA_URL", self.url, HTTP_SCHEMES, any_path=True)
+        parts, stored = _parsed_url("CHROMA_URL", self.url, HTTP_SCHEMES, any_path=True)
         object.__setattr__(self, "host", (parts.hostname or "").removesuffix("."))
+        object.__setattr__(self, "stored_url", stored)
 
 
 @dataclass(frozen=True)
@@ -252,10 +258,10 @@ class WeaviateSettings:
     grpc: Endpoint | None = field(init=False)
 
     def __post_init__(self) -> None:
-        http = _parsed_url("WEAVIATE_URL", self.url, None, any_path=False)
+        http, _ = _parsed_url("WEAVIATE_URL", self.url, None, any_path=False)
         grpc = None
         if self.grpc_url:
-            parts = _parsed_url(
+            parts, _ = _parsed_url(
                 "WEAVIATE_GRPC_URL", self.grpc_url, HTTP_SCHEMES | {""}, any_path=False
             )
             grpc = _endpoint(parts, "http")
