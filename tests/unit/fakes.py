@@ -308,10 +308,10 @@ class FakeInsertClient:
     ) -> SimpleNamespace:
         with self._lock:
             self.calls += 1
+            stored = self.stored.setdefault(place, {})
             error = self.fail(self.calls)
             if error is not None:
                 raise error
-            stored = self.stored.setdefault(place, {})
             for obj in objects:
                 uuid = str(obj.uuid)
                 vectors = dict(obj.vector or {})

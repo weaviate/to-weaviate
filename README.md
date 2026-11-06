@@ -72,7 +72,10 @@ creates nothing.
 Creates the target collections, then copies the records. Progress goes to
 `state.sqlite`, so a second run continues where the first one stopped.
 Each record that the tool cannot convert or that Weaviate refuses goes to
-`rejects.jsonl` with the reason.
+`rejects.jsonl` with the reason. When Weaviate refuses every object of a
+batch of more than one record, `copy` retries the batch as it retries a
+network error. When the retries are used up, it stops with
+`target_unreachable` and stores no reject. The next run starts at that page.
 
 `state.sqlite` also records the target of each source collection: the
 Weaviate host and port, the collection and the tenant. Once records of a

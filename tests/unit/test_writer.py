@@ -14,6 +14,7 @@ from weaviate.util import generate_uuid5
 from to_weaviate import plan as p
 from to_weaviate.sources.base import Record
 from to_weaviate.target.writer import (
+    BatchRefused,
     Reject,
     TargetObject,
     WeaviateWriter,
@@ -228,10 +229,34 @@ def test_writer_applies_tenant_and_consistency():
 
 
 def test_all_failed_exception_becomes_rejects():
-    client = FakeClient(FakeData([WeaviateInsertManyAllFailedError("nope")]))
-    rejects = WeaviateWriter(client).write(ENTRY_KEEP, objects(2))  # type: ignore[arg-type]
-    assert [r.source_id for r in rejects] == ["s0", "s1"]
+    data = FakeData([WeaviateInsertManyAllFailedError("nope")])
+    rejects = WeaviateWriter(FakeClient(data)).write(ENTRY_KEEP, objects(1))  # type: ignore[arg-type]
+    assert [r.source_id for r in rejects] == ["s0"]
     assert all("nope" in r.reason for r in rejects)
+    assert len(data.calls) == 1
+
+
+def all_failed(reason: str) -> WeaviateInsertManyAllFailedError:
+    """What client 4.24.1 raises when Weaviate refuses every object of a batch."""
+    return WeaviateInsertManyAllFailedError(f"Here is the set of all errors: {reason}")
+
+
+def test_all_failed_batch_is_retried_and_then_raises():
+    data = FakeData([all_failed("bad vector")] * 10)
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    with pytest.raises(BatchRefused) as info:
+        writer.write(ENTRY_KEEP, objects(2))
+    assert str(info.value) == (
+        "Weaviate refused every object of a batch of 2 in My_docs: bad vector"
+    )
+    assert len(data.calls) == 6
+
+
+def test_all_failed_batch_that_a_retry_writes_gives_no_rejects():
+    data = FakeData([all_failed("busy"), SimpleNamespace(errors={})])
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    assert writer.write(ENTRY_KEEP, objects(2)) == []
+    assert len(data.calls) == 2
 
 
 def test_writer_one_call_per_chunk(monkeypatch):

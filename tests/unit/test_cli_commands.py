@@ -1,5 +1,5 @@
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from fakes import (
     FakeFactories,
+    FakeInsertClient,
     FakeSchema,
     FakeSource,
     FakeWriter,
@@ -15,12 +16,15 @@ from fakes import (
     old_state_file,
 )
 from typer.testing import Result
+from weaviate.exceptions import WeaviateInsertManyAllFailedError
 
 from to_weaviate.lock import Locked, exclusive_lock
 from to_weaviate.plan import load_plan, save_plan
 from to_weaviate.sources.base import Page, Partition, Record, SourceCollection
 from to_weaviate.sources.chroma.client import ChromaError
+from to_weaviate.state import State
 from to_weaviate.target.schema import SchemaRejected
+from to_weaviate.target.writer import WeaviateWriter
 
 DIR = Path(".to-weaviate")
 OPENAI_SMALL = {
@@ -374,6 +378,77 @@ def test_second_copy_reads_only_the_records_added_since():
     assert len(fakes.writer.objects) == 11
     assert set(fakes.writer.writes_per_uuid.values()) == {1}
     assert json.loads(r.stdout)["collections"][0]["copied"] == 11
+
+
+REFUSED = "vector lengths don't match"
+BATCH_HINT = "Fix the cause and run to-weaviate copy again. It resumes at this page."
+
+
+def all_failed(reason: str = REFUSED) -> WeaviateInsertManyAllFailedError:
+    """What client 4.24.1 raises when Weaviate refuses every object of a batch."""
+    return WeaviateInsertManyAllFailedError(f"Here is the set of all errors: {reason}")
+
+
+def refusing(
+    records: int, fail: Callable[[int], Exception | None]
+) -> tuple[FakeFactories, FakeInsertClient]:
+    """Inspected fakes with a WeaviateWriter over a FakeInsertClient."""
+    client = FakeInsertClient(fail)
+    writer = WeaviateWriter(client, sleep=lambda s: None)  # type: ignore[arg-type]
+    source = FakeSource(cli_records(records))
+    return inspected(FakeFactories(source, writer=writer, store=client)), client
+
+
+def test_copy_stops_when_weaviate_refuses_every_object_of_a_batch(tmp_path):
+    fakes, client = refusing(10, lambda n: all_failed(f"{REFUSED}; key SENTINEL-K"))
+    r = invoke(
+        fakes, "copy", "--parallelism", "1", "--json", WEAVIATE_API_KEY="SENTINEL-K"
+    )
+    assert r.exit_code == 4
+    d = json.loads(r.stdout)
+    assert d["code"] == "target_unreachable" and d["hint"] == BATCH_HINT
+    assert d["message"] == (
+        f"Weaviate refused every object of a batch of 10 in Docs: {REFUSED}; key ***"
+    )
+    assert "SENTINEL-K" not in r.output
+    assert client.calls == 6
+    state = State(tmp_path / DIR / "state.sqlite")
+    try:
+        assert state.pending(FakeSource.REF) == [(Partition("0-10", "0", "10"), None)]
+        assert state.progress()[0].rejects == 0
+    finally:
+        state.close()
+    assert not (tmp_path / DIR / "rejects.jsonl").exists()
+
+
+def test_copy_retries_a_batch_that_weaviate_refused_once():
+    fakes, client = refusing(10, lambda n: all_failed() if n == 1 else None)
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert len(client.writes_per_uuid) == 10
+    assert json.loads(r.stdout)["collections"][0]["copied"] == 10
+
+
+def test_copy_after_a_refused_batch_copies_the_page():
+    fakes, client = refusing(10, lambda n: all_failed())
+    invoke(fakes, "copy", "--parallelism", "1")
+    client.fail = lambda n: None
+    calls = client.calls
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json")
+    row = json.loads(r.stdout)["collections"][0]
+    assert (client.calls - calls, row["copied"], row["rejects"]) == (1, 10, 0)
+    assert r.exit_code == 0, r.output
+
+
+def test_copy_resumes_at_the_refused_page_and_writes_each_object_once():
+    fakes, client = refusing(250, lambda n: all_failed() if n > 1 else None)
+    assert invoke(fakes, "copy", "--parallelism", "1").exit_code == 4
+    assert len(client.writes_per_uuid) == 100
+    client.fail = lambda n: None
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json")
+    assert r.exit_code == 0, r.output
+    assert len(client.writes_per_uuid) == 250
+    assert set(client.writes_per_uuid.values()) == {1}
 
 
 # (first target name, first tenant, second target name, second tenant)
