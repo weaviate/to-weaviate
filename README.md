@@ -203,11 +203,12 @@ The suite deletes and recreates the Chroma collections `docs-cosine`,
 collections `Docs_cosine`, `Tiny_l2` and `Docs_rq`.
 
 The `Makefile` starts the servers and sets the variables. `make` alone
-prints the targets. `make acceptance-up` needs a clone of
-[weaviate-local-k8s](https://github.com/weaviate/weaviate-local-k8s) at
-`LOCAL_K8S` (default: `../weaviate-local-k8s`), Docker, and every program
-that `local-k8s.sh` requires: `kind`, `helm`, `kubectl`, `curl`, `nohup` and
-`jq`, plus `gtimeout` on macOS (from coreutils) or `timeout` on Linux.
+prints the targets. `make acceptance-up` and `make acceptance-down` call
+`tests/acceptance/cluster.sh up` and `down`. `make acceptance-up` needs a
+clone of [weaviate-local-k8s](https://github.com/weaviate/weaviate-local-k8s)
+at `LOCAL_K8S` (default: `../weaviate-local-k8s`), Docker, and every program
+that `local-k8s.sh` uses: `kind`, `helm`, `kubectl`, `curl`, `nohup`, `jq` and
+`lsof`, plus `gtimeout` on macOS (from coreutils) or `timeout` on Linux.
 
 ```bash
 make acceptance-up     # Chroma on port 8001, Weaviate on ports 8099 and 50099 in a kind cluster
@@ -218,19 +219,27 @@ make acceptance-down   # stops Chroma, then asks before it deletes the kind clus
 
 `make acceptance-up` creates a kind cluster named `weaviate-k8s` and
 switches the kubectl context to `kind-weaviate-k8s`. Before it starts
-anything, it checks that `kind` is on `PATH` and that
-`$LOCAL_K8S/local-k8s.sh` is executable. It stops with an error when a kind
-cluster named `weaviate-k8s` already exists, because `local-k8s.sh setup`
-would reuse that name. Before `setup` runs, it writes the file
-`.acceptance-kind-cluster`, which git ignores.
+anything, it checks that `kind` is on `PATH`, that
+`$LOCAL_K8S/local-k8s.sh` is executable, and that `kind get clusters`
+succeeds and lists no cluster named `weaviate-k8s`, because
+`local-k8s.sh setup` would reuse that name. After `setup` succeeds, it
+writes the id of the container `weaviate-k8s-control-plane` to
+`.acceptance-kind-cluster`, which git ignores. When `setup` fails, it writes
+no marker, so `make acceptance-down` will not remove a partly created
+cluster. It then prints the command that removes the cluster by hand:
+`kind delete cluster --name weaviate-k8s`.
 
 `make acceptance-down` always stops Chroma. It deletes the cluster only when
-`.acceptance-kind-cluster` exists, so it leaves alone a cluster that this
-checkout did not create. It lists every effect of `local-k8s.sh clean` and
+`.acceptance-kind-cluster` exists and holds the id of the
+`weaviate-k8s-control-plane` container that exists now. When the container
+is gone or has another id, it removes the stale marker and leaves the
+cluster alone. Otherwise it lists every effect of `local-k8s.sh clean` and
 runs it only after you type `y`. `clean` deletes the kind cluster
-`weaviate-k8s`, switches the kubectl context to `kind-weaviate-k8s`, and
-kills every `kubectl-relay` process and every
-`kubectl get pods -n weaviate -w` process on the machine.
+`weaviate-k8s`, switches the kubectl context to `kind-weaviate-k8s` first,
+and kills every `kubectl-relay` process and every
+`kubectl get pods -n weaviate -w` process on the machine. After it, no
+kubectl context is current, so select your previous context again with
+`kubectl config use-context NAME`.
 
 `make acceptance` works with any servers on those ports: Chroma from
 `tests/acceptance/chroma/docker-compose.yml`, and a Weaviate server that
