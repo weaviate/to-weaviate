@@ -25,6 +25,15 @@ LISTED_FAILURES = 10
 ID_BATCH = 1000
 REPORT_MD = "report.md"
 REPORT_JSON = "report.json"
+TARGET_BELOW_SOURCE = (
+    "run to-weaviate copy again. If the counts still differ, records were "
+    "skipped or rejected: read rejects.jsonl and start the copy over in a new "
+    "--dir."
+)
+TARGET_ABOVE_SOURCE = (
+    "the target holds objects whose source records were deleted. This version "
+    "has no command that removes them."
+)
 
 _TABLES = """
 PRAGMA journal_mode = OFF;
@@ -101,8 +110,10 @@ def verify_counts(
     expected = source.count(collection)
     found = reader.count(entry)
     detail = f"source count {expected}, target count {found}"
-    if expected != found:
-        detail += "; run to-weaviate sync"
+    if found < expected:
+        detail += f"; {TARGET_BELOW_SOURCE}"
+    elif found > expected:
+        detail += f"; {TARGET_ABOVE_SOURCE}"
     return _check("count", entry, expected == found, detail)
 
 

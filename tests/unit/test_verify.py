@@ -131,12 +131,34 @@ def test_counts_match():
     assert "source count 10" in check.detail and "target count 10" in check.detail
 
 
-def test_count_mismatch_names_sync():
+def test_count_mismatch_names_copy():
     source, writer = migrated(make_records(10), ENTRY, skip={"id-3"})
     check = verify_counts(source, FakeReader(writer), ENTRY, collection_of(source))
     assert (check.name, check.collection, check.passed) == ("count", "Docs", False)
     assert "source count 10" in check.detail and "target count 9" in check.detail
-    assert "to-weaviate sync" in check.detail
+    assert "to-weaviate copy" in check.detail and "sync" not in check.detail
+
+
+def test_target_below_source_says_to_copy_again():
+    source, writer = migrated(make_records(10), ENTRY, skip={"id-3"})
+    check = verify_counts(source, FakeReader(writer), ENTRY, collection_of(source))
+    assert check.detail == (
+        "source count 10, target count 9; run to-weaviate copy again. If the "
+        "counts still differ, records were skipped or rejected: read "
+        "rejects.jsonl and start the copy over in a new --dir."
+    )
+
+
+def test_target_above_source_says_no_command_removes_the_extra_objects():
+    source, writer = migrated(make_records(10), ENTRY)
+    writer.write(ENTRY, converted(make_records(2, prefix="ghost"), ENTRY))
+    check = verify_counts(source, FakeReader(writer), ENTRY, collection_of(source))
+    assert not check.passed
+    assert check.detail == (
+        "source count 10, target count 12; the target holds objects whose "
+        "source records were deleted. This version has no command that removes "
+        "them."
+    )
 
 
 def test_id_diff_finds_one_missing_among_many(tmp_path):

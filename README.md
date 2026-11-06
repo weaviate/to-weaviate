@@ -101,6 +101,12 @@ Compares Weaviate with Chroma: the counts, the full list of ids, and a
 sample of records with their properties and vectors. It writes `report.md`
 and `report.json`.
 
+`copy` reads a live source by position. A record deleted from the source
+during a copy can make `copy` skip other records. Run a full `verify` after
+writes to the source have stopped. `verify --quick` skips the id comparison,
+so when the counts match it finds a missing record only if the sample holds
+that record.
+
 - `--sample N`: records to compare per collection, 1 to 10000. Default: 300.
 - `--quick`: skip the comparison of the full id lists.
 
