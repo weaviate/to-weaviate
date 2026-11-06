@@ -230,11 +230,13 @@ def _draft_collection(
     taken_names.add(name)
     props, dropped = _properties(source)
 
-    def kept(vector_name: str, use_mapper: bool) -> VectorPlan:
-        chosen = vectorizer
-        if chosen is None and use_mapper and vectorizer_for is not None:
-            chosen, mapper_notes = vectorizer_for(source.embedding)
-            notes.extend(mapper_notes)
+    def kept(vector_name: str, with_vectorizer: bool) -> VectorPlan:
+        chosen = None
+        if with_vectorizer:
+            chosen = vectorizer
+            if chosen is None and vectorizer_for is not None:
+                chosen, mapper_notes = vectorizer_for(source.embedding)
+                notes.extend(mapper_notes)
         vector_index = index
         if source.distance in ("l2-squared", "dot") and index.type == "default":
             vector_index = index.model_copy(update={"type": "hnsw"})

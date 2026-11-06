@@ -143,6 +143,23 @@ def test_draft_both_keeps_the_source_vector_and_adds_a_new_one():
     assert vs[1].distance is None
 
 
+def test_draft_both_puts_the_chosen_vectorizer_on_the_new_vector_only():
+    chosen = VectorizerPlan(
+        module="text2vec-openai", options={"model": "text-embedding-3-large"}
+    )
+    plan = draft_plan(
+        SRC,
+        [make(embedding={"name": "x"})],
+        "both",
+        chosen,
+        vectorizer_for=lambda e: (VectorizerPlan(module="m"), []),
+    )
+    vs = target(plan).vectors
+    assert [(x.name, x.mode) for x in vs] == [("source", "keep"), ("default", "embed")]
+    assert vs[0].vectorizer is None
+    assert vs[1].vectorizer == chosen
+
+
 def test_draft_keep_uses_the_mapper_and_collects_notes():
     def mapper(embedding):
         return VectorizerPlan(module="text2vec-x"), ["mapped"]
