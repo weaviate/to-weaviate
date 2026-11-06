@@ -131,12 +131,34 @@ def test_counts_match():
     assert "source count 10" in check.detail and "target count 10" in check.detail
 
 
-def test_count_mismatch_names_sync():
+def test_count_mismatch_names_copy():
     source, writer = migrated(make_records(10), ENTRY, skip={"id-3"})
     check = verify_counts(source, FakeReader(writer), ENTRY, collection_of(source))
     assert (check.name, check.collection, check.passed) == ("count", "Docs", False)
     assert "source count 10" in check.detail and "target count 9" in check.detail
-    assert "to-weaviate sync" in check.detail
+    assert "to-weaviate copy" in check.detail and "sync" not in check.detail
+
+
+def test_target_below_source_says_to_copy_again():
+    source, writer = migrated(make_records(10), ENTRY, skip={"id-3"})
+    check = verify_counts(source, FakeReader(writer), ENTRY, collection_of(source))
+    assert check.detail == (
+        "source count 10, target count 9; run to-weaviate copy again. If the "
+        "counts still differ, records were skipped or rejected: read "
+        "rejects.jsonl and start the copy over in a new --dir."
+    )
+
+
+def test_target_above_source_says_no_command_removes_the_extra_objects():
+    source, writer = migrated(make_records(10), ENTRY)
+    writer.write(ENTRY, converted(make_records(2, prefix="ghost"), ENTRY))
+    check = verify_counts(source, FakeReader(writer), ENTRY, collection_of(source))
+    assert not check.passed
+    assert check.detail == (
+        "source count 10, target count 12; the target holds objects whose "
+        "source records were deleted. This version has no command that removes "
+        "them."
+    )
 
 
 def test_id_diff_finds_one_missing_among_many(tmp_path):
@@ -317,6 +339,46 @@ def test_rejects_are_counted_and_not_compared():
     check = records_check([*records, odd], ENTRY, converted(records, ENTRY))
     assert check.passed, check.detail
     assert "sampled 11, compared 10, rejects skipped 1" in check.detail
+
+
+class EmptySampleSource(FakeSource):
+    """FakeSource whose sample holds no record, as after deletes in the source."""
+
+    def sample(self, collection, size, rng, with_vectors):
+        return []
+
+
+def test_records_fail_when_no_record_was_compared_and_the_source_has_records():
+    records = make_records(10)
+    source, writer = EmptySampleSource(records), FakeWriter()
+    writer.write(ENTRY, converted(records, ENTRY))
+    check = verify_records(
+        source, FakeReader(writer), ENTRY, collection_of(source), 300, random.Random(0)
+    )
+    assert (check.name, check.passed) == ("records", False)
+    assert check.detail == (
+        "sampled 0, compared 0, rejects skipped 0, differing 0; no record was "
+        "compared; run to-weaviate verify again"
+    )
+
+
+def test_records_fail_when_every_sampled_record_is_a_reject():
+    odd = Record("odd-1", [1.0, 1.0], "doc", None, {"mystery": 1})
+    check = records_check([odd, replace(odd, id="odd-2")], ENTRY, [])
+    assert not check.passed
+    assert check.detail == (
+        "sampled 2, compared 0, rejects skipped 2, differing 0; every sampled "
+        "record is rejected at copy time; read rejects.jsonl"
+    )
+
+
+def test_records_pass_on_an_empty_source():
+    check = records_check([], ENTRY, [], sample=300)
+    assert (check.name, check.passed, check.detail) == (
+        "records",
+        True,
+        "source is empty",
+    )
 
 
 def test_records_detail_lists_at_most_10_failures():

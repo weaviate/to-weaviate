@@ -25,6 +25,19 @@ LISTED_FAILURES = 10
 ID_BATCH = 1000
 REPORT_MD = "report.md"
 REPORT_JSON = "report.json"
+TARGET_BELOW_SOURCE = (
+    "run to-weaviate copy again. If the counts still differ, records were "
+    "skipped or rejected: read rejects.jsonl and start the copy over in a new "
+    "--dir."
+)
+TARGET_ABOVE_SOURCE = (
+    "the target holds objects whose source records were deleted. This version "
+    "has no command that removes them."
+)
+NOTHING_COMPARED = "no record was compared; run to-weaviate verify again"
+EVERY_SAMPLE_REJECTED = (
+    "every sampled record is rejected at copy time; read rejects.jsonl"
+)
 
 _TABLES = """
 PRAGMA journal_mode = OFF;
@@ -101,8 +114,10 @@ def verify_counts(
     expected = source.count(collection)
     found = reader.count(entry)
     detail = f"source count {expected}, target count {found}"
-    if expected != found:
-        detail += "; run to-weaviate sync"
+    if found < expected:
+        detail += f"; {TARGET_BELOW_SOURCE}"
+    elif found > expected:
+        detail += f"; {TARGET_ABOVE_SOURCE}"
     return _check("count", entry, expected == found, detail)
 
 
@@ -235,10 +250,14 @@ def verify_records(
 ) -> Check:
     """Compare `sample` source records with their target objects.
 
-    A record that converts to a reject is counted and not compared.
+    A record that converts to a reject is counted and not compared. An empty
+    sample of an empty source passes. Otherwise the check fails when no record
+    was compared.
     """
     with_vectors = any(v.mode == "keep" for v in entry.target.vectors)
     records = source.sample(collection, sample, rng, with_vectors)
+    if not records and source.count(collection) == 0:
+        return _check("records", entry, True, "source is empty")
     expected: list[tuple[str, TargetObject]] = []
     for record in records:
         obj = to_object(record, entry)
@@ -257,11 +276,15 @@ def verify_records(
         f"sampled {len(records)}, compared {len(expected)}, "
         f"rejects skipped {len(records) - len(expected)}, differing {len(failures)}"
     )
-    if failures:
+    if not records:
+        detail += f"; {NOTHING_COMPARED}"
+    elif not expected:
+        detail += f"; {EVERY_SAMPLE_REJECTED}"
+    elif failures:
         detail += ": " + "; ".join(failures[:LISTED_FAILURES])
         if len(failures) > LISTED_FAILURES:
             detail += f"; {len(failures) - LISTED_FAILURES} more"
-    return _check("records", entry, not failures, detail)
+    return _check("records", entry, bool(expected) and not failures, detail)
 
 
 def check_line(check: Check) -> str:
