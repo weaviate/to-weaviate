@@ -22,6 +22,7 @@ from weaviate.collections.classes.config import (
 from weaviate.exceptions import (
     UnexpectedStatusCodeError,
     WeaviateConnectionError,
+    WeaviateQueryError,
     WeaviateTimeoutError,
 )
 
@@ -34,6 +35,9 @@ from to_weaviate.plan import (
 from to_weaviate.retry import with_retry
 
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+GRPC_RETRY_STATUSES = frozenset(
+    {"UNAVAILABLE", "DEADLINE_EXCEEDED", "RESOURCE_EXHAUSTED"}
+)
 
 _DATA_TYPES = {
     "text": DataType.TEXT,
@@ -96,10 +100,23 @@ def _val(x: Any) -> str:
     return str(getattr(x, "value", x))
 
 
+def _grpc_status(exc: BaseException | None) -> str | None:
+    """The status name of a gRPC error, read through its `code()` method."""
+    code = getattr(exc, "code", None)
+    return getattr(code(), "name", None) if callable(code) else None
+
+
 def transient(exc: Exception) -> float | None:
     if isinstance(exc, WeaviateConnectionError | WeaviateTimeoutError):
         return 0.0
     if isinstance(exc, UnexpectedStatusCodeError) and exc.status_code in RETRY_STATUSES:
+        return 0.0
+    # The client raises WeaviateQueryError inside the except block of the gRPC
+    # error, so that error is the cause or the context.
+    if isinstance(exc, WeaviateQueryError) and any(
+        _grpc_status(link) in GRPC_RETRY_STATUSES
+        for link in (exc.__cause__, exc.__context__)
+    ):
         return 0.0
     return None
 

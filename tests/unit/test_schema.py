@@ -3,6 +3,7 @@ from typing import Any
 
 import httpx
 import pytest
+from fakes import FakeRpcError, raise_grpc_failure
 from weaviate.classes.config import DataType, VectorDistances
 from weaviate.collections.classes.config import (
     _BQConfig,
@@ -10,7 +11,13 @@ from weaviate.collections.classes.config import (
     _VectorIndexConfigDynamic,
     _VectorIndexConfigHNSW,
 )
-from weaviate.exceptions import UnexpectedStatusCodeError, WeaviateConnectionError
+from weaviate.exceptions import (
+    UnexpectedStatusCodeError,
+    WeaviateBatchError,
+    WeaviateConnectionError,
+    WeaviateQueryError,
+    WeaviateTenantGetError,
+)
 
 from to_weaviate import plan as p
 from to_weaviate.settings import WeaviateSettings
@@ -396,6 +403,41 @@ def test_transient_statuses(status):
 @pytest.mark.parametrize("status", [400, 401, 404, 422])
 def test_non_transient_statuses(status):
     assert schema.transient(_status_error(status)) is None
+
+
+def _grpc_error(status: str, error: Any) -> Exception:
+    with pytest.raises(WeaviateQueryError) as info:
+        raise_grpc_failure(status, error)
+    return info.value
+
+
+@pytest.mark.parametrize(
+    ("status", "delay"),
+    [
+        ("UNAVAILABLE", 0.0),
+        ("DEADLINE_EXCEEDED", 0.0),
+        ("RESOURCE_EXHAUSTED", 0.0),
+        ("UNKNOWN", None),
+        ("NOT_FOUND", None),
+        ("INVALID_ARGUMENT", None),
+    ],
+)
+def test_transient_grpc_statuses(status, delay):
+    query = _grpc_error(status, lambda m: WeaviateQueryError(m, "GRPC search"))
+    batch = _grpc_error(status, WeaviateBatchError)
+    assert isinstance(query.__context__, FakeRpcError)
+    assert schema.transient(query) == schema.transient(batch) == delay
+
+
+def test_transient_reads_the_cause_of_a_grpc_failure():
+    error = WeaviateTenantGetError("fake")
+    error.__cause__ = FakeRpcError("UNAVAILABLE")
+    assert schema.transient(error) == 0.0
+
+
+def test_query_error_without_a_grpc_error_is_not_transient():
+    error = WeaviateQueryError("could not find class Probe_Missing", "GRPC search")
+    assert schema.transient(error) is None
 
 
 def test_connect_with_grpc_url_uses_custom(monkeypatch):

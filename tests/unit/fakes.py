@@ -3,9 +3,10 @@ import random
 import threading
 import time
 from collections import Counter
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import replace
-from typing import Any, ClassVar, Literal
+from types import SimpleNamespace
+from typing import Any, ClassVar, Literal, NoReturn
 
 import typer
 from typer.testing import CliRunner, Result
@@ -196,6 +197,28 @@ class FakeSource:
             r.id for r in self.records if key in r.metadata and r.metadata[key] == value
         ]
         return matches[:limit]
+
+
+class FakeRpcError(Exception):
+    """Stands in for grpc.RpcError: `code()` returns an object with the status name."""
+
+    def __init__(self, status: str) -> None:
+        super().__init__(status)
+        self.status = status
+
+    def code(self) -> SimpleNamespace:
+        return SimpleNamespace(name=self.status)
+
+
+def raise_grpc_failure(status: str, error: Callable[[str], Exception]) -> NoReturn:
+    """Raise `error` inside the except block of a FakeRpcError, as the client does.
+
+    The FakeRpcError becomes the `__context__` of the raised error.
+    """
+    try:
+        raise FakeRpcError(status)
+    except FakeRpcError:
+        raise error(f"fake gRPC failure {status}")  # noqa: B904
 
 
 def _source_id(obj: TargetObject) -> str:

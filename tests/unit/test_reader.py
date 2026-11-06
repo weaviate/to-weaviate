@@ -4,7 +4,12 @@ from typing import Any
 
 import httpx
 import pytest
-from weaviate.exceptions import UnexpectedStatusCodeError, WeaviateConnectionError
+from fakes import raise_grpc_failure
+from weaviate.exceptions import (
+    UnexpectedStatusCodeError,
+    WeaviateConnectionError,
+    WeaviateQueryError,
+)
 
 from to_weaviate import plan as p
 from to_weaviate.sources.base import Record
@@ -86,7 +91,7 @@ class FakeIterator:
 
 
 class FakeCollection:
-    def __init__(self, objects: list[Any], failures: list[Exception]) -> None:
+    def __init__(self, objects: list[Any], failures: list[Exception | str]) -> None:
         self.objects = objects
         self.failures = failures
         self.applied_tenants: list[str] = []
@@ -106,7 +111,12 @@ class FakeCollection:
     def _call(self, name: str, kwargs: dict[str, Any]) -> None:
         self.calls.append((name, kwargs))
         if self.failures:
-            raise self.failures.pop(0)
+            failure = self.failures.pop(0)
+            if isinstance(failure, str):
+                raise_grpc_failure(
+                    failure, lambda m: WeaviateQueryError(m, "GRPC search")
+                )
+            raise failure
 
     def with_tenant(self, tenant: str) -> "FakeCollection":
         self.applied_tenants.append(tenant)
@@ -137,7 +147,7 @@ class FakeCollection:
 
 class FakeClient:
     def __init__(
-        self, objects: list[Any], failures: list[Exception] | None = None
+        self, objects: list[Any], failures: list[Exception | str] | None = None
     ) -> None:
         self.collection = FakeCollection(objects, failures or [])
         self.names: list[str] = []
@@ -287,3 +297,17 @@ def test_exists_checks_the_collection_and_then_the_tenant():
     client.existing = set()
     assert target.exists(make_entry(tenant="t1")) is False
     assert len(client.collection.calls) == 2
+
+
+def test_transient_grpc_failure_is_retried():
+    obj = stored("a")
+    client = FakeClient([obj], failures=["DEADLINE_EXCEEDED"])
+    assert list(reader(client).fetch(ENTRY, [str(obj.uuid)])) == [str(obj.uuid)]
+    assert len(client.collection.calls) == 2
+
+
+def test_other_grpc_failure_is_raised_at_once():
+    client = FakeClient([stored("a")], failures=["UNKNOWN"])
+    with pytest.raises(WeaviateQueryError):
+        reader(client).count(ENTRY)
+    assert len(client.collection.calls) == 1
