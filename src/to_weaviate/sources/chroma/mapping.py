@@ -2,6 +2,10 @@ from typing import Any, NamedTuple
 
 from to_weaviate.plan import VectorizerPlan
 
+# The OpenAI client's default base URL, https://api.openai.com/v1, after
+# `_openai_base`. Weaviate uses it when base_url is not set.
+OPENAI_DEFAULT_BASE = "https://api.openai.com"
+
 
 class _Function(NamedTuple):
     module: str
@@ -51,6 +55,15 @@ _GEMINI_VERTEX = _Function(
 )
 
 
+def _openai_base(api_base: str) -> str:
+    """`api_base` without one trailing `/v1` and without a trailing slash.
+
+    The OpenAI client takes a base URL that ends in `/v1`. Weaviate adds
+    `/v1/embeddings` to its base_url.
+    """
+    return api_base.removesuffix("/").removesuffix("/v1").removesuffix("/")
+
+
 def _function(name: Any, config: dict[str, Any]) -> _Function | None:
     if name == "google_gemini" and config.get("vertexai") is True:
         return _GEMINI_VERTEX
@@ -98,7 +111,19 @@ def vectorizer_for(
         for source, target in function.renames.items()
         if config.get(source) is not None
     }
+    notes: list[str] = []
     model = options.get("model")
     if name == "google_generative_ai" and isinstance(model, str):
         options["model"] = model.removeprefix("models/")
-    return VectorizerPlan(module=function.module, options=options), []
+    base_url = options.get("base_url")
+    if isinstance(base_url, str):
+        base_url = _openai_base(base_url)
+        if base_url == OPENAI_DEFAULT_BASE:
+            del options["base_url"]
+        else:
+            options["base_url"] = base_url
+            notes.append(
+                f"text2vec-openai uses base_url {base_url}; the Weaviate server "
+                "must reach this host."
+            )
+    return VectorizerPlan(module=function.module, options=options), notes

@@ -31,6 +31,38 @@ def test_openai_never_copies_the_key_variable():
     assert v.options == {"model": "m", "base_url": "https://x"}
 
 
+@pytest.mark.parametrize(
+    ("api_base", "base_url"),
+    [
+        ("https://proxy.example.com/v1", "https://proxy.example.com"),
+        ("https://proxy.example.com/v1/", "https://proxy.example.com"),
+        ("https://proxy.example.com/", "https://proxy.example.com"),
+        ("https://proxy.example.com/openai/v1", "https://proxy.example.com/openai"),
+        ("https://proxy.example.com/v1/v1", "https://proxy.example.com/v1"),
+    ],
+)
+def test_openai_api_base_loses_one_trailing_v1(api_base, base_url):
+    v, notes = vectorizer_for(known("openai", model_name="m", api_base=api_base))
+    assert v is not None
+    assert v.options == {"model": "m", "base_url": base_url}
+    assert [n for n in notes if "Weaviate server must reach" in n and base_url in n]
+
+
+@pytest.mark.parametrize(
+    "api_base",
+    [
+        "https://api.openai.com/v1",
+        "https://api.openai.com/v1/",
+        "https://api.openai.com",
+    ],
+)
+def test_openai_default_base_gives_no_base_url(api_base):
+    v, notes = vectorizer_for(known("openai", model_name="m", api_base=api_base))
+    assert v is not None
+    assert v.options == {"model": "m"}
+    assert notes == []
+
+
 def test_openai_azure_has_no_mapping():
     v, notes = vectorizer_for(known("openai", api_type="azure", model_name="m"))
     assert v is None and notes
