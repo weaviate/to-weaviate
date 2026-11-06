@@ -136,24 +136,127 @@ def test_inspect_json_lists_decisions():
 
 
 def test_no_secret_in_any_output(tmp_path):
-    env = {"CHROMA_API_KEY": "SENTINEL-A", "WEAVIATE_API_KEY": "SENTINEL-B"}
-    fakes = FakeFactories(FakeSource(cli_records(10)))
+    env = {
+        "CHROMA_API_KEY": "SENTINEL-A",
+        "WEAVIATE_API_KEY": "SENTINEL-B",
+        "OPENAI_API_KEY": "SENTINEL-C",
+    }
+    fakes = FakeFactories(
+        FakeSource(cli_records(10)), writer=FakeWriter(reject_ids={"id-3"})
+    )
+    embed = ["--vectors", "embed", "--vectorizer", "text2vec-openai"]
     all_output = ""
-    for args in (
-        ["inspect", "chroma"],
-        ["check"],
-        ["copy"],
-        ["inspect", "chroma", "--force", "--json"],
-        ["check", "--json"],
-        ["copy", "--json"],
+    for args, exit_code in (
+        (["inspect", "chroma", *embed], 0),
+        (["check"], 0),
+        (["copy"], 1),
+        (["status"], 0),
+        (["inspect", "chroma", "--force", "--json", *embed], 0),
+        (["check", "--json"], 0),
+        (["copy", "--json"], 1),
+        (["status", "--json"], 0),
     ):
         r = invoke(fakes, *args, **env)
-        assert r.exit_code == 0, r.output
+        assert r.exit_code == exit_code, r.output
         all_output += r.output
+    assert (tmp_path / ".to-weaviate" / "rejects.jsonl").exists()
+    server_body = {"message": "bad key SENTINEL-B for X-OpenAI-Api-Key SENTINEL-C"}
+    failures: list[tuple[list[str], Exception | None, Exception | None, int]] = [
+        (
+            ["inspect", "chroma", "--force"],
+            httpx.LocalProtocolError("Illegal header value b'SENTINEL-A'"),
+            None,
+            4,
+        ),
+        (
+            ["check"],
+            None,
+            UnexpectedStatusCodeError("x", httpx.Response(500, json=server_body)),
+            4,
+        ),
+        (["copy"], None, RuntimeError("headers: SENTINEL-B SENTINEL-C"), 5),
+        (["status", "--dir", "missing"], None, None, 2),
+    ]
+    for args, source_error, target_error, exit_code in failures:
+        fakes.source_error, fakes.target_error = source_error, target_error
+        for mode in ([], ["--json"]):
+            r = invoke(fakes, *args, *mode, TO_WEAVIATE_DEBUG="1", **env)
+            assert r.exit_code == exit_code, r.output
+            all_output += r.output
     for f in tmp_path.rglob("*"):
         if f.is_file():
             assert b"SENTINEL" not in f.read_bytes()
     assert "SENTINEL" not in all_output
+
+
+@pytest.mark.parametrize("mode", [[], ["--json"]])
+def test_secret_in_an_exception_is_redacted(mode):
+    error = httpx.LocalProtocolError("Illegal header value b'SENTINEL-A'")
+    fakes = FakeFactories(FakeSource(cli_records(10)), source_error=error)
+    r = invoke(fakes, "inspect", "chroma", *mode, CHROMA_API_KEY="SENTINEL-A")
+    assert r.exit_code == 4
+    assert "SENTINEL" not in r.stdout and "SENTINEL" not in r.stderr
+    assert "***" in r.output
+
+
+def test_unexpected_error_gives_an_internal_error_document(tmp_path):
+    fakes = FakeFactories(
+        FakeSource(cli_records(10)), writer=FakeWriter(fail_on_call=1)
+    )
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 5
+    d = json.loads(r.stdout)
+    assert (d["status"], d["code"]) == ("error", "internal_error")
+    assert d["message"] == "internal error: RuntimeError: fake write failure on call 1"
+    assert "https://github.com/weaviate/to-weaviate/issues" in d["hint"]
+    assert "TO_WEAVIATE_DEBUG=1" in d["hint"]
+    assert "Traceback" not in r.output
+    assert (tmp_path / ".to-weaviate" / "state.sqlite").exists()
+
+
+def test_unexpected_error_in_text_mode():
+    fakes = FakeFactories(
+        FakeSource(cli_records(10)), writer=FakeWriter(fail_on_call=1)
+    )
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    r = invoke(fakes, "copy")
+    assert r.exit_code == 5
+    assert "Error: internal error: RuntimeError" in r.stderr
+    assert "Traceback" not in r.output
+
+
+def test_debug_prints_the_traceback_on_stderr():
+    fakes = FakeFactories(
+        FakeSource(cli_records(10)), writer=FakeWriter(fail_on_call=1)
+    )
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    r = invoke(fakes, "copy", "--json", TO_WEAVIATE_DEBUG="1")
+    assert r.exit_code == 5
+    assert "Traceback (most recent call last)" in r.stderr
+    assert "fake write failure on call 1" in r.stderr
+    assert json.loads(r.stdout)["code"] == "internal_error"
+
+
+def test_other_weaviate_errors_are_target_unreachable():
+    error = UnexpectedStatusCodeError("Create collection", httpx.Response(500))
+    fakes = FakeFactories(
+        FakeSource(cli_records(10)), schema=FakeSchema(ensure_error=error)
+    )
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 4
+    d = json.loads(r.stdout)
+    assert d["code"] == "target_unreachable"
+    assert "UnexpectedStatusCodeError" in d["message"] and "500" in d["message"]
+
+
+def test_click_errors_and_version_keep_their_behavior():
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    r = invoke(fakes, "copy", "--parallelism", "many", "--json")
+    assert r.exit_code == 2 and r.stdout == "" and "Invalid value" in r.stderr
+    r = invoke(fakes, "--version")
+    assert r.exit_code == 0 and r.stdout.startswith("to-weaviate ")
 
 
 def test_auth_error_does_not_repeat_the_server_text():
@@ -244,7 +347,9 @@ def test_copy_refuses_an_invalid_vectorizer_before_connecting():
     r = invoke(fakes, "copy", "--json")
     assert r.exit_code == 2
     d = json.loads(r.stdout)
-    assert d["code"] == "invalid_plan" and "colour" in d["message"]
+    assert d["code"] == "invalid_plan"
+    assert [e["code"] for e in d["errors"]] == ["invalid_vectorizer"]
+    assert "colour" in d["errors"][0]["message"]
 
 
 @pytest.mark.parametrize("cmd", ["check", "copy", "status"])
@@ -319,4 +424,5 @@ def test_error_exit_covers_every_code():
         "auth_failed": 3,
         "source_unreachable": 4,
         "target_unreachable": 4,
+        "internal_error": 5,
     }

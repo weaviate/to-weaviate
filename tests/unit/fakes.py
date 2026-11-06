@@ -290,6 +290,7 @@ class FakeFactories:
         self.source_error = source_error
         self.target_error = target_error
         self.source_calls = 0
+        self.schema_calls = 0
         self.consistency: list[str | None] = []
 
     def app(self) -> typer.Typer:
@@ -313,6 +314,7 @@ class FakeFactories:
         return None
 
     def _schema(self, settings: WeaviateSettings) -> FakeSchema:
+        self.schema_calls += 1
         if self.target_error is not None:
             raise self.target_error
         return self.schema
@@ -331,6 +333,7 @@ def cli_env(**overrides: str | None) -> dict[str, str | None]:
             "WEAVIATE_URL": "http://localhost:8099",
             "WEAVIATE_GRPC_URL": None,
             "WEAVIATE_API_KEY": "weaviate-key",
+            "TO_WEAVIATE_DEBUG": None,
         }
     )
     env.update(overrides)

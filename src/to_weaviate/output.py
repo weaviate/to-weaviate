@@ -1,6 +1,12 @@
 import json
 import sys
+from collections.abc import Mapping, Sequence
 from typing import Any
+
+from to_weaviate.settings import API_KEY_MAP
+
+REDACTED = "***"
+SECRET_VARIABLES = ("CHROMA_API_KEY", "WEAVIATE_API_KEY", *API_KEY_MAP)
 
 ERROR_EXIT: dict[str, int] = {
     "rejects": 1,
@@ -14,6 +20,7 @@ ERROR_EXIT: dict[str, int] = {
     "auth_failed": 3,
     "source_unreachable": 4,
     "target_unreachable": 4,
+    "internal_error": 5,
 }
 
 
@@ -66,3 +73,34 @@ def emit(json_output: bool, document: dict[str, Any], text: str) -> None:
 def info(json_output: bool, line: str) -> None:
     """JSON mode: stderr. Text mode: stdout."""
     print(line, file=sys.stderr if json_output else sys.stdout, flush=True)
+
+
+def secret_values(env: Mapping[str, str]) -> list[str]:
+    """Non-empty values of the variables that hold secrets, stripped like settings."""
+    values = (env.get(var, "").strip() for var in SECRET_VARIABLES)
+    return list(dict.fromkeys(v for v in values if v))
+
+
+def redact(text: str, secrets: Sequence[str]) -> str:
+    """Replace each secret, and its escaped forms in str and bytes reprs, with ***."""
+    forms = {
+        form
+        for secret in secrets
+        if secret
+        for form in (secret, repr(secret)[1:-1], repr(secret.encode())[2:-1])
+    }
+    # Longer forms first, so that a form inside another one cannot split it.
+    for form in sorted(forms, key=len, reverse=True):
+        text = text.replace(form, REDACTED)
+    return text
+
+
+def redact_strings(value: Any, secrets: Sequence[str]) -> Any:
+    """`value` with `redact` applied to every string in it, in lists and dicts."""
+    if isinstance(value, str):
+        return redact(value, secrets)
+    if isinstance(value, dict):
+        return {k: redact_strings(v, secrets) for k, v in value.items()}
+    if isinstance(value, list):
+        return [redact_strings(v, secrets) for v in value]
+    return value

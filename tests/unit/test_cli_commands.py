@@ -323,6 +323,41 @@ def test_copy_collection_matches_source_or_target_name(name, exit_code):
     assert len(fakes.writer.objects) == (10 if exit_code == 0 else 0)
 
 
+def test_copy_refuses_duplicate_target_names_before_connecting(tmp_path):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    directory = tmp_path / DIR
+    plan = load_plan(directory / "plan.yaml")
+    first = plan.collections[0]
+    twin = first.model_copy(
+        update={"source": first.source.model_copy(update={"ref": "other"})}
+    )
+    save_plan(
+        plan.model_copy(update={"collections": [first, twin]}), directory / "plan.yaml"
+    )
+    found = json.loads((directory / "inspect.json").read_text())
+    found["collections"].append({**found["collections"][0], "ref": "other"})
+    (directory / "inspect.json").write_text(json.dumps(found))
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 2
+    d = json.loads(r.stdout)
+    assert d["code"] == "invalid_plan"
+    assert [e["code"] for e in d["errors"]] == ["duplicate_target"]
+    assert fakes.schema_calls == 0 and fakes.source.read_calls == 0
+
+
+def test_copy_requires_provider_key():
+    fakes = inspected(
+        FakeFactories(FakeSource(cli_records(10))),
+        "--vectors",
+        "embed",
+        "--vectorizer",
+        "text2vec-openai",
+    )
+    r = invoke(fakes, "copy")
+    assert r.exit_code == 3 and "OPENAI_API_KEY" in r.output
+    assert fakes.schema_calls == 0 and fakes.source.read_calls == 0
+
+
 def test_parallelism_over_8_is_refused():
     fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
     r = invoke(fakes, "copy", "--parallelism", "9")

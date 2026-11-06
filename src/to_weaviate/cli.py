@@ -1,7 +1,9 @@
 import atexit
 import dataclasses
 import json
+import os
 import sys
+import traceback
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -17,6 +19,7 @@ from weaviate.exceptions import (
     AuthenticationFailedError,
     InsufficientPermissionsError,
     UnexpectedStatusCodeError,
+    WeaviateBaseError,
     WeaviateConnectionError,
     WeaviateGRPCUnavailableError,
     WeaviateStartUpError,
@@ -32,11 +35,17 @@ from to_weaviate.engine.check import (
     plan_findings,
     provider_keys,
     target_groups,
-    vectorizer_findings,
 )
 from to_weaviate.engine.copy import copy_collection
 from to_weaviate.events import Events
-from to_weaviate.output import CliError, emit, info
+from to_weaviate.output import (
+    CliError,
+    emit,
+    info,
+    redact,
+    redact_strings,
+    secret_values,
+)
 from to_weaviate.plan import (
     CollectionPlan,
     IndexPlan,
@@ -98,6 +107,11 @@ CHROMA_HINT = "Check CHROMA_URL and that the Chroma server is running."
 WEAVIATE_HINT = (
     "Check WEAVIATE_URL, WEAVIATE_GRPC_URL and that the Weaviate server is running."
 )
+INTERNAL_HINT = (
+    "Report it at https://github.com/weaviate/to-weaviate/issues. "
+    "Set TO_WEAVIATE_DEBUG=1 to print the traceback."
+)
+DEBUG_VARIABLE = "TO_WEAVIATE_DEBUG"
 SCHEMA_HINT = (
     "A free Weaviate Cloud cluster accepts only the hfresh index. Run "
     "to-weaviate inspect chroma --index hfresh --force, or edit plan.yaml."
@@ -145,8 +159,8 @@ def _refused(service: str, key: str, forbidden: bool) -> CliError:
     )
 
 
-def _as_cli_error(exc: Exception) -> CliError | None:
-    """The CliError for a known failure, or None to let `exc` propagate.
+def _as_cli_error(exc: Exception) -> CliError:
+    """The CliError for `exc`. An exception outside the table is internal_error.
 
     Authentication messages do not repeat the server's text, because a server
     can echo the credential it refused.
@@ -200,22 +214,53 @@ def _as_cli_error(exc: Exception) -> CliError | None:
             "The target collection exists with other settings. Edit plan.yaml "
             "to match it, or choose another target name.",
         )
-    return None
+    if isinstance(exc, WeaviateBaseError):
+        return CliError(
+            "target_unreachable",
+            _short(f"Weaviate request failed: {type(exc).__name__}: {exc}"),
+            WEAVIATE_HINT,
+        )
+    return CliError(
+        "internal_error",
+        _short(f"internal error: {type(exc).__name__}: {exc}"),
+        INTERNAL_HINT,
+    )
+
+
+def _handler_env() -> dict[str, str]:
+    # The handler must report the original error, so a `.env` that cannot be
+    # read falls back to the process environment.
+    try:
+        return load_env(Path.cwd())
+    except Exception:
+        return dict(os.environ)
 
 
 @contextmanager
 def _handled(json_output: bool) -> Iterator[None]:
-    """Report a known failure as text or as a JSON document, then exit."""
+    """Report a failure as text or as a JSON document, then exit.
+
+    Typer and Click exits keep their own behavior. Secret values are redacted
+    from everything printed here.
+    """
     try:
         yield
+    except (typer.Exit, typer.Abort, typer.TyperException):
+        raise
     except Exception as exc:
+        env = _handler_env()
+        secrets = secret_values(env)
         error = _as_cli_error(exc)
-        if error is None:
-            raise
-        emit(json_output, error.document(), error.text)
+        if env.get(DEBUG_VARIABLE, "").strip() == "1":
+            trace = "".join(
+                traceback.format_exception(type(exc), exc, exc.__traceback__)
+            )
+            print(redact(trace, secrets), end="", file=sys.stderr)
+        document = redact_strings(error.document(), secrets)
+        emit(json_output, document, redact(error.text, secrets))
         if not json_output:
-            print(f"Error: {error.message}", file=sys.stderr)
-            print(f"Hint: {error.hint}", file=sys.stderr)
+            print(f"Error: {document['message']}", file=sys.stderr)
+            print(f"Hint: {document['hint']}", file=sys.stderr)
         raise typer.Exit(error.exit_code) from None
 
 
@@ -424,35 +469,49 @@ def _findings_text(errors: list[Finding], warnings: list[Finding]) -> list[str]:
     ]
 
 
+def _findings_document(
+    errors: list[Finding], warnings: list[Finding]
+) -> dict[str, Any]:
+    return {
+        "errors": [dataclasses.asdict(f) for f in errors],
+        "warnings": [dataclasses.asdict(f) for f in warnings],
+    }
+
+
+def _plan_errors(errors: list[Finding], warnings: list[Finding]) -> CliError:
+    return CliError(
+        "invalid_plan",
+        f"The plan has {_plural(len(errors), 'error')}.",
+        EDIT_PLAN_HINT,
+        fields=_findings_document(errors, warnings),
+        text="\n".join(_findings_text(errors, warnings)),
+    )
+
+
+def _require_provider_keys(plan: Plan, settings: WeaviateSettings) -> None:
+    for header, variable in provider_keys(plan):
+        if header not in settings.headers:
+            raise MissingCredential(variable)
+
+
 def _check(factories: _Factories, directory: Path, json_output: bool) -> None:
     plan = _load_plan(directory)
     inspected = _load_inspected(directory)
     errors, warnings = plan_findings(plan, inspected, vectorizer_for)
     settings = weaviate_settings(load_env(Path.cwd()))
-    for header, variable in provider_keys(plan):
-        if header not in settings.headers:
-            raise MissingCredential(variable)
+    _require_provider_keys(plan, settings)
     info(json_output, f"Checking the target at {settings.url}")
     schema = factories.schema(settings)
     errors.extend(module_findings(plan, schema.modules()))
     for name, group in target_groups(plan.collections).items():
         for difference in schema.differences(group) or []:
             errors.append(Finding("plan_mismatch", name, difference))
-    document: dict[str, Any] = {
-        "errors": [dataclasses.asdict(f) for f in errors],
-        "warnings": [dataclasses.asdict(f) for f in warnings],
-    }
-    lines = _findings_text(errors, warnings)
     if errors:
-        raise CliError(
-            "invalid_plan",
-            f"The plan has {_plural(len(errors), 'error')}.",
-            EDIT_PLAN_HINT,
-            fields=document,
-            text="\n".join(lines),
-        )
+        raise _plan_errors(errors, warnings)
+    lines = _findings_text(errors, warnings)
     lines.append(f"No errors, {_plural(len(warnings), 'warning')}.")
-    emit(json_output, {"status": "success", **document}, "\n".join(lines))
+    document = {"status": "success", **_findings_document(errors, warnings)}
+    emit(json_output, document, "\n".join(lines))
 
 
 def _rows(
@@ -532,16 +591,16 @@ def _copy(
     entries = _select(plan.collections, names)
     groups = target_groups(plan.collections)
     selected = {e.target.name: groups[e.target.name] for e in entries}
-    invalid = vectorizer_findings(selected)
-    if invalid:
-        raise CliError(
-            "invalid_plan",
-            _short("; ".join(f"{f.collection}: {f.message}" for f in invalid)),
-            "Edit plan.yaml. to-weaviate check lists every error.",
-        )
+    errors, warnings = plan_findings(plan, inspected, vectorizer_for)
+    errors = [f for f in errors if f.collection in selected]
+    if errors:
+        raise _plan_errors(errors, [w for w in warnings if w.collection in selected])
     env = load_env(Path.cwd())
     source_settings = chroma_settings(env)
     target_settings = weaviate_settings(env)
+    _require_provider_keys(
+        plan.model_copy(update={"collections": entries}), target_settings
+    )
     source = factories.source(source_settings)
     schema = factories.schema(target_settings)
     writer = factories.writer(target_settings, consistency)
