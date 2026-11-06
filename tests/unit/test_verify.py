@@ -341,6 +341,40 @@ def test_rejects_are_counted_and_not_compared():
     assert "sampled 11, compared 10, rejects skipped 1" in check.detail
 
 
+class EmptySampleSource(FakeSource):
+    """FakeSource whose sample holds no record, as after deletes in the source."""
+
+    def sample(self, collection, size, rng, with_vectors):
+        return []
+
+
+def test_records_fail_when_no_record_was_compared_and_the_source_has_records():
+    records = make_records(10)
+    source, writer = EmptySampleSource(records), FakeWriter()
+    writer.write(ENTRY, converted(records, ENTRY))
+    check = verify_records(
+        source, FakeReader(writer), ENTRY, collection_of(source), 300, random.Random(0)
+    )
+    assert (check.name, check.passed) == ("records", False)
+    assert check.detail == "no record was compared; run to-weaviate verify again"
+
+
+def test_records_fail_when_every_sampled_record_is_a_reject():
+    odd = Record("odd-1", [1.0, 1.0], "doc", None, {"mystery": 1})
+    check = records_check([odd], ENTRY, [])
+    assert not check.passed
+    assert check.detail == "no record was compared; run to-weaviate verify again"
+
+
+def test_records_pass_on_an_empty_source():
+    check = records_check([], ENTRY, [], sample=300)
+    assert (check.name, check.passed, check.detail) == (
+        "records",
+        True,
+        "source is empty",
+    )
+
+
 def test_records_detail_lists_at_most_10_failures():
     check = records_check(make_records(15), ENTRY, [])
     assert not check.passed and "differing 15" in check.detail

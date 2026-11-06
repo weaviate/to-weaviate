@@ -20,6 +20,7 @@ from to_weaviate.sources.chroma.config import (
 from to_weaviate.types import SPARSE_VECTOR, value_type
 
 DOCUMENT_SAMPLE_PAGES = 10
+SAMPLE_PLACES = 10
 READ_INCLUDE = ["documents", "metadatas", "uris"]
 
 
@@ -32,6 +33,33 @@ def _spaced_pages(total: int, wanted: int) -> list[int]:
     if wanted >= total:
         return list(range(total))
     return sorted({i * total // wanted for i in range(wanted)})
+
+
+def _sample_pages(count: int, size: int, rng: random.Random) -> list[tuple[int, int]]:
+    """(offset, limit) of each page that a sample of `size` of `count` records reads.
+
+    When `count <= size`, the pages cover every record. Otherwise there are
+    `places = min(size, max(SAMPLE_PLACES, ceil(size / CHROMA_MAX_PAGE)))`
+    pages. Their limits differ by at most one and add up to `size`. Page i
+    starts after the records of the pages before it plus a gap drawn from
+    `[i * slack // places, (i + 1) * slack // places]`, where `slack = count -
+    size`. The gaps do not decrease, so the pages do not overlap, and the last
+    page ends at or before `count`. Page i ends inside the i-th of `places`
+    equal parts of `[0, count)` and starts at most one record before it.
+    """
+    if count <= size:
+        return [
+            (offset, min(CHROMA_MAX_PAGE, count - offset))
+            for offset in range(0, count, CHROMA_MAX_PAGE)
+        ]
+    places = min(size, max(SAMPLE_PLACES, math.ceil(size / CHROMA_MAX_PAGE)))
+    slack = count - size
+    pages = []
+    for i in range(places):
+        before, through = i * size // places, (i + 1) * size // places
+        gap = rng.randint(i * slack // places, (i + 1) * slack // places)
+        pages.append((before + gap, through - before))
+    return pages
 
 
 def _number(value: Any) -> float:
@@ -240,17 +268,21 @@ class ChromaSource:
         rng: random.Random,
         with_vectors: bool,
     ) -> list[Record]:
+        """`min(size, count)` different records, read at the `_sample_pages` pages.
+
+        `count` is the source count read at the start of the call, not
+        `collection.count`. A source that changes during the call can give
+        fewer records.
+        """
         include = [*READ_INCLUDE, "embeddings"] if with_vectors else READ_INCLUDE
-        last_offset = max(collection.count - CHROMA_MAX_PAGE, 0)
         seen: dict[str, Record] = {}
-        for _ in range(math.ceil(size / CHROMA_MAX_PAGE)):
-            offset = rng.randint(0, last_offset)
+        for offset, limit in _sample_pages(self.count(collection), size, rng):
             response = self._get(
-                collection, limit=CHROMA_MAX_PAGE, offset=offset, include=include
+                collection, limit=limit, offset=offset, include=include
             )
             for record in _records(response):
                 seen.setdefault(record.id, record)
-        return list(seen.values())[:size]
+        return list(seen.values())
 
     def vector_search(
         self, collection: SourceCollection, vector: list[float], limit: int

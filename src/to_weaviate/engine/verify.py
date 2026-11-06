@@ -34,6 +34,7 @@ TARGET_ABOVE_SOURCE = (
     "the target holds objects whose source records were deleted. This version "
     "has no command that removes them."
 )
+NOTHING_COMPARED = "no record was compared; run to-weaviate verify again"
 
 _TABLES = """
 PRAGMA journal_mode = OFF;
@@ -246,7 +247,8 @@ def verify_records(
 ) -> Check:
     """Compare `sample` source records with their target objects.
 
-    A record that converts to a reject is counted and not compared.
+    A record that converts to a reject is counted and not compared. The check
+    fails when no record was compared and the source count is above 0.
     """
     with_vectors = any(v.mode == "keep" for v in entry.target.vectors)
     records = source.sample(collection, sample, rng, with_vectors)
@@ -255,6 +257,10 @@ def verify_records(
         obj = to_object(record, entry)
         if isinstance(obj, TargetObject):
             expected.append((record.id, obj))
+    if not expected:
+        empty = source.count(collection) == 0
+        detail = "source is empty" if empty else NOTHING_COMPARED
+        return _check("records", entry, empty, detail)
     stored = reader.fetch(entry, [obj.uuid for _, obj in expected])
     failures: list[str] = []
     for source_id, obj in expected:
