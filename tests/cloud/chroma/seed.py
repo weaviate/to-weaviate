@@ -12,6 +12,7 @@ It stops without a change when the collection exists, and it deletes nothing.
 import os
 import random
 import sys
+import unicodedata
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import quote
@@ -77,6 +78,11 @@ def seed(env: Mapping[str, str]) -> None:
         raise SeedError("CHROMA_TENANT is not set")
     if settings.database is None:
         raise SeedError("CHROMA_DATABASE is not set")
+    # httpx puts an invalid header value into its error text.
+    if settings.api_key is not None and any(
+        unicodedata.category(c) == "Cc" for c in settings.api_key
+    ):
+        raise SeedError("CHROMA_API_KEY holds a control character")
     headers: dict[str, str] = {}
     if settings.api_key is not None:
         value = settings.api_key

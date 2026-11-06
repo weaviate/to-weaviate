@@ -9,7 +9,13 @@ import os
 from collections.abc import Iterator
 
 import pytest
-from e2e import close_weaviate, delete_target_collection, run, weaviate_count
+from e2e import (
+    close_weaviate,
+    delete_target_collection,
+    run,
+    weaviate_config,
+    weaviate_count,
+)
 
 REQUIRE_VARIABLE = "TO_WEAVIATE_REQUIRE_CLOUD"
 REQUIRED_VARIABLES = ("WEAVIATE_URL", "WEAVIATE_API_KEY")
@@ -39,7 +45,11 @@ def missing_variables() -> list[str]:
 def _cloud_variables() -> Iterator[None]:
     missing = missing_variables()
     if missing:
-        reason = "the cloud suite needs these variables: " + "; ".join(missing)
+        reason = (
+            "the cloud suite needs these variables: "
+            + "; ".join(missing)
+            + ". See README.md."
+        )
         # The release job sets it, so that publish never runs after a skip.
         if os.environ.get(REQUIRE_VARIABLE) == "1":
             pytest.fail(reason)
@@ -59,5 +69,12 @@ def test_chroma_cloud_to_weaviate_cloud(tmp_path):
             r = run(cmd, tmp_path)
             assert r.exit_code == 0 and r.data["status"] == "success", r
         assert weaviate_count(TARGET) == 2000
+        config = weaviate_config(TARGET)
+        # Only the keys that seed.py sends: a Chroma server can return more keys.
+        types = {p.name: p.data_type.value for p in config.properties}
+        seeded = {k: types.get(k) for k in ("category", "position", "tags")}
+        assert seeded == {"category": "text", "position": "int", "tags": "text[]"}
+        vector = config.vector_config["default"].vector_index_config
+        assert vector.distance_metric.value == "cosine", vector
     finally:
         delete_target_collection(TARGET)
