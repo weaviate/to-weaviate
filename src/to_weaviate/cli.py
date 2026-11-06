@@ -1,14 +1,19 @@
 import warnings
 
-from authlib.deprecate import AuthlibDeprecationWarning
-
-# Importing authlib.deprecate adds an "always" filter for this category, so this
-# filter comes after that import. It must come before weaviate is imported.
-warnings.filterwarnings(
-    "ignore",
-    message="The httpx module is deprecated",
-    category=AuthlibDeprecationWarning,
-)
+# authlib comes with weaviate-client and is not a declared dependency.
+try:
+    from authlib.deprecate import AuthlibDeprecationWarning
+except ImportError:
+    pass
+else:
+    # Importing authlib.deprecate adds an "always" filter for this category, so
+    # this filter comes after that import. It must come before weaviate is
+    # imported.
+    warnings.filterwarnings(
+        "ignore",
+        message="The httpx module is deprecated",
+        category=AuthlibDeprecationWarning,
+    )
 
 import atexit
 import dataclasses
