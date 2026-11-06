@@ -34,6 +34,11 @@ def _spaced_pages(total: int, wanted: int) -> list[int]:
     return sorted({i * total // wanted for i in range(wanted)})
 
 
+def _number(value: Any) -> float:
+    """`value` as a float. A value that is not a number, such as None, gives NaN."""
+    return float(value) if isinstance(value, int | float) else math.nan
+
+
 def _records(response: dict[str, Any]) -> list[Record]:
     ids = response["ids"]
 
@@ -47,7 +52,7 @@ def _records(response: dict[str, Any]) -> list[Record]:
     return [
         Record(
             id=ids[i],
-            vector=None if vectors[i] is None else [float(x) for x in vectors[i]],
+            vector=None if vectors[i] is None else [_number(x) for x in vectors[i]],
             document=documents[i],
             uri=uris[i],
             metadata=metadatas[i] or {},

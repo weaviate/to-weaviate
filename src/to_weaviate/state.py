@@ -90,10 +90,14 @@ class State:
     def init_collection(
         self, ref: str, partitions: list[Partition], total: int
     ) -> None:
+        """Store `ref` with `total`, and `partitions` when it has none.
+
+        A stored total that is higher stays.
+        """
         with self._lock, self._db:
             self._db.execute(
                 "INSERT INTO collections (ref, total) VALUES (?, ?) "
-                "ON CONFLICT(ref) DO UPDATE SET total = excluded.total",
+                "ON CONFLICT(ref) DO UPDATE SET total = MAX(total, excluded.total)",
                 (ref, total),
             )
             (stored,) = self._db.execute(
@@ -122,17 +126,38 @@ class State:
             ).fetchall()
         return [Partition(key, start, stop) for key, start, stop in rows]
 
-    def advance(self, ref: str, key: str, cursor: str | None, copied: int) -> None:
+    def advance(
+        self,
+        ref: str,
+        key: str,
+        cursor: str | None,
+        copied: int,
+        stop: str | None = None,
+    ) -> None:
+        """Store the cursor of the next page; None finishes the partition.
+
+        A `stop` replaces the stored stop. A finished tail stores its end
+        offset this way, in the same commit as its last page.
+        """
         with self._lock, self._db:
             self._db.execute(
-                "UPDATE partitions SET cursor = ?, finished = ?, copied = copied + ? "
+                "UPDATE partitions SET cursor = ?, finished = ?, "
+                "copied = copied + ?, stop = COALESCE(?, stop) "
                 "WHERE ref = ? AND key = ?",
-                (cursor, 1 if cursor is None else 0, copied, ref, key),
+                (cursor, 1 if cursor is None else 0, copied, stop, ref, key),
             )
 
     def add_partition(self, ref: str, partition: Partition) -> None:
         with self._lock, self._db:
             self._insert_partitions(ref, [partition])
+
+    def raise_total(self, ref: str, total: int) -> None:
+        """Store `total` for `ref` when it is above the stored total."""
+        with self._lock, self._db:
+            self._db.execute(
+                "UPDATE collections SET total = MAX(total, ?) WHERE ref = ?",
+                (total, ref),
+            )
 
     def add_rejects(self, ref: str, rejects: list[Reject]) -> None:
         """Store rejects and append the new ones to rejects.jsonl.

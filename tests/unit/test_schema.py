@@ -13,9 +13,11 @@ from weaviate.collections.classes.config import (
 )
 from weaviate.exceptions import (
     UnexpectedStatusCodeError,
+    WeaviateBaseError,
     WeaviateBatchError,
     WeaviateConnectionError,
     WeaviateQueryError,
+    WeaviateRetryError,
     WeaviateTenantGetError,
 )
 
@@ -405,16 +407,15 @@ def test_non_transient_statuses(status):
     assert schema.transient(_status_error(status)) is None
 
 
-def _grpc_error(status: str, error: Any) -> Exception:
-    with pytest.raises(WeaviateQueryError) as info:
-        raise_grpc_failure(status, error)
+def _grpc_error(status: str, error: Any, batch: bool = False) -> Exception:
+    with pytest.raises(WeaviateBaseError) as info:
+        raise_grpc_failure(status, error, batch=batch)
     return info.value
 
 
 @pytest.mark.parametrize(
     ("status", "delay"),
     [
-        ("UNAVAILABLE", 0.0),
         ("DEADLINE_EXCEEDED", 0.0),
         ("RESOURCE_EXHAUSTED", 0.0),
         ("UNKNOWN", None),
@@ -424,15 +425,77 @@ def _grpc_error(status: str, error: Any) -> Exception:
 )
 def test_transient_grpc_statuses(status, delay):
     query = _grpc_error(status, lambda m: WeaviateQueryError(m, "GRPC search"))
-    batch = _grpc_error(status, WeaviateBatchError)
+    batch = _grpc_error(status, WeaviateBatchError, batch=True)
     assert isinstance(query.__context__, FakeRpcError)
     assert schema.transient(query) == schema.transient(batch) == delay
 
 
+def test_transient_accepts_what_the_client_raises_after_its_unavailable_retries():
+    query = _grpc_error("UNAVAILABLE", lambda m: WeaviateQueryError(m, "GRPC search"))
+    batch = _grpc_error("UNAVAILABLE", WeaviateBatchError, batch=True)
+    assert isinstance(query, WeaviateQueryError)
+    assert isinstance(query.__context__, WeaviateRetryError)
+    assert isinstance(batch, WeaviateRetryError)
+    assert schema.transient(query) == schema.transient(batch) == 0.0
+
+
+def test_transient_accepts_a_retry_error():
+    assert schema.transient(WeaviateRetryError("fake", 3)) == 0.0
+
+
 def test_transient_reads_the_cause_of_a_grpc_failure():
     error = WeaviateTenantGetError("fake")
-    error.__cause__ = FakeRpcError("UNAVAILABLE")
+    error.__cause__ = FakeRpcError("DEADLINE_EXCEEDED")
     assert schema.transient(error) == 0.0
+
+
+def _chain(depth: int) -> Exception:
+    """An error with an UNAVAILABLE FakeRpcError `depth` links below it.
+
+    The links alternate between `__context__` and `__cause__`.
+    """
+    error: Exception = FakeRpcError("UNAVAILABLE")
+    for level in range(depth):
+        outer = ValueError(f"link {level}")
+        if level % 2:
+            outer.__cause__ = error
+        else:
+            outer.__context__ = error
+        error = outer
+    return error
+
+
+def test_transient_reads_the_chain_up_to_5_levels():
+    assert schema.transient(_chain(5)) == 0.0
+    assert schema.transient(_chain(6)) is None
+
+
+@pytest.mark.parametrize("status", ["INVALID_ARGUMENT", "PERMISSION_DENIED"])
+def test_transient_judges_the_nearest_grpc_error_only(status):
+    # The client's retry makes each attempt inside the except block of the
+    # attempt before, so an earlier UNAVAILABLE is the context of the last one.
+    with pytest.raises(WeaviateBatchError) as info:
+        try:
+            try:
+                raise FakeRpcError("UNAVAILABLE")
+            except FakeRpcError:
+                raise FakeRpcError(status)  # noqa: B904
+        except FakeRpcError:
+            raise WeaviateBatchError("fake")  # noqa: B904
+    earlier = info.value.__context__.__context__
+    assert isinstance(earlier, FakeRpcError) and earlier.status == "UNAVAILABLE"
+    assert schema.transient(info.value) is None
+
+
+def test_transient_stops_on_a_cyclic_chain_and_objects_without_code():
+    first = ValueError("first")
+    second = KeyError("second")
+    first.__context__ = second
+    second.__context__ = first
+    assert schema.transient(first) is None
+    no_call = ValueError("code is a number")
+    no_call.code = 7  # type: ignore[attr-defined]
+    assert schema.transient(no_call) is None
 
 
 def test_query_error_without_a_grpc_error_is_not_transient():

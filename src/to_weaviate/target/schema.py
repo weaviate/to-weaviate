@@ -22,7 +22,7 @@ from weaviate.collections.classes.config import (
 from weaviate.exceptions import (
     UnexpectedStatusCodeError,
     WeaviateConnectionError,
-    WeaviateQueryError,
+    WeaviateRetryError,
     WeaviateTimeoutError,
 )
 
@@ -38,6 +38,7 @@ RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 GRPC_RETRY_STATUSES = frozenset(
     {"UNAVAILABLE", "DEADLINE_EXCEEDED", "RESOURCE_EXHAUSTED"}
 )
+CHAIN_DEPTH = 5
 
 _DATA_TYPES = {
     "text": DataType.TEXT,
@@ -106,18 +107,37 @@ def _grpc_status(exc: BaseException | None) -> str | None:
     return getattr(code(), "name", None) if callable(code) else None
 
 
+def _chain(exc: BaseException) -> list[BaseException]:
+    """`exc` and its causes and contexts, up to CHAIN_DEPTH links below it.
+
+    Nearer links come first. On one level a cause comes before a context.
+    """
+    found = [exc]
+    level = [exc]
+    for _ in range(CHAIN_DEPTH):
+        links = (e for error in level for e in (error.__cause__, error.__context__))
+        level = list({id(e): e for e in links if e is not None}.values())
+        found.extend(level)
+    return found
+
+
 def transient(exc: Exception) -> float | None:
     if isinstance(exc, WeaviateConnectionError | WeaviateTimeoutError):
         return 0.0
     if isinstance(exc, UnexpectedStatusCodeError) and exc.status_code in RETRY_STATUSES:
         return 0.0
-    # The client raises WeaviateQueryError inside the except block of the gRPC
-    # error, so that error is the cause or the context.
-    if isinstance(exc, WeaviateQueryError) and any(
-        _grpc_status(link) in GRPC_RETRY_STATUSES
-        for link in (exc.__cause__, exc.__context__)
-    ):
-        return 0.0
+    # The client raises its own error inside the except block of the gRPC
+    # error, so the gRPC error is in the chain. Only the nearest gRPC error
+    # decides: the client's retry makes each attempt inside the except block of
+    # the one before, so a deeper link can be an earlier attempt. After its own
+    # retries of UNAVAILABLE, the client raises WeaviateRetryError, or a query
+    # error inside the except block of one.
+    for link in _chain(exc):
+        if isinstance(link, WeaviateRetryError):
+            return 0.0
+        status = _grpc_status(link)
+        if status is not None:
+            return 0.0 if status in GRPC_RETRY_STATUSES else None
     return None
 
 

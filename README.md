@@ -71,8 +71,12 @@ creates nothing.
 
 Creates the target collections, then copies the records. Progress goes to
 `state.sqlite`, so a second run continues where the first one stopped.
+Each run also copies the records added to the source since the last run.
 Each record that the tool cannot convert or that Weaviate refuses goes to
-`rejects.jsonl` with the reason.
+`rejects.jsonl` with the reason. When Weaviate refuses every object of a
+batch of more than one record, `copy` retries the batch as it retries a
+network error. When the retries are used up, it stops with
+`target_unreachable` and stores no reject. The next run starts at that page.
 
 `state.sqlite` also records the target of each source collection: the
 Weaviate host and port, the collection and the tenant. Once records of a
@@ -103,7 +107,8 @@ and `report.json`.
 ### `status`
 
 Shows the copy progress and the recorded target of each collection from
-`state.sqlite`. It needs no credentials.
+`state.sqlite`. It needs no credentials. The total of a collection is the
+highest source count that a `copy` read.
 
 ## Migration directory
 
@@ -213,7 +218,8 @@ The commands it starts get empty values for `CHROMA_DATABASE`,
 your shell do not reach them.
 
 The suite deletes and recreates the Chroma collections `docs-cosine`,
-`tiny.l2` and `docs-rq`. Before each test it deletes the Weaviate
+`tiny.l2` and `docs-rq`. One test adds 10 records to `tiny.l2` and deletes
+them when it ends. Before each test the suite deletes the Weaviate
 collections `Docs_cosine`, `Tiny_l2` and `Docs_rq`.
 
 The `Makefile` starts the servers and sets the variables. `make` alone

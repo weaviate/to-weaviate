@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 from dataclasses import replace
 
 import pytest
@@ -145,6 +146,21 @@ def test_conversion_rejects_are_recorded(state, events):
     assert to_uuid("id-10") not in writer.objects
 
 
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_vector_value_that_is_not_a_number_is_a_reject(state, events, tmp_path, value):
+    records = make_records(1000)
+    records[10] = replace(records[10], vector=[1.0, value])
+    writer = FakeWriter()
+    result = copy_collection(FakeSource(records), writer, state, events, ENTRY, C, 2)
+    assert result == CopyResult(copied=999, rejects=1)
+    assert to_uuid("id-10") not in writer.objects
+    reject = json.loads((tmp_path / "rejects.jsonl").read_text())
+    assert (reject["source_id"], reject["reason"]) == (
+        "id-10",
+        "embedding holds a value that is not a number",
+    )
+
+
 def test_copies_records_added_during_run(src, state, events):
     src.grow_after_partitions(make_records(50, start=1000))
     writer = FakeWriter()
@@ -152,13 +168,88 @@ def test_copies_records_added_during_run(src, state, events):
     assert len(writer.objects) == 1050 and result.copied == 1050
 
 
-def test_later_run_does_not_add_a_second_tail(src, state, events):
+def test_run_after_a_tail_reads_nothing_when_the_source_did_not_grow(
+    src, state, events
+):
     src.grow_after_partitions(make_records(50, start=1000))
     first = copy_collection(src, FakeWriter(), state, events, ENTRY, C, 2)
     reads = src.read_calls
     second = copy_collection(src, FakeWriter(), state, events, ENTRY, C, 2)
     assert src.read_calls == reads
     assert second == first == CopyResult(copied=1050, rejects=0)
+
+
+def test_each_run_copies_the_records_added_since_the_last_run(src, state, events):
+    src.grow_after_partitions(make_records(50, start=1000))
+    writer = FakeWriter()
+    copy_collection(src, writer, state, events, ENTRY, C, 2)
+    src.records.extend(make_records(50, start=1050))
+    copy_collection(src, writer, state, events, ENTRY, C, 2)
+    src.records.extend(make_records(50, start=1100))
+    result = copy_collection(src, writer, state, events, ENTRY, C, 2)
+    assert result == CopyResult(copied=1150, rejects=0)
+    assert len(writer.objects) == 1150
+    assert set(writer.writes_per_uuid.values()) == {1}
+    assert state.progress()[0].total == 1150
+
+
+def test_finished_tail_stores_its_end_offset(src, state, events):
+    src.grow_after_partitions(make_records(250, start=1000))
+    copy_collection(src, FakeWriter(), state, events, ENTRY, C, 2)
+    assert state.partitions(C.ref)[-1] == Partition("1000-", "1000", "1250")
+
+
+def test_tail_without_an_end_offset_gets_no_later_tail(src, state, events):
+    # The state that a run before end offsets left: a finished tail, no stop.
+    state.init_collection(C.ref, src.partitions(C, 2), C.count)
+    for partition in state.partitions(C.ref):
+        state.advance(C.ref, partition.key, None, 500)
+    state.add_partition(C.ref, Partition("1000-", "1000", None))
+    state.advance(C.ref, "1000-", None, 0)
+    src.records.extend(make_records(50, start=1000))
+    result = copy_collection(src, FakeWriter(), state, events, ENTRY, C, 2)
+    assert src.read_calls == 0 and result.copied == 1000
+
+
+class OverCount(FakeSource):
+    """FakeSource whose count is `extra` above its records."""
+
+    extra = 0
+
+    def count(self, collection):
+        return super().count(collection) + self.extra
+
+
+def test_tail_after_a_tail_that_read_no_records(state, events):
+    src = OverCount(make_records(1000))
+    src.extra = 5
+    writer = FakeWriter()
+    copy_collection(src, writer, state, events, ENTRY, C, 2)
+    src.extra = 0
+    src.records.extend(make_records(5, start=1000))
+    result = copy_collection(src, writer, state, events, ENTRY, C, 2)
+    assert result.copied == 1005 and len(writer.objects) == 1005
+
+
+class GrowsDuringTail(FakeSource):
+    """FakeSource that appends `during_tail` on the first read of a tail."""
+
+    during_tail: list[Record] = []
+
+    def read(self, collection, partition, cursor, with_vectors):
+        if partition.stop is None:
+            self.records.extend(self.during_tail)
+            self.during_tail = []
+        return super().read(collection, partition, cursor, with_vectors)
+
+
+def test_total_counts_the_records_added_while_the_tail_runs(state, events):
+    src = GrowsDuringTail(make_records(1000))
+    src.grow_after_partitions(make_records(50, start=1000))
+    src.during_tail = make_records(30, start=1050)
+    copy_collection(src, FakeWriter(), state, events, ENTRY, C, 2)
+    progress = state.progress()[0]
+    assert (progress.copied, progress.total) == (1080, 1080)
 
 
 def test_resume_with_a_larger_count_covers_the_gap(src, state, events):
