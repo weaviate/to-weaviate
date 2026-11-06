@@ -30,6 +30,7 @@ TEST_ENDPOINTS = {
     "WEAVIATE_GRPC_URL": "http://localhost:50099",
     "WEAVIATE_API_KEY": "admin-key",
 }
+REQUIRE_VARIABLE = "TO_WEAVIATE_REQUIRE_ACCEPTANCE"
 # The local Chroma needs none of these. A value from the shell would change
 # the tenant, the database or the key header that the command uses.
 CLEARED_VARIABLES = (
@@ -128,11 +129,15 @@ def weaviate_config(name: str) -> CollectionConfig:
 def _test_endpoints() -> Iterator[None]:
     problems = endpoint_problems()
     if problems:
-        pytest.skip(
+        reason = (
             "the acceptance suite runs only against the test endpoints: "
             + "; ".join(problems)
             + ". See README.md."
         )
+        # CI sets it, so that a suite that skips every test does not pass.
+        if os.environ.get(REQUIRE_VARIABLE) == "1":
+            pytest.fail(reason)
+        pytest.skip(reason)
     yield
     if _client is not None:
         _client.close()

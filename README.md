@@ -192,7 +192,8 @@ CHROMA_URL=http://localhost:8001
 ```
 
 When a variable is missing or has another value, the suite skips every test
-and names that variable. It connects to no server before this check passes.
+and names that variable. With `TO_WEAVIATE_REQUIRE_ACCEPTANCE=1`, as in CI,
+the suite fails with the same text instead. It connects to no server before this check passes.
 The commands it starts get empty values for `CHROMA_DATABASE`,
 `CHROMA_TENANT`, `CHROMA_API_KEY` and `CHROMA_TOKEN_HEADER`, so values from
 your shell do not reach them.
