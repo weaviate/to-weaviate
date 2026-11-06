@@ -40,6 +40,7 @@ from to_weaviate.engine.check import (
 from to_weaviate.engine.copy import copy_collection
 from to_weaviate.events import Events
 from to_weaviate.output import (
+    ERROR_EXIT,
     CliError,
     emit,
     info,
@@ -109,9 +110,9 @@ CHROMA_HINT = "Check CHROMA_URL and that the Chroma server is running."
 WEAVIATE_HINT = (
     "Check WEAVIATE_URL, WEAVIATE_GRPC_URL and that the Weaviate server is running."
 )
+ISSUES_URL = "https://github.com/weaviate/to-weaviate/issues"
 INTERNAL_HINT = (
-    "Report it at https://github.com/weaviate/to-weaviate/issues. "
-    "Set TO_WEAVIATE_DEBUG=1 to print the traceback."
+    f"Report it at {ISSUES_URL}. Set TO_WEAVIATE_DEBUG=1 to print the traceback."
 )
 DEBUG_VARIABLE = "TO_WEAVIATE_DEBUG"
 SCHEMA_HINT = (
@@ -244,6 +245,43 @@ def _handler_env() -> dict[str, str]:
         return dict(os.environ)
 
 
+@dataclass(frozen=True)
+class _Report:
+    exit_code: int
+    document: dict[str, Any]
+    text: str
+    trace: str
+
+
+_FALLBACK_REPORT = _Report(
+    ERROR_EXIT["internal_error"],
+    CliError(
+        "internal_error",
+        "internal error: the error could not be redacted, so its details are "
+        "not printed",
+        f"Report it at {ISSUES_URL}.",
+    ).document(),
+    "",
+    "",
+)
+
+
+def _report(exc: Exception) -> _Report:
+    """The redacted output for `exc`. Builds strings only; prints nothing."""
+    env = _handler_env()
+    secrets = secret_values(env)
+    error = _as_cli_error(exc)
+    trace = ""
+    if env.get(DEBUG_VARIABLE, "").strip() == "1":
+        lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+        trace = redact("".join(lines), secrets)
+    document = redact_strings(error.document(), secrets)
+    # Shortening comes after redaction: a cut or a collapsed space would
+    # change a secret so that it no longer matches.
+    document["message"] = _short(document["message"])
+    return _Report(error.exit_code, document, redact(error.text, secrets), trace)
+
+
 @contextmanager
 def _handled(json_output: bool) -> Iterator[None]:
     """Report a failure as text or as a JSON document, then exit.
@@ -256,23 +294,18 @@ def _handled(json_output: bool) -> Iterator[None]:
     except (typer.Exit, typer.Abort, typer.TyperException):
         raise
     except Exception as exc:
-        env = _handler_env()
-        secrets = secret_values(env)
-        error = _as_cli_error(exc)
-        if env.get(DEBUG_VARIABLE, "").strip() == "1":
-            trace = "".join(
-                traceback.format_exception(type(exc), exc, exc.__traceback__)
-            )
-            print(redact(trace, secrets), end="", file=sys.stderr)
-        document = redact_strings(error.document(), secrets)
-        # Shortening comes after redaction: a cut or a collapsed space would
-        # change a secret so that it no longer matches.
-        document["message"] = _short(document["message"])
-        emit(json_output, document, redact(error.text, secrets))
+        try:
+            report = _report(exc)
+        except Exception:
+            # Nothing from either exception is printed: it could not be redacted.
+            report = _FALLBACK_REPORT
+        if report.trace:
+            print(report.trace, end="", file=sys.stderr)
+        emit(json_output, report.document, report.text)
         if not json_output:
-            print(f"Error: {document['message']}", file=sys.stderr)
-            print(f"Hint: {document['hint']}", file=sys.stderr)
-        raise typer.Exit(error.exit_code) from None
+            print(f"Error: {report.document['message']}", file=sys.stderr)
+            print(f"Hint: {report.document['hint']}", file=sys.stderr)
+        raise typer.Exit(report.exit_code) from None
 
 
 def _load_plan(directory: Path) -> Plan:

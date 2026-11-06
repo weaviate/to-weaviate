@@ -56,9 +56,28 @@ def _split(url: str) -> tuple[SplitResult, str]:
     return urlsplit(prefix + url), prefix
 
 
+def _plain_userinfo(url: str) -> tuple[str | None, str]:
+    """The userinfo of `url` and `url` without it, by plain string search.
+
+    For URLs that `urlsplit` refuses. The authority runs from after `://`, or
+    from the start, to the first `/`. The userinfo is the part of the
+    authority before its last `@`.
+    """
+    scheme_end = url.find("://")
+    start = 0 if scheme_end < 0 else scheme_end + 3
+    end = url.find("/", start)
+    at = url.rfind("@", start, len(url) if end < 0 else end)
+    if at < 0:
+        return None, url
+    return url[start:at], url[:start] + url[at + 1 :]
+
+
 def without_userinfo(url: str) -> str:
-    """`url` without its `user:password@` part."""
-    parts, prefix = _split(url)
+    """`url` without its `user:password@` part. Never raises."""
+    try:
+        parts, prefix = _split(url)
+    except ValueError:
+        return _plain_userinfo(url)[1]
     if "@" not in parts.netloc:
         return url
     netloc = parts.netloc.rsplit("@", 1)[1]
@@ -66,8 +85,13 @@ def without_userinfo(url: str) -> str:
 
 
 def url_passwords(url: str) -> list[str]:
-    """The password of `url`, as written and percent-decoded, or no value."""
-    password = _split(url)[0].password
+    """The password of `url`, as written and percent-decoded. Never raises."""
+    password: str | None
+    try:
+        password = _split(url)[0].password
+    except ValueError:
+        userinfo = _plain_userinfo(url)[0] or ""
+        password = userinfo.partition(":")[2] if ":" in userinfo else None
     if not password:
         return []
     return list(dict.fromkeys([password, unquote(password)]))

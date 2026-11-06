@@ -258,6 +258,62 @@ def test_url_password_is_not_stored_or_printed(tmp_path):
     assert "SENTINEL" not in inspect_run.output + check_run.output
 
 
+@pytest.mark.parametrize("debug", [None, "1"])
+def test_malformed_url_variable_does_not_break_the_error_report(debug):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    fakes.target_error = RuntimeError("headers: SENTINEL-B")
+    r = invoke(
+        fakes,
+        "check",
+        "--json",
+        WEAVIATE_GRPC_URL="http://[::1:50099",
+        WEAVIATE_API_KEY="SENTINEL-B",
+        TO_WEAVIATE_DEBUG=debug,
+    )
+    assert r.exit_code == 5
+    assert json.loads(r.stdout)["code"] == "internal_error"
+    assert "SENTINEL" not in r.stdout and "SENTINEL" not in r.stderr
+
+
+def test_status_ignores_a_malformed_weaviate_url():
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    r = invoke(fakes, "status", "--json", WEAVIATE_URL="http://[::1")
+    assert r.exit_code == 2
+    assert json.loads(r.stdout)["code"] == "usage"
+
+
+FALLBACK = {
+    "status": "error",
+    "code": "internal_error",
+    "message": "internal error: the error could not be redacted, so its details "
+    "are not printed",
+    "hint": "Report it at https://github.com/weaviate/to-weaviate/issues.",
+}
+
+
+@pytest.mark.parametrize("mode", [[], ["--json"]])
+def test_a_failing_error_report_prints_a_fixed_error(monkeypatch, mode):
+    def broken(env):
+        raise ValueError("redaction broke on SENTINEL-X")
+
+    monkeypatch.setattr("to_weaviate.cli.secret_values", broken)
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    fakes.target_error = RuntimeError("headers: SENTINEL-B")
+    r = invoke(fakes, "check", *mode, TO_WEAVIATE_DEBUG="1")
+    assert r.exit_code == 5
+    if mode:
+        assert json.loads(r.stdout) == FALLBACK
+    else:
+        assert r.stderr.splitlines() == [
+            f"Error: {FALLBACK['message']}",
+            f"Hint: {FALLBACK['hint']}",
+        ]
+    for text in ("SENTINEL", "headers", "redaction broke", "Traceback"):
+        assert text not in r.output
+
+
 def test_unexpected_error_gives_an_internal_error_document(tmp_path):
     fakes = FakeFactories(
         FakeSource(cli_records(10)), writer=FakeWriter(fail_on_call=1)
