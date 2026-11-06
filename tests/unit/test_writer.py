@@ -239,6 +239,27 @@ def test_writer_one_call_per_chunk(monkeypatch):
     assert [len(c) for c in data.calls] == [1, 1, 1]
 
 
+def test_error_in_second_chunk_maps_to_the_right_object(monkeypatch):
+    import to_weaviate.target.writer as w
+
+    monkeypatch.setattr(w, "MAX_INSERT_BYTES", 200)
+    failed = SimpleNamespace(errors={0: SimpleNamespace(message="boom")})
+    data = FakeData([SimpleNamespace(errors={}), failed, SimpleNamespace(errors={})])
+    rejects = WeaviateWriter(FakeClient(data)).write(ENTRY_KEEP, objects(3))  # type: ignore[arg-type]
+    assert [[o.uuid for o in c] for c in data.calls] == [["u0"], ["u1"], ["u2"]]
+    assert rejects == [Reject("s1", "boom")]
+
+
+def test_exhausted_retries_raise():
+    err = UnexpectedStatusCodeError("x", httpx.Response(503))
+    data = FakeData([err] * 10)
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    with pytest.raises(UnexpectedStatusCodeError) as info:
+        writer.write(ENTRY_KEEP, objects(2))
+    assert info.value is err
+    assert len(data.calls) == 6
+
+
 def test_writer_retries_transient_and_raises_others():
     err = UnexpectedStatusCodeError("x", httpx.Response(503))
     data = FakeData([err, SimpleNamespace(errors={})])
