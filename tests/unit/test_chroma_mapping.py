@@ -1,6 +1,8 @@
 import pytest
 
+from to_weaviate.plan import CollectionPlan, SourceRef, TargetPlan, VectorPlan
 from to_weaviate.sources.chroma.mapping import vectorizer_for
+from to_weaviate.target.schema import collection_kwargs
 
 
 def known(name, **config):
@@ -59,7 +61,7 @@ def test_null_options_are_left_out():
             "text2vec-jinaai",
             {"model": "j", "dimensions": 8},
         ),
-        ("voyageai", {"model_name": "v"}, "text2vec-voyageai", {}),
+        ("voyageai", {"model_name": "v"}, "text2vec-voyageai", {"model": "v"}),
         ("mistral", {"model": "mm"}, "text2vec-mistral", {"model": "mm"}),
         (
             "huggingface",
@@ -87,12 +89,131 @@ def test_google_ai_studio(name):
     assert v is not None
     assert v.module == "text2vec-google"
     assert v.options.get("project_id") is None
+    assert v.options == {"model": "x"}
 
 
 def test_google_vertex():
-    v, _ = vectorizer_for(known("google_vertex", project_id="p"))
+    v, _ = vectorizer_for(
+        known("google_vertex", model_name="m", project_id="p", region="europe-west1")
+    )
     assert v is not None
     assert v.module == "text2vec-google" and v.options["project_id"] == "p"
+    assert v.options == {"model": "m", "project_id": "p", "location": "europe-west1"}
+
+
+@pytest.mark.parametrize(
+    ("name", "config", "options"),
+    [
+        ("voyageai", {"model_name": "voyage-3-large"}, {"model": "voyage-3-large"}),
+        (
+            "google_generative_ai",
+            {"model_name": "models/text-embedding-004", "dimension": 768},
+            {"model": "text-embedding-004", "dimensions": 768},
+        ),
+        (
+            "google_gemini",
+            {"model_name": "gemini-embedding-001"},
+            {"model": "gemini-embedding-001"},
+        ),
+        (
+            "google_gemini",
+            {"model_name": "gemini-embedding-001", "vertexai": False, "project": "p"},
+            {"model": "gemini-embedding-001"},
+        ),
+        (
+            "google_gemini",
+            {
+                "model_name": "gemini-embedding-001",
+                "vertexai": True,
+                "project": "p",
+                "location": "europe-west4",
+            },
+            {
+                "model": "gemini-embedding-001",
+                "project_id": "p",
+                "location": "europe-west4",
+            },
+        ),
+        (
+            "google_vertex",
+            {
+                "model_name": "text-embedding-005",
+                "project_id": "p",
+                "region": "us-central1",
+            },
+            {
+                "model": "text-embedding-005",
+                "project_id": "p",
+                "location": "us-central1",
+            },
+        ),
+    ],
+)
+def test_voyage_and_google_keep_the_model(name, config, options):
+    v, _ = vectorizer_for(known(name, **config))
+    assert v is not None
+    assert v.options == options
+
+
+@pytest.mark.parametrize(
+    ("name", "config", "missing"),
+    [
+        ("voyageai", {}, "model_name"),
+        ("google_generative_ai", {"dimension": 768}, "model_name"),
+        ("google_gemini", {}, "model_name"),
+        ("google_gemini", {"vertexai": True, "project": "p"}, "model_name"),
+        ("google_gemini", {"model_name": "m", "vertexai": True}, "project"),
+        ("google_vertex", {"project_id": "p"}, "model_name"),
+        ("google_vertex", {"model_name": "m", "project_id": None}, "project_id"),
+    ],
+)
+def test_voyage_and_google_without_a_required_key_have_no_vectorizer(
+    name, config, missing
+):
+    v, notes = vectorizer_for(known(name, **config))
+    assert v is None
+    assert len(notes) == 1 and missing in notes[0] and name in notes[0]
+
+
+@pytest.mark.parametrize(
+    ("name", "config", "expected"),
+    [
+        ("voyageai", {"model_name": "voyage-3-large"}, {"model": "voyage-3-large"}),
+        (
+            "google_generative_ai",
+            {"model_name": "models/text-embedding-004", "dimension": 768},
+            {"modelId": "text-embedding-004", "dimensions": 768, "projectId": None},
+        ),
+        (
+            "google_gemini",
+            {"model_name": "m", "vertexai": True, "project": "p", "location": "l"},
+            {"modelId": "m", "projectId": "p", "location": "l"},
+        ),
+        (
+            "google_vertex",
+            {"model_name": "m", "project_id": "p", "region": "l"},
+            {"modelId": "m", "projectId": "p", "location": "l"},
+        ),
+    ],
+)
+def test_voyage_and_google_options_reach_the_collection_config(name, config, expected):
+    v, _ = vectorizer_for(known(name, **config))
+    entry = CollectionPlan(
+        source=SourceRef(
+            ref="r",
+            namespace="n",
+            name="docs",
+            count=1,
+            dimension=2,
+            distance="cosine",
+            embedding=None,
+        ),
+        target=TargetPlan(
+            name="Docs", vectors=[VectorPlan(vectorizer=v)], properties=[]
+        ),
+    )
+    found = collection_kwargs([entry])["vector_config"][0].vectorizer
+    assert {key: getattr(found, key) for key in expected} == expected
 
 
 def test_default_model_has_no_mapping():

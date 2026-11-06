@@ -10,6 +10,7 @@ from to_weaviate.engine.check import (
     plan_findings,
     provider_keys,
 )
+from to_weaviate.sources.chroma.mapping import vectorizer_for
 
 
 def entry(
@@ -87,6 +88,31 @@ def test_keep_model_compares_modules_when_the_source_model_is_unknown(
 ):
     errors, _ = plan_findings(plan_of(entry([keep(vectorizer)])), None, voyage_mapper)
     assert [e.code for e in errors] == codes
+
+
+@pytest.mark.parametrize(
+    ("embedding", "old_vectorizer"),
+    [
+        (
+            {"type": "known", "name": "voyageai", "config": {"model_name": "v3l"}},
+            p.VectorizerPlan(module="text2vec-voyageai"),
+        ),
+        (
+            {
+                "type": "known",
+                "name": "google_vertex",
+                "config": {"model_name": "m", "project_id": "p", "region": "r"},
+            },
+            p.VectorizerPlan(module="text2vec-google", options={"project_id": "p"}),
+        ),
+    ],
+)
+def test_keep_model_mismatch_for_a_plan_drafted_without_the_model(
+    embedding, old_vectorizer
+):
+    plan = plan_of(entry([keep(old_vectorizer)], embedding=embedding))
+    errors, _ = plan_findings(plan, None, vectorizer_for)
+    assert [e.code for e in errors] == ["keep_model_mismatch"]
 
 
 def test_module_findings_accept_the_legacy_google_name():
