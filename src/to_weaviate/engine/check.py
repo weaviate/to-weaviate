@@ -53,6 +53,42 @@ def target_groups(entries: list[CollectionPlan]) -> dict[str, list[CollectionPla
     return groups
 
 
+def collection_key(name: str) -> str:
+    """The name Weaviate stores for collection `name`: first letter capitalized."""
+    return name[:1].upper() + name[1:]
+
+
+def _describe(entry: CollectionPlan) -> str:
+    tenant = f" (tenant {entry.target.tenant})" if entry.target.tenant else ""
+    return f"{entry.source.name} -> {entry.target.name}{tenant}"
+
+
+def _duplicate_findings(entries: list[CollectionPlan]) -> list[Finding]:
+    """Entries that write into the same collection and tenant.
+
+    Entries share a place when their collection keys are equal and either
+    their tenants are equal (two None tenants are equal) or one of them has a
+    tenant and another has none.
+    """
+    by_key: dict[str, list[CollectionPlan]] = {}
+    for entry in entries:
+        by_key.setdefault(collection_key(entry.target.name), []).append(entry)
+    out: list[Finding] = []
+    for key, group in by_key.items():
+        tenants = [e.target.tenant for e in group]
+        if len(group) > 1 and (None in tenants or len(set(tenants)) < len(tenants)):
+            out.append(
+                Finding(
+                    "duplicate_target",
+                    key,
+                    f"entries {', '.join(_describe(e) for e in group)} write "
+                    f"into one place in collection {key}; give each entry its "
+                    "own tenant or its own target name",
+                )
+            )
+    return out
+
+
 def _vectorizers(plan: Plan) -> Iterator[tuple[CollectionPlan, VectorizerPlan]]:
     for entry in plan.collections:
         for vector in entry.target.vectors:
@@ -174,19 +210,8 @@ def plan_findings(
     """Errors and warnings that need no connection to the target."""
     errors: list[Finding] = []
     warnings: list[Finding] = []
-    groups = target_groups(plan.collections)
-    for name, group in groups.items():
-        if len(group) > 1 and any(e.target.tenant is None for e in group):
-            sources = ", ".join(e.source.name for e in group)
-            errors.append(
-                Finding(
-                    "duplicate_target",
-                    name,
-                    f"source collections {sources} share the target {name}; "
-                    "give each entry a tenant or its own target name",
-                )
-            )
-    errors.extend(vectorizer_findings(groups))
+    errors.extend(_duplicate_findings(plan.collections))
+    errors.extend(vectorizer_findings(target_groups(plan.collections)))
     for entry in plan.collections:
         errors.extend(_keep_model_findings(entry, vectorizer_for))
         for prop in entry.target.properties:

@@ -30,6 +30,7 @@ from to_weaviate import __version__
 from to_weaviate.engine.check import (
     Decision,
     Finding,
+    collection_key,
     decisions,
     module_findings,
     plan_findings,
@@ -63,6 +64,7 @@ from to_weaviate.settings import (
     chroma_settings,
     load_env,
     weaviate_settings,
+    without_userinfo,
 )
 from to_weaviate.sources.base import FieldStats, Source, SourceCollection
 from to_weaviate.sources.chroma.client import ChromaClient, ChromaError
@@ -176,12 +178,18 @@ def _as_cli_error(exc: Exception) -> CliError:
     if isinstance(exc, ChromaError):
         if exc.status in (401, 403):
             return _refused("Chroma", "CHROMA_API_KEY", exc.status == 403)
-        return CliError("source_unreachable", _short(str(exc)), CHROMA_HINT)
+        if exc.status is None:
+            return CliError(
+                "source_unreachable", f"Chroma could not be reached: {exc}", CHROMA_HINT
+            )
+        return CliError("source_unreachable", str(exc), CHROMA_HINT)
     if isinstance(exc, httpx.TransportError):
+        # ChromaClient wraps its own transport errors in ChromaError, so a raw
+        # one comes from the Weaviate client.
         return CliError(
-            "source_unreachable",
-            _short(f"Chroma could not be reached: {exc}"),
-            CHROMA_HINT,
+            "target_unreachable",
+            f"Weaviate could not be reached: {type(exc).__name__}: {exc}",
+            WEAVIATE_HINT,
         )
     if isinstance(exc, AuthenticationFailedError):
         return _refused("Weaviate", "WEAVIATE_API_KEY", False)
@@ -198,31 +206,31 @@ def _as_cli_error(exc: Exception) -> CliError:
     ):
         return CliError(
             "target_unreachable",
-            _short(f"Weaviate could not be reached: {exc}"),
+            f"Weaviate could not be reached: {exc}",
             WEAVIATE_HINT,
         )
     if isinstance(exc, SchemaRejected):
         return CliError(
             "target_rejected_schema",
-            _short(f"Weaviate refused to create the collection: {exc}"),
+            f"Weaviate refused to create the collection: {exc}",
             SCHEMA_HINT,
         )
     if isinstance(exc, PlanMismatch):
         return CliError(
             "plan_mismatch",
-            _short(str(exc)),
+            str(exc),
             "The target collection exists with other settings. Edit plan.yaml "
             "to match it, or choose another target name.",
         )
     if isinstance(exc, WeaviateBaseError):
         return CliError(
             "target_unreachable",
-            _short(f"Weaviate request failed: {type(exc).__name__}: {exc}"),
+            f"Weaviate request failed: {type(exc).__name__}: {exc}",
             WEAVIATE_HINT,
         )
     return CliError(
         "internal_error",
-        _short(f"internal error: {type(exc).__name__}: {exc}"),
+        f"internal error: {type(exc).__name__}: {exc}",
         INTERNAL_HINT,
     )
 
@@ -257,6 +265,9 @@ def _handled(json_output: bool) -> Iterator[None]:
             )
             print(redact(trace, secrets), end="", file=sys.stderr)
         document = redact_strings(error.document(), secrets)
+        # Shortening comes after redaction: a cut or a collapsed space would
+        # change a secret so that it no longer matches.
+        document["message"] = _short(document["message"])
         emit(json_output, document, redact(error.text, secrets))
         if not json_output:
             print(f"Error: {document['message']}", file=sys.stderr)
@@ -274,7 +285,7 @@ def _load_plan(directory: Path) -> Plan:
         detail = _validation_text(exc) if isinstance(exc, ValidationError) else str(exc)
         raise CliError(
             "invalid_plan",
-            _short(f"{path} is not a valid plan: {detail}"),
+            f"{path} is not a valid plan: {detail}",
             EDIT_PLAN_HINT,
         ) from exc
 
@@ -294,7 +305,7 @@ def _load_inspected(directory: Path) -> dict[str, SourceCollection] | None:
         collections = [_source_collection(c) for c in raw["collections"]]
     except (ValueError, KeyError, TypeError) as exc:
         raise CliError(
-            "usage", _short(f"{path} cannot be read: {exc}"), REINSPECT_HINT
+            "usage", f"{path} cannot be read: {exc}", REINSPECT_HINT
         ) from exc
     return {c.ref: c for c in collections}
 
@@ -345,7 +356,7 @@ def _index_plan(
     except ValidationError as exc:
         raise CliError(
             "usage",
-            _short(f"--index {index} --quantizer {quantizer}: {_validation_text(exc)}"),
+            f"--index {index} --quantizer {quantizer}: {_validation_text(exc)}",
             "A quantizer needs a named --index; --quantizer-bits takes 1, 4 or 8.",
         ) from exc
 
@@ -384,7 +395,7 @@ def _inspect_chroma(
     index_plan = _index_plan(index, quantizer, quantizer_bits)
     settings = chroma_settings(load_env(Path.cwd()))
     source = factories.source(settings)
-    info(json_output, f"Inspecting Chroma at {settings.url}")
+    info(json_output, f"Inspecting Chroma at {without_userinfo(settings.url)}")
     collections = source.inspect(databases or None, names or None, sample_pages)
     missing = sorted(set(names) - {c.name for c in collections})
     if missing:
@@ -395,7 +406,11 @@ def _inspect_chroma(
         )
     try:
         plan = draft_plan(
-            SourcePlan(type="chroma", url=settings.url, tenant=settings.tenant),
+            SourcePlan(
+                type="chroma",
+                url=without_userinfo(settings.url),
+                tenant=settings.tenant,
+            ),
             collections,
             vectors,
             vectorizer_plan,
@@ -404,7 +419,7 @@ def _inspect_chroma(
         )
     except ValidationError as exc:
         raise CliError(
-            "usage", _short(_validation_text(exc)), "Change --index or --quantizer."
+            "usage", _validation_text(exc), "Change --index or --quantizer."
         ) from exc
     directory.mkdir(parents=True, exist_ok=True)
     inspect_document = {"collections": [dataclasses.asdict(c) for c in collections]}
@@ -500,7 +515,7 @@ def _check(factories: _Factories, directory: Path, json_output: bool) -> None:
     errors, warnings = plan_findings(plan, inspected, vectorizer_for)
     settings = weaviate_settings(load_env(Path.cwd()))
     _require_provider_keys(plan, settings)
-    info(json_output, f"Checking the target at {settings.url}")
+    info(json_output, f"Checking the target at {without_userinfo(settings.url)}")
     schema = factories.schema(settings)
     errors.extend(module_findings(plan, schema.modules()))
     for name, group in target_groups(plan.collections).items():
@@ -591,10 +606,12 @@ def _copy(
     entries = _select(plan.collections, names)
     groups = target_groups(plan.collections)
     selected = {e.target.name: groups[e.target.name] for e in entries}
+    keys = {collection_key(name) for name in selected}
     errors, warnings = plan_findings(plan, inspected, vectorizer_for)
-    errors = [f for f in errors if f.collection in selected]
+    errors = [f for f in errors if collection_key(f.collection) in keys]
     if errors:
-        raise _plan_errors(errors, [w for w in warnings if w.collection in selected])
+        warnings = [w for w in warnings if collection_key(w.collection) in keys]
+        raise _plan_errors(errors, warnings)
     env = load_env(Path.cwd())
     source_settings = chroma_settings(env)
     target_settings = weaviate_settings(env)

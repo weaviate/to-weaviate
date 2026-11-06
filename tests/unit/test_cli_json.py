@@ -25,6 +25,7 @@ from weaviate.exceptions import (
 
 from to_weaviate.cli import app
 from to_weaviate.output import ERROR_EXIT, CliError
+from to_weaviate.plan import load_plan
 from to_weaviate.sources.chroma.client import ChromaError
 
 COMMANDS = [["inspect", "chroma"], ["check"], ["copy"], ["status"]]
@@ -140,6 +141,8 @@ def test_no_secret_in_any_output(tmp_path):
         "CHROMA_API_KEY": "SENTINEL-A",
         "WEAVIATE_API_KEY": "SENTINEL-B",
         "OPENAI_API_KEY": "SENTINEL-C",
+        "CHROMA_URL": "https://user:SENTINEL-D@chroma.example.com",
+        "WEAVIATE_URL": "http://admin:SENTINEL-E@localhost:8099",
     }
     fakes = FakeFactories(
         FakeSource(cli_records(10)), writer=FakeWriter(reject_ids={"id-3"})
@@ -160,11 +163,12 @@ def test_no_secret_in_any_output(tmp_path):
         assert r.exit_code == exit_code, r.output
         all_output += r.output
     assert (tmp_path / ".to-weaviate" / "rejects.jsonl").exists()
-    server_body = {"message": "bad key SENTINEL-B for X-OpenAI-Api-Key SENTINEL-C"}
+    server_body = {"message": "bad SENTINEL-B for X-OpenAI-Api-Key SENTINEL-C at E"}
+    server_body["message"] += " http://admin:SENTINEL-E@localhost:8099"
     failures: list[tuple[list[str], Exception | None, Exception | None, int]] = [
         (
             ["inspect", "chroma", "--force"],
-            httpx.LocalProtocolError("Illegal header value b'SENTINEL-A'"),
+            ChromaError(None, "LocalProtocolError: Illegal header value b'SENTINEL-A'"),
             None,
             4,
         ),
@@ -174,7 +178,12 @@ def test_no_secret_in_any_output(tmp_path):
             UnexpectedStatusCodeError("x", httpx.Response(500, json=server_body)),
             4,
         ),
-        (["copy"], None, RuntimeError("headers: SENTINEL-B SENTINEL-C"), 5),
+        (
+            ["copy"],
+            None,
+            RuntimeError("SENTINEL-B SENTINEL-C https://user:SENTINEL-D@chroma"),
+            5,
+        ),
         (["status", "--dir", "missing"], None, None, 2),
     ]
     for args, source_error, target_error, exit_code in failures:
@@ -191,12 +200,62 @@ def test_no_secret_in_any_output(tmp_path):
 
 @pytest.mark.parametrize("mode", [[], ["--json"]])
 def test_secret_in_an_exception_is_redacted(mode):
-    error = httpx.LocalProtocolError("Illegal header value b'SENTINEL-A'")
+    error = ChromaError(None, "LocalProtocolError: Illegal header value b'SENTINEL-A'")
     fakes = FakeFactories(FakeSource(cli_records(10)), source_error=error)
     r = invoke(fakes, "inspect", "chroma", *mode, CHROMA_API_KEY="SENTINEL-A")
     assert r.exit_code == 4
     assert "SENTINEL" not in r.stdout and "SENTINEL" not in r.stderr
     assert "***" in r.output
+
+
+LONG_KEY = (
+    "".join(chr(ord("a") + i * 7 % 26) for i in range(230))
+    + "\n"
+    + "".join(chr(ord("A") + i * 11 % 26) for i in range(230))
+)
+
+
+@pytest.mark.parametrize("mode", [[], ["--json"]])
+def test_long_secret_is_redacted_before_shortening(mode):
+    assert len(LONG_KEY) == 461
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    fakes.target_error = httpx.LocalProtocolError(
+        f"Illegal header value {LONG_KEY.encode()!r}"
+    )
+    r = invoke(fakes, "check", *mode, WEAVIATE_API_KEY=LONG_KEY)
+    assert r.exit_code == 4
+    escaped = repr(LONG_KEY.encode())[2:-1]
+    for form in (LONG_KEY, escaped):
+        leaked = [form[i : i + 20] for i in range(len(form) - 19)]
+        assert not [part for part in leaked if part in r.output]
+
+
+@pytest.mark.parametrize("mode", [[], ["--json"]])
+def test_secret_with_whitespace_is_redacted_before_collapsing(mode):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    fakes.target_error = RuntimeError("headers: top\nsecret")
+    r = invoke(fakes, "check", *mode, WEAVIATE_API_KEY="top\nsecret")
+    assert r.exit_code == 5
+    assert "top secret" not in r.output and "top\nsecret" not in r.output
+    assert "secret" not in r.output
+
+
+def test_url_password_is_not_stored_or_printed(tmp_path):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    env = {
+        "CHROMA_URL": "https://user:SENTINEL-D@chroma.example.com",
+        "WEAVIATE_URL": "http://admin:SENTINEL-E@localhost:8099",
+    }
+    inspect_run = invoke(fakes, "inspect", "chroma", **env)
+    check_run = invoke(fakes, "check", **env)
+    assert inspect_run.exit_code == check_run.exit_code == 0
+    assert "Inspecting Chroma at https://chroma.example.com" in inspect_run.stdout
+    assert "Checking the target at http://localhost:8099" in check_run.stdout
+    plan = load_plan(tmp_path / ".to-weaviate" / "plan.yaml")
+    assert plan.source.url == "https://chroma.example.com"
+    assert "SENTINEL" not in inspect_run.output + check_run.output
 
 
 def test_unexpected_error_gives_an_internal_error_document(tmp_path):
@@ -276,7 +335,11 @@ def test_auth_error_does_not_repeat_the_server_text():
         (ChromaError(401, "bad key"), "auth_failed", "CHROMA_API_KEY"),
         (ChromaError(403, "forbidden"), "auth_failed", "CHROMA_API_KEY"),
         (ChromaError(404, "no such tenant"), "source_unreachable", "CHROMA_URL"),
-        (httpx.ConnectError("refused"), "source_unreachable", "CHROMA_URL"),
+        (
+            ChromaError(None, "ConnectError: refused"),
+            "source_unreachable",
+            "CHROMA_URL",
+        ),
     ],
 )
 def test_source_errors_map_to_codes(error, code, named):
@@ -310,6 +373,12 @@ def test_source_errors_map_to_codes(error, code, named):
         (WeaviateConnectionError("down"), "target_unreachable", "WEAVIATE_URL"),
         (WeaviateTimeoutError("slow"), "target_unreachable", "WEAVIATE_URL"),
         (WeaviateGRPCUnavailableError(), "target_unreachable", "WEAVIATE_URL"),
+        (httpx.ConnectTimeout("timed out"), "target_unreachable", "WEAVIATE_URL"),
+        (
+            httpx.LocalProtocolError("Illegal header value b'x'"),
+            "target_unreachable",
+            "WEAVIATE_URL",
+        ),
     ],
 )
 @pytest.mark.parametrize("cmd", ["check", "copy"])

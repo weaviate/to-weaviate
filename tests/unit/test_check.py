@@ -106,3 +106,34 @@ def test_vector_mode_is_not_a_decision_when_the_documents_are_embedded():
     both = entry([p.VectorPlan(name="source", mode="keep"), embed("text2vec-weaviate")])
     assert decisions(plan_of(both), {}) == []
     assert [d.kind for d in decisions(plan_of(entry([keep()])), {})] == ["vector_mode"]
+
+
+def targeted(ref: str, name: str, tenant: str | None) -> p.CollectionPlan:
+    base = entry([keep()], name=name)
+    return base.model_copy(
+        update={
+            "source": base.source.model_copy(update={"ref": ref, "name": ref}),
+            "target": base.target.model_copy(update={"tenant": tenant}),
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "duplicate"),
+    [
+        (("Docs", None), ("Docs", None), True),
+        (("Docs", "t"), ("Docs", "t"), True),
+        (("Docs", "t"), ("Docs", None), True),
+        (("docs", None), ("Docs", None), True),
+        (("docs", "t"), ("Docs", "t"), True),
+        (("Docs", "t"), ("Docs", "u"), False),
+        (("docs", "t"), ("Docs", "u"), False),
+        (("Docs", None), ("Other", None), False),
+        (("docs", None), ("dOcs", None), False),
+    ],
+)
+def test_duplicate_target_compares_the_name_weaviate_stores(a, b, duplicate):
+    plan = plan_of(targeted("r1", *a), targeted("r2", *b))
+    errors, _ = plan_findings(plan, None, voyage_mapper)
+    found = [(e.code, e.collection) for e in errors]
+    assert found == ([("duplicate_target", "Docs")] if duplicate else [])

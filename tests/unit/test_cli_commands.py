@@ -323,26 +323,80 @@ def test_copy_collection_matches_source_or_target_name(name, exit_code):
     assert len(fakes.writer.objects) == (10 if exit_code == 0 else 0)
 
 
-def test_copy_refuses_duplicate_target_names_before_connecting(tmp_path):
-    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
-    directory = tmp_path / DIR
+# (first target name, first tenant, second target name, second tenant)
+ONE_PLACE = [
+    ("Docs", None, "Docs", None),
+    ("Docs", "a", "Docs", "a"),
+    ("Docs", "a", "Docs", None),
+    ("docs", None, "Docs", None),
+]
+
+
+def two_entries(
+    directory: Path,
+    first_target: tuple[str, str | None],
+    second_target: tuple[str, str | None],
+) -> None:
+    """Rewrite plan.yaml and inspect.json with two entries from two sources."""
     plan = load_plan(directory / "plan.yaml")
     first = plan.collections[0]
-    twin = first.model_copy(
-        update={"source": first.source.model_copy(update={"ref": "other"})}
-    )
-    save_plan(
-        plan.model_copy(update={"collections": [first, twin]}), directory / "plan.yaml"
-    )
+    entries = []
+    for ref, (name, tenant) in (
+        (first.source.ref, first_target),
+        ("other", second_target),
+    ):
+        target = first.target.model_copy(update={"name": name, "tenant": tenant})
+        source = first.source.model_copy(update={"ref": ref})
+        entries.append(first.model_copy(update={"source": source, "target": target}))
+    save_plan(plan.model_copy(update={"collections": entries}), directory / "plan.yaml")
     found = json.loads((directory / "inspect.json").read_text())
     found["collections"].append({**found["collections"][0], "ref": "other"})
     (directory / "inspect.json").write_text(json.dumps(found))
+
+
+@pytest.mark.parametrize(("name_a", "tenant_a", "name_b", "tenant_b"), ONE_PLACE)
+def test_check_finds_entries_that_write_to_one_place(
+    tmp_path, name_a, tenant_a, name_b, tenant_b
+):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    two_entries(tmp_path / DIR, (name_a, tenant_a), (name_b, tenant_b))
+    r = invoke(fakes, "check", "--json")
+    assert r.exit_code == 2
+    errors = json.loads(r.stdout)["errors"]
+    assert [(e["code"], e["collection"]) for e in errors] == [
+        ("duplicate_target", "Docs")
+    ]
+
+
+@pytest.mark.parametrize(("name_a", "tenant_a", "name_b", "tenant_b"), ONE_PLACE)
+def test_copy_refuses_entries_that_write_to_one_place(
+    tmp_path, name_a, tenant_a, name_b, tenant_b
+):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    two_entries(tmp_path / DIR, (name_a, tenant_a), (name_b, tenant_b))
     r = invoke(fakes, "copy", "--json")
     assert r.exit_code == 2
     d = json.loads(r.stdout)
     assert d["code"] == "invalid_plan"
     assert [e["code"] for e in d["errors"]] == ["duplicate_target"]
     assert fakes.schema_calls == 0 and fakes.source.read_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("name_a", "tenant_a", "name_b", "tenant_b"),
+    [
+        ("Docs", "a", "Docs", "b"),
+        ("docs", "a", "Docs", "b"),
+        ("Docs", None, "Other", None),
+    ],
+)
+def test_check_accepts_entries_that_write_to_separate_places(
+    tmp_path, name_a, tenant_a, name_b, tenant_b
+):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    two_entries(tmp_path / DIR, (name_a, tenant_a), (name_b, tenant_b))
+    r = invoke(fakes, "check", "--json")
+    assert r.exit_code == 0, r.output
 
 
 def test_copy_requires_provider_key():

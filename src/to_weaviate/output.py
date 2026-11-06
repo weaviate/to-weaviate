@@ -3,10 +3,12 @@ import sys
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from to_weaviate.settings import API_KEY_MAP
+from to_weaviate.settings import API_KEY_MAP, URL_VARIABLES, url_passwords
 
 REDACTED = "***"
 SECRET_VARIABLES = ("CHROMA_API_KEY", "WEAVIATE_API_KEY", *API_KEY_MAP)
+# Document keys whose values are fixed words, never redacted.
+FIXED_KEYS = frozenset({"status", "code"})
 
 ERROR_EXIT: dict[str, int] = {
     "rejects": 1,
@@ -76,8 +78,13 @@ def info(json_output: bool, line: str) -> None:
 
 
 def secret_values(env: Mapping[str, str]) -> list[str]:
-    """Non-empty values of the variables that hold secrets, stripped like settings."""
-    values = (env.get(var, "").strip() for var in SECRET_VARIABLES)
+    """Secret values in `env`: the key variables and the URL passwords.
+
+    Values are stripped like settings strips them. Empty values are skipped.
+    """
+    values = [env.get(var, "").strip() for var in SECRET_VARIABLES]
+    for var in URL_VARIABLES:
+        values.extend(url_passwords(env.get(var, "").strip()))
     return list(dict.fromkeys(v for v in values if v))
 
 
@@ -96,11 +103,17 @@ def redact(text: str, secrets: Sequence[str]) -> str:
 
 
 def redact_strings(value: Any, secrets: Sequence[str]) -> Any:
-    """`value` with `redact` applied to every string in it, in lists and dicts."""
+    """`value` with `redact` applied to every string in it, in lists and dicts.
+
+    Values under the keys in FIXED_KEYS stay unchanged.
+    """
     if isinstance(value, str):
         return redact(value, secrets)
     if isinstance(value, dict):
-        return {k: redact_strings(v, secrets) for k, v in value.items()}
+        return {
+            k: v if k in FIXED_KEYS else redact_strings(v, secrets)
+            for k, v in value.items()
+        }
     if isinstance(value, list):
         return [redact_strings(v, secrets) for v in value]
     return value

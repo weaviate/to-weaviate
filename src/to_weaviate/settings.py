@@ -2,7 +2,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import SplitResult, unquote, urlparse, urlsplit, urlunsplit
 
 from dotenv import dotenv_values
 
@@ -45,6 +45,32 @@ API_KEY_MAP = {
     "XAI_APIKEY": "X-Xai-Api-Key",
     "XAI_API_KEY": "X-Xai-Api-Key",
 }
+
+
+URL_VARIABLES = ("CHROMA_URL", "WEAVIATE_URL", "WEAVIATE_GRPC_URL")
+
+
+def _split(url: str) -> tuple[SplitResult, str]:
+    """`url` split, with `//` put in front of a URL without a scheme."""
+    prefix = "" if "://" in url else "//"
+    return urlsplit(prefix + url), prefix
+
+
+def without_userinfo(url: str) -> str:
+    """`url` without its `user:password@` part."""
+    parts, prefix = _split(url)
+    if "@" not in parts.netloc:
+        return url
+    netloc = parts.netloc.rsplit("@", 1)[1]
+    return urlunsplit(parts._replace(netloc=netloc))[len(prefix) :]
+
+
+def url_passwords(url: str) -> list[str]:
+    """The password of `url`, as written and percent-decoded, or no value."""
+    password = _split(url)[0].password
+    if not password:
+        return []
+    return list(dict.fromkeys([password, unquote(password)]))
 
 
 class MissingCredential(Exception):

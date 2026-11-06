@@ -15,10 +15,14 @@ MAX_MESSAGE_CHARS = 500
 
 
 class ChromaError(Exception):
+    """A Chroma request failed. `status` is None for a network failure."""
+
     def __init__(
-        self, status: int, message: str, retry_after: float | None = None
+        self, status: int | None, message: str, retry_after: float | None = None
     ) -> None:
-        super().__init__(f"Chroma returned HTTP {status}: {message}")
+        super().__init__(
+            message if status is None else f"Chroma returned HTTP {status}: {message}"
+        )
         self.status = status
         self.message = message
         self.retry_after = retry_after
@@ -88,7 +92,10 @@ class ChromaClient:
                 )
             return response.json()
 
-        return with_retry(call, _transient, sleep=self._sleep)
+        try:
+            return with_retry(call, _transient, sleep=self._sleep)
+        except httpx.TransportError as exc:
+            raise ChromaError(None, f"{type(exc).__name__}: {exc}") from exc
 
     def _collection_path(self, tenant: str, database: str, collection_id: str) -> str:
         return (

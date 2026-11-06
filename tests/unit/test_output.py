@@ -43,3 +43,29 @@ def test_secret_values_reads_the_key_variables():
         "WEAVIATE_URL": "http://localhost:8099",
     }
     assert sorted(secret_values(env)) == ["c", "o", "w"]
+
+
+def test_redact_strings_keeps_status_and_code():
+    document = {
+        "status": "error",
+        "code": "usage",
+        "message": "an error",
+        "errors": [{"code": "usage", "message": "usage error"}],
+    }
+    assert redact_strings(document, ["error", "usage"]) == {
+        "status": "error",
+        "code": "usage",
+        "message": "an ***",
+        "errors": [{"code": "usage", "message": "*** ***"}],
+    }
+
+
+def test_secret_values_include_url_passwords():
+    env = {
+        "CHROMA_URL": "https://user:p%40ss@chroma.example.com",
+        "WEAVIATE_URL": "http://admin:wpass@localhost:8099",
+        "WEAVIATE_GRPC_URL": "grpc-user:gpass@localhost:50099",
+    }
+    values = secret_values(env)
+    assert {"p%40ss", "p@ss", "wpass", "gpass"} <= set(values)
+    assert not {"user", "admin", "grpc-user"} & set(values)

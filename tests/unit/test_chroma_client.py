@@ -252,3 +252,18 @@ def test_close_closes_the_http_client():
     client.close()
     with pytest.raises(RuntimeError, match="closed"):
         client.count("t", "d", "c")
+
+
+def test_transport_errors_after_the_retries_raise_chroma_error():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        raise httpx.ConnectError("down")
+
+    client, sleeps = make(handler)
+    with pytest.raises(ChromaError) as e:
+        client.identity()
+    assert e.value.status is None and isinstance(e.value.__cause__, httpx.ConnectError)
+    assert str(e.value) == "ConnectError: down"
+    assert len(calls) == 6 and len(sleeps) == 5

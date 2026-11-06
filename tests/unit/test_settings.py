@@ -5,6 +5,7 @@ from to_weaviate.settings import (
     chroma_settings,
     load_env,
     weaviate_settings,
+    without_userinfo,
 )
 
 
@@ -51,3 +52,17 @@ def test_environ_wins_over_dotenv(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text("WEAVIATE_URL=from-file\n")
     monkeypatch.setenv("WEAVIATE_URL", "from-env")
     assert load_env(tmp_path)["WEAVIATE_URL"] == "from-env"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://user:pw@host:8000/path?q=1", "https://host:8000/path?q=1"),
+        ("https://user@host", "https://host"),
+        ("user:pw@host:8099", "host:8099"),
+        ("http://host:8099", "http://host:8099"),
+        ("host:8099", "host:8099"),
+    ],
+)
+def test_without_userinfo(url, expected):
+    assert without_userinfo(url) == expected
