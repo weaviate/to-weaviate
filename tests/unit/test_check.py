@@ -137,3 +137,20 @@ def test_duplicate_target_compares_the_name_weaviate_stores(a, b, duplicate):
     errors, _ = plan_findings(plan, None, voyage_mapper)
     found = [(e.code, e.collection) for e in errors]
     assert found == ([("duplicate_target", "Docs")] if duplicate else [])
+
+
+def test_duplicate_source_names_each_target_collection_of_the_ref():
+    plan = plan_of(
+        targeted("r1", "Docs", "a"),
+        targeted("r1", "docs", "b"),
+        targeted("r1", "Other", None),
+        targeted("r2", "Third", None),
+    )
+    errors, _ = plan_findings(plan, None, voyage_mapper)
+    assert [(e.code, e.collection) for e in errors] == [
+        ("duplicate_source", "Docs"),
+        ("duplicate_source", "Other"),
+    ]
+    assert "r1 -> Docs (tenant a), r1 -> docs (tenant b), r1 -> Other" in (
+        errors[0].message
+    )

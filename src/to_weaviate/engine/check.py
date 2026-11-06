@@ -89,6 +89,29 @@ def _duplicate_findings(entries: list[CollectionPlan]) -> list[Finding]:
     return out
 
 
+def _duplicate_source_findings(entries: list[CollectionPlan]) -> list[Finding]:
+    """Entries that copy one source ref: one finding per target collection.
+
+    The state records one target per source ref, so a plan keeps one entry per
+    ref. A finding for each target lets `copy --collection` refuse any of them.
+    """
+    by_ref: dict[str, list[CollectionPlan]] = {}
+    for entry in entries:
+        by_ref.setdefault(entry.source.ref, []).append(entry)
+    out: list[Finding] = []
+    for group in by_ref.values():
+        if len(group) < 2:
+            continue
+        message = (
+            f"entries {', '.join(_describe(e) for e in group)} copy one source "
+            "collection; the state records one target per source collection, so "
+            "keep one of these entries"
+        )
+        for key in dict.fromkeys(collection_key(e.target.name) for e in group):
+            out.append(Finding("duplicate_source", key, message))
+    return out
+
+
 def _vectorizers(plan: Plan) -> Iterator[tuple[CollectionPlan, VectorizerPlan]]:
     for entry in plan.collections:
         for vector in entry.target.vectors:
@@ -211,6 +234,7 @@ def plan_findings(
     errors: list[Finding] = []
     warnings: list[Finding] = []
     errors.extend(_duplicate_findings(plan.collections))
+    errors.extend(_duplicate_source_findings(plan.collections))
     errors.extend(vectorizer_findings(target_groups(plan.collections)))
     for entry in plan.collections:
         errors.extend(_keep_model_findings(entry, vectorizer_for))

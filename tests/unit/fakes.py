@@ -1,10 +1,12 @@
 import math
 import random
+import sqlite3
 import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, Literal, NoReturn
 
@@ -405,6 +407,58 @@ class FakeFactories:
         if self.target_error is not None:
             raise self.target_error
         return self.schema
+
+
+# The schema of state.sqlite before the state stored the target of a copy.
+OLD_STATE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS collections (
+    ref TEXT PRIMARY KEY,
+    total INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS partitions (
+    ref TEXT NOT NULL,
+    key TEXT NOT NULL,
+    start TEXT,
+    stop TEXT,
+    cursor TEXT,
+    finished INTEGER NOT NULL DEFAULT 0,
+    copied INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (ref, key)
+);
+CREATE TABLE IF NOT EXISTS rejects (
+    ref TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    PRIMARY KEY (ref, source_id)
+);
+CREATE TABLE IF NOT EXISTS hashes (
+    ref TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    hash BLOB NOT NULL,
+    PRIMARY KEY (ref, source_id)
+);
+"""
+
+
+def old_state_file(
+    path: Path, ref: str, total: int, partition: Partition, cursor: str, copied: int
+) -> None:
+    """Write a state file in OLD_STATE_SCHEMA: `ref` with one unfinished partition."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(path)
+    try:
+        with db:
+            db.executescript(OLD_STATE_SCHEMA)
+            db.execute(
+                "INSERT INTO collections (ref, total) VALUES (?, ?)", (ref, total)
+            )
+            db.execute(
+                "INSERT INTO partitions (ref, key, start, stop, cursor, copied) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (ref, partition.key, partition.start, partition.stop, cursor, copied),
+            )
+    finally:
+        db.close()
 
 
 def cli_env(**overrides: str | None) -> dict[str, str | None]:

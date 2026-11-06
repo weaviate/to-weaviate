@@ -74,6 +74,19 @@ Creates the target collections, then copies the records. Progress goes to
 Each record that the tool cannot convert or that Weaviate refuses goes to
 `rejects.jsonl` with the reason.
 
+`state.sqlite` also records the target of each source collection: the
+Weaviate host and port, the collection and the tenant. Once records of a
+source collection are copied, `copy` stops with `state_mismatch` when
+`WEAVIATE_URL` or the target in `plan.yaml` names another target, or when
+the target collection no longer exists. To copy to another target, use
+another `--dir`. Before any record is copied, a run takes the new target.
+
+One `copy` at a time uses a directory. It holds a lock on `copy.lock` while
+it runs, and a second `copy` on that directory exits with `usage`. The
+operating system releases the lock when the process ends, so a stopped run
+leaves no lock behind. On a system without `fcntl`, such as Windows, `copy`
+runs without the lock.
+
 - `--collection NAME`: copy only this plan entry. Repeatable.
 - `--parallelism N`: reads per collection, 1 to 8. Default: 5.
 - `--consistency ONE|QUORUM|ALL`: the write consistency level.
@@ -89,13 +102,14 @@ and `report.json`.
 
 ### `status`
 
-Shows the copy progress from `state.sqlite`. It needs no credentials.
+Shows the copy progress and the recorded target of each collection from
+`state.sqlite`. It needs no credentials.
 
 ## Migration directory
 
 Every command takes `--dir`. The default is `./.to-weaviate`. The directory
-holds `inspect.json`, `plan.yaml`, `state.sqlite`, `events.jsonl`,
-`rejects.jsonl`, `report.md` and `report.json`.
+holds `inspect.json`, `plan.yaml`, `state.sqlite`, `copy.lock`,
+`events.jsonl`, `rejects.jsonl`, `report.md` and `report.json`.
 
 ## JSON output
 
@@ -119,7 +133,7 @@ The exit code is the same with and without `--json`:
 |---|---|---|
 | 0 | success | |
 | 1 | rejected records or a failed verification | `rejects`, `verification_failed` |
-| 2 | usage error or invalid plan | `usage`, `invalid_plan`, `plan_mismatch`, `target_rejected_schema` |
+| 2 | usage error, invalid plan, or a state of another target | `usage`, `invalid_plan`, `plan_mismatch`, `target_rejected_schema`, `state_mismatch` |
 | 3 | missing credential or authentication failure | `missing_credential`, `auth_failed` |
 | 4 | source or target unreachable | `source_unreachable`, `target_unreachable` |
 | 5 | internal error | `internal_error` |
