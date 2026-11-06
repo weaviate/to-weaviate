@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools >= 65", "setuptools_scm[toml] >= 6.2", "wheel >= 0.38.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "to-weaviate"
+dynamic = ["version"]
+description = "Migrate your data to Weaviate from other vector databases"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "BSD-3-Clause" }
+dependencies = [
+    "weaviate-client>=4.23.1",
+    "httpx",
+    "typer",
+    "pydantic>=2",
+    "pyyaml",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+to-weaviate = "to_weaviate.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools_scm]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+mypy_path = "src"
