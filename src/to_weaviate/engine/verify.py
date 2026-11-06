@@ -35,6 +35,9 @@ TARGET_ABOVE_SOURCE = (
     "has no command that removes them."
 )
 NOTHING_COMPARED = "no record was compared; run to-weaviate verify again"
+EVERY_SAMPLE_REJECTED = (
+    "every sampled record is rejected at copy time; read rejects.jsonl"
+)
 
 _TABLES = """
 PRAGMA journal_mode = OFF;
@@ -247,20 +250,19 @@ def verify_records(
 ) -> Check:
     """Compare `sample` source records with their target objects.
 
-    A record that converts to a reject is counted and not compared. The check
-    fails when no record was compared and the source count is above 0.
+    A record that converts to a reject is counted and not compared. An empty
+    sample of an empty source passes. Otherwise the check fails when no record
+    was compared.
     """
     with_vectors = any(v.mode == "keep" for v in entry.target.vectors)
     records = source.sample(collection, sample, rng, with_vectors)
+    if not records and source.count(collection) == 0:
+        return _check("records", entry, True, "source is empty")
     expected: list[tuple[str, TargetObject]] = []
     for record in records:
         obj = to_object(record, entry)
         if isinstance(obj, TargetObject):
             expected.append((record.id, obj))
-    if not expected:
-        empty = source.count(collection) == 0
-        detail = "source is empty" if empty else NOTHING_COMPARED
-        return _check("records", entry, empty, detail)
     stored = reader.fetch(entry, [obj.uuid for _, obj in expected])
     failures: list[str] = []
     for source_id, obj in expected:
@@ -274,11 +276,15 @@ def verify_records(
         f"sampled {len(records)}, compared {len(expected)}, "
         f"rejects skipped {len(records) - len(expected)}, differing {len(failures)}"
     )
-    if failures:
+    if not records:
+        detail += f"; {NOTHING_COMPARED}"
+    elif not expected:
+        detail += f"; {EVERY_SAMPLE_REJECTED}"
+    elif failures:
         detail += ": " + "; ".join(failures[:LISTED_FAILURES])
         if len(failures) > LISTED_FAILURES:
             detail += f"; {len(failures) - LISTED_FAILURES} more"
-    return _check("records", entry, not failures, detail)
+    return _check("records", entry, bool(expected) and not failures, detail)
 
 
 def check_line(check: Check) -> str:

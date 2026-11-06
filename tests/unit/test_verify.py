@@ -356,14 +356,20 @@ def test_records_fail_when_no_record_was_compared_and_the_source_has_records():
         source, FakeReader(writer), ENTRY, collection_of(source), 300, random.Random(0)
     )
     assert (check.name, check.passed) == ("records", False)
-    assert check.detail == "no record was compared; run to-weaviate verify again"
+    assert check.detail == (
+        "sampled 0, compared 0, rejects skipped 0, differing 0; no record was "
+        "compared; run to-weaviate verify again"
+    )
 
 
 def test_records_fail_when_every_sampled_record_is_a_reject():
     odd = Record("odd-1", [1.0, 1.0], "doc", None, {"mystery": 1})
-    check = records_check([odd], ENTRY, [])
+    check = records_check([odd, replace(odd, id="odd-2")], ENTRY, [])
     assert not check.passed
-    assert check.detail == "no record was compared; run to-weaviate verify again"
+    assert check.detail == (
+        "sampled 2, compared 0, rejects skipped 2, differing 0; every sampled "
+        "record is rejected at copy time; read rejects.jsonl"
+    )
 
 
 def test_records_pass_on_an_empty_source():
