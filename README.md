@@ -168,18 +168,21 @@ to-weaviate inspect chroma
 
 ## Development
 
+The `test` extra does not install `pre-commit`, so install it next to it:
+
 ```bash
 uv venv --python 3.10 .venv
-uv pip install -e ".[test]"
+uv pip install -e ".[test]" pre-commit
 .venv/bin/python -m pytest tests/unit
-pre-commit run --all-files
+.venv/bin/pre-commit run --all-files
 ```
 
 ### Acceptance suite
 
 `tests/acceptance` runs the installed `to-weaviate` command against a real
 Chroma server and a real Weaviate server. The tests start no server. They
-need these variables and skip without them:
+run only against the test endpoints, so the four variables must have
+exactly these values:
 
 ```bash
 WEAVIATE_URL=http://localhost:8099
@@ -188,15 +191,22 @@ WEAVIATE_API_KEY=admin-key
 CHROMA_URL=http://localhost:8001
 ```
 
+When a variable is missing or has another value, the suite skips every test
+and names that variable. It connects to no server before this check passes.
+The commands it starts get empty values for `CHROMA_DATABASE`,
+`CHROMA_TENANT`, `CHROMA_API_KEY` and `CHROMA_TOKEN_HEADER`, so values from
+your shell do not reach them.
+
 The suite deletes and recreates the Chroma collections `docs-cosine`,
 `tiny.l2` and `docs-rq`. Before each test it deletes the Weaviate
-collections `Docs_cosine`, `Tiny_l2` and `Docs_rq`. Run it only against
-test servers.
+collections `Docs_cosine`, `Tiny_l2` and `Docs_rq`.
 
-The `Makefile` starts the servers and sets the variables. It needs Docker,
-kind, helm, kubectl and a clone of
+The `Makefile` starts the servers and sets the variables. `make` alone
+prints the targets. `make acceptance-up` needs a clone of
 [weaviate-local-k8s](https://github.com/weaviate/weaviate-local-k8s) at
-`LOCAL_K8S` (default: `../weaviate-local-k8s`):
+`LOCAL_K8S` (default: `../weaviate-local-k8s`), Docker, and every program
+that `local-k8s.sh` requires: `kind`, `helm`, `kubectl`, `curl`, `nohup` and
+`jq`, plus `gtimeout` on macOS (from coreutils) or `timeout` on Linux.
 
 ```bash
 make acceptance-up     # Chroma on port 8001, Weaviate on ports 8099 and 50099 in a kind cluster
@@ -205,11 +215,21 @@ make acceptance        # pytest tests/acceptance -v
 make acceptance-down   # stops Chroma, then asks before it deletes the kind cluster
 ```
 
-`make acceptance-up` stops with an error when a kind cluster named
-`weaviate-k8s` exists, because `local-k8s.sh setup` would reuse that name.
-`make acceptance-down` runs `local-k8s.sh clean` only after you type `y`.
-That command deletes the kind cluster `weaviate-k8s` and kills every
-`kubectl-relay` process on the machine.
+`make acceptance-up` creates a kind cluster named `weaviate-k8s` and
+switches the kubectl context to `kind-weaviate-k8s`. Before it starts
+anything, it checks that `kind` is on `PATH` and that
+`$LOCAL_K8S/local-k8s.sh` is executable. It stops with an error when a kind
+cluster named `weaviate-k8s` already exists, because `local-k8s.sh setup`
+would reuse that name. Before `setup` runs, it writes the file
+`.acceptance-kind-cluster`, which git ignores.
+
+`make acceptance-down` always stops Chroma. It deletes the cluster only when
+`.acceptance-kind-cluster` exists, so it leaves alone a cluster that this
+checkout did not create. It lists every effect of `local-k8s.sh clean` and
+runs it only after you type `y`. `clean` deletes the kind cluster
+`weaviate-k8s`, switches the kubectl context to `kind-weaviate-k8s`, and
+kills every `kubectl-relay` process and every
+`kubectl get pods -n weaviate -w` process on the machine.
 
 `make acceptance` works with any servers on those ports: Chroma from
 `tests/acceptance/chroma/docker-compose.yml`, and a Weaviate server that

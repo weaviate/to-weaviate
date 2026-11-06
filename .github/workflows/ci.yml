@@ -5,6 +5,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -35,6 +38,7 @@ jobs:
 
   acceptance:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       WEAVIATE_URL: http://localhost:8099
       WEAVIATE_GRPC_URL: http://localhost:50099

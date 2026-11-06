@@ -1,7 +1,8 @@
 """Seed the local Chroma test server with the collections of the acceptance suite.
 
-Run it as a script, or call `seed()`. Both read CHROMA_URL. Each run deletes and
-recreates the collections, so every run sends the same data.
+Run it as a script, or call `seed()`. Both read CHROMA_URL and run only when it
+is TEST_URL. Each run deletes and recreates the collections, so every run sends
+the same data.
 """
 
 import os
@@ -10,13 +11,12 @@ import sys
 import uuid
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse
 
 import httpx
 
 DATABASE_PATH = "/api/v2/tenants/default_tenant/databases/default_database"
 ADD_BATCH = 300
-LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+TEST_URL = "http://localhost:8001"
 CATEGORIES = ("guide", "reference", "tutorial")
 TAGS = ("red", "green", "blue", "small", "large")
 
@@ -121,15 +121,14 @@ def _recreate(
 
 
 def seed() -> None:
-    """Delete and recreate docs-cosine, tiny.l2 and docs-rq at CHROMA_URL."""
-    url = os.environ.get("CHROMA_URL", "").strip()
-    host = urlparse(url).hostname
-    if host not in LOCAL_HOSTS:
+    """Delete and recreate docs-cosine, tiny.l2 and docs-rq on the test server."""
+    if os.environ.get("CHROMA_URL") != TEST_URL:
         raise ValueError(
-            f"CHROMA_URL must name a local test server; its host is {host!r}"
+            "the seed deletes and recreates collections, so it runs only "
+            f"against the test server; set CHROMA_URL={TEST_URL}"
         )
     rng = random.Random(0)
-    with httpx.Client(base_url=url.rstrip("/") + DATABASE_PATH, timeout=60) as http:
+    with httpx.Client(base_url=TEST_URL + DATABASE_PATH, timeout=60) as http:
         _recreate(http, "docs-cosine", "cosine", docs_cosine(rng))
         _recreate(http, "tiny.l2", None, tiny_l2(rng))
         _recreate(http, "docs-rq", "cosine", docs_rq(rng))

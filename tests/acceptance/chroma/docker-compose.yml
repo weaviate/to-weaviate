@@ -4,7 +4,8 @@ services:
   chroma:
     image: chromadb/chroma:1.5.9
     ports:
-      - "8001:8000"
+      # Chroma here has no authentication, so only this machine reaches it.
+      - "127.0.0.1:8001:8000"
     healthcheck:
       # The image has no curl, wget or nc.
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8000"]
