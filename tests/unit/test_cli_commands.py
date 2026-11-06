@@ -16,6 +16,7 @@ from fakes import (
 )
 from typer.testing import Result
 
+from to_weaviate.lock import Locked, exclusive_lock
 from to_weaviate.plan import load_plan, save_plan
 from to_weaviate.sources.base import Page, Partition, Record, SourceCollection
 from to_weaviate.sources.chroma.client import ChromaError
@@ -860,3 +861,39 @@ def test_status_and_verify_run_while_a_copy_holds_the_directory(tmp_path):
         verify = invoke(fakes, "verify", "--json")
     assert status.exit_code == 0, status.output
     assert verify.exit_code == 0, verify.output
+
+
+class LockProbe(FakeSource):
+    """FakeSource that tries to take the copy lock on each read and counts it."""
+
+    def __init__(self, records: list[Record], lock_path: Path) -> None:
+        super().__init__(records, page_size=2)
+        self.lock_path = lock_path
+        self.refused = 0
+        self.taken = 0
+
+    def read(
+        self,
+        collection: SourceCollection,
+        partition: Partition,
+        cursor: str | None,
+        with_vectors: bool,
+    ) -> Page:
+        try:
+            with exclusive_lock(self.lock_path):
+                self.taken += 1
+        except Locked:
+            self.refused += 1
+        return super().read(collection, partition, cursor, with_vectors)
+
+
+def test_copy_holds_the_lock_while_it_copies_records(tmp_path):
+    pytest.importorskip("fcntl")
+    source = LockProbe(cli_records(10), tmp_path / DIR / "copy.lock")
+    fakes = inspected(FakeFactories(source))
+    r = invoke(fakes, "copy", "--json", "--parallelism", "1")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["collections"][0]["copied"] == 10
+    assert len(fakes.writer.objects) == 10
+    assert source.read_calls == 5
+    assert (source.refused, source.taken) == (5, 0)
