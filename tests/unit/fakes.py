@@ -251,6 +251,13 @@ class FakeReader:
     def _objects(self, entry: CollectionPlan) -> dict[str, TargetObject]:
         return self.writer.stored.get((entry.target.name, entry.target.tenant), {})
 
+    def exists(self, entry: CollectionPlan) -> bool:
+        """A collection or a tenant exists once a write named it."""
+        name, tenant = entry.target.name, entry.target.tenant
+        if tenant:
+            return (name, tenant) in self.writer.stored
+        return any(stored_name == name for stored_name, _ in self.writer.stored)
+
     def count(self, entry: CollectionPlan) -> int:
         return len(self._objects(entry))
 

@@ -1,6 +1,6 @@
 import json
 import random
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -10,12 +10,15 @@ from to_weaviate import plan as p
 from to_weaviate.engine.verify import (
     Check,
     IdDiff,
+    check_line,
     diff_ids,
+    missing_target,
     verify_counts,
     verify_ids,
     verify_records,
     write_report,
 )
+from to_weaviate.plan import load_plan, save_plan
 from to_weaviate.sources.base import Record, SourceCollection
 from to_weaviate.target.writer import TargetObject, to_object
 
@@ -294,8 +297,84 @@ def test_report_lists_every_check(tmp_path):
     ]
     assert json.loads((tmp_path / "report.json").read_text()) == {
         "passed": False,
-        "checks": [asdict(c) for c in checks],
+        "checks": [
+            {
+                "name": "count",
+                "collection": "Docs",
+                "passed": True,
+                "detail": "source count 3, target count 3",
+                "tenant": None,
+            },
+            {
+                "name": "ids",
+                "collection": "Docs",
+                "passed": False,
+                "detail": "missing 1, extra 0",
+                "tenant": None,
+            },
+            {
+                "name": "records",
+                "collection": "Docs",
+                "passed": True,
+                "detail": "sampled 3",
+                "tenant": None,
+            },
+        ],
     }
+
+
+def test_check_line_names_the_tenant():
+    check = Check("count", "Docs", True, "source count 3, target count 3", "acme")
+    assert check_line(check) == (
+        "PASS Docs (tenant acme) count: source count 3, target count 3"
+    )
+    assert check_line(replace(check, tenant=None)) == (
+        "PASS Docs count: source count 3, target count 3"
+    )
+
+
+def test_checks_carry_the_tenant_of_the_entry(tmp_path):
+    for tenant in ("t1", None):
+        entry = make_entry(tenant=tenant)
+        source, writer = migrated(make_records(10), entry)
+        reader, collection = FakeReader(writer), collection_of(source)
+        checks = [
+            verify_counts(source, reader, entry, collection),
+            verify_ids(diff_ids(source, reader, entry, collection, tmp_path), entry),
+            verify_records(source, reader, entry, collection, 5, random.Random(0)),
+        ]
+        assert [(c.passed, c.tenant) for c in checks] == [(True, tenant)] * 3
+
+
+def test_missing_collection_is_one_failed_count_check():
+    check = missing_target(FakeReader(FakeWriter()), make_entry(tenant="t1"))
+    assert check == Check(
+        "count",
+        "Docs",
+        False,
+        "collection Docs does not exist; run to-weaviate copy",
+        "t1",
+    )
+
+
+def test_missing_tenant_is_one_failed_count_check():
+    writer = FakeWriter()
+    writer.write(make_entry(tenant="t2"), [])
+    check = missing_target(FakeReader(writer), make_entry(tenant="t1"))
+    assert check == Check(
+        "count",
+        "Docs",
+        False,
+        "tenant t1 of collection Docs does not exist; run to-weaviate copy",
+        "t1",
+    )
+
+
+def test_existing_target_gives_no_check():
+    writer = FakeWriter()
+    writer.write(make_entry(tenant="t1"), [])
+    assert missing_target(FakeReader(writer), make_entry(tenant="t1")) is None
+    assert missing_target(FakeReader(writer), make_entry()) is None
 
 
 @pytest.fixture
@@ -316,9 +395,12 @@ def test_verify_exits_1_on_failure(in_tmp):
     assert r.exit_code == 1, r.output
     d = json.loads(r.stdout)
     assert (d["status"], d["code"]) == ("error", "verification_failed")
-    assert {"name": "count", "collection": "Docs", "passed": False} == {
-        k: v for k, v in d["checks"][0].items() if k != "detail"
-    }
+    assert {
+        "name": "count",
+        "collection": "Docs",
+        "passed": False,
+        "tenant": None,
+    } == {k: v for k, v in d["checks"][0].items() if k != "detail"}
     assert "3 checks" in d["message"] and "report.md" in d["hint"]
     assert d["report"] == str(DIR / "report.md")
     assert json.loads((DIR / "report.json").read_text())["passed"] is False
@@ -372,3 +454,37 @@ def test_verify_needs_inspect_json(in_tmp):
     assert r.exit_code == 2
     d = json.loads(r.stdout)
     assert d["code"] == "usage" and "to-weaviate inspect chroma" in d["hint"]
+
+
+def test_verify_names_the_tenant(in_tmp):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    plan = load_plan(DIR / "plan.yaml")
+    plan.collections[0].target.tenant = "acme"
+    save_plan(plan, DIR / "plan.yaml")
+    assert invoke(fakes, "copy").exit_code == 0
+    r = invoke(fakes, "verify", "--json")
+    assert r.exit_code == 0, r.output
+    assert [c["tenant"] for c in json.loads(r.stdout)["checks"]] == ["acme"] * 3
+    assert "Verifying docs in Docs (tenant acme)" in r.stderr
+    report = json.loads((DIR / "report.json").read_text())
+    assert [c["tenant"] for c in report["checks"]] == ["acme"] * 3
+    assert "PASS Docs (tenant acme) count: " in (DIR / "report.md").read_text()
+
+
+def test_verify_before_copy_fails_one_count_check(in_tmp):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    r = invoke(fakes, "verify", "--json")
+    assert r.exit_code == 1, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"]) == ("verification_failed", "1 check failed.")
+    assert d["checks"] == [
+        {
+            "name": "count",
+            "collection": "Docs",
+            "passed": False,
+            "detail": "collection Docs does not exist; run to-weaviate copy",
+            "tenant": None,
+        }
+    ]

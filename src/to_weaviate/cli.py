@@ -56,6 +56,8 @@ from to_weaviate.engine.verify import (
     Check,
     check_line,
     diff_ids,
+    missing_target,
+    target_label,
     verify_counts,
     verify_ids,
     verify_records,
@@ -757,7 +759,12 @@ def _verify(
     checks: list[Check] = []
     for entry in plan.collections:
         collection = inspected[entry.source.ref]
-        info(json_output, f"Verifying {entry.source.name} in {entry.target.name}")
+        place = target_label(entry.target.name, entry.target.tenant)
+        info(json_output, f"Verifying {entry.source.name} in {place}")
+        missing = missing_target(reader, entry)
+        if missing is not None:
+            checks.append(missing)
+            continue
         checks.append(verify_counts(source, reader, entry, collection))
         if not quick:
             diff = diff_ids(source, reader, entry, collection, directory)

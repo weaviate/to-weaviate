@@ -323,6 +323,19 @@ def test_copy_collection_matches_source_or_target_name(name, exit_code):
     assert len(fakes.writer.objects) == (10 if exit_code == 0 else 0)
 
 
+def test_second_copy_reads_only_the_records_added_since():
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    assert invoke(fakes, "copy").exit_code == 0
+    reads, writes = fakes.source.read_calls, fakes.writer.calls
+    fakes.source.records.extend(cli_records(11)[10:])
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert fakes.source.read_calls - reads == 1 and fakes.writer.calls - writes == 1
+    assert len(fakes.writer.objects) == 11
+    assert set(fakes.writer.writes_per_uuid.values()) == {1}
+    assert json.loads(r.stdout)["collections"][0]["copied"] == 11
+
+
 # (first target name, first tenant, second target name, second tenant)
 ONE_PLACE = [
     ("Docs", None, "Docs", None),

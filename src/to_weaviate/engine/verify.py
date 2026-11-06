@@ -43,6 +43,7 @@ class Check:
     collection: str  # target collection name
     passed: bool
     detail: str
+    tenant: str | None = None
 
 
 @dataclass(frozen=True)
@@ -58,10 +59,36 @@ def _quoted(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _check(name: str, entry: CollectionPlan, passed: bool, detail: str) -> Check:
+    return Check(name, entry.target.name, passed, detail, entry.target.tenant)
+
+
+def target_label(collection: str, tenant: str | None) -> str:
+    """`collection`, followed by the tenant in parentheses when there is one."""
+    return f"{collection} (tenant {tenant})" if tenant else collection
+
+
 def _batches(items: Iterable[T], size: int) -> Iterator[list[T]]:
     iterator = iter(items)
     while batch := list(itertools.islice(iterator, size)):
         yield batch
+
+
+def missing_target(reader: TargetReader, entry: CollectionPlan) -> Check | None:
+    """A failed count check when the entry's collection or tenant does not exist."""
+    if reader.exists(entry):
+        return None
+    name, tenant = entry.target.name, entry.target.tenant
+    without_tenant = entry.model_copy(
+        update={"target": entry.target.model_copy(update={"tenant": None})}
+    )
+    if tenant and reader.exists(without_tenant):
+        missing = f"tenant {tenant} of collection {name}"
+    else:
+        missing = f"collection {name}"
+    return _check(
+        "count", entry, False, f"{missing} does not exist; run to-weaviate copy"
+    )
 
 
 def verify_counts(
@@ -75,7 +102,7 @@ def verify_counts(
     detail = f"source count {expected}, target count {found}"
     if expected != found:
         detail += "; run to-weaviate sync"
-    return Check("count", entry.target.name, expected == found, detail)
+    return _check("count", entry, expected == found, detail)
 
 
 def _diff(
@@ -130,7 +157,7 @@ def verify_ids(diff: IdDiff, entry: CollectionPlan) -> Check:
         detail += f"; missing ids {_quoted(diff.missing_sample)}"
     if diff.extra_sample:
         detail += f"; extra ids {_quoted(diff.extra_sample)}"
-    return Check("ids", entry.target.name, diff.missing == diff.extra == 0, detail)
+    return _check("ids", entry, diff.missing == diff.extra == 0, detail)
 
 
 def _same(expected: Any, found: Any) -> bool:
@@ -216,12 +243,13 @@ def verify_records(
         detail += ": " + "; ".join(failures[:LISTED_FAILURES])
         if len(failures) > LISTED_FAILURES:
             detail += f"; {len(failures) - LISTED_FAILURES} more"
-    return Check("records", entry.target.name, not failures, detail)
+    return _check("records", entry, not failures, detail)
 
 
 def check_line(check: Check) -> str:
     status = "PASS" if check.passed else "FAIL"
-    return f"{status} {check.collection} {check.name}: {check.detail}"
+    place = target_label(check.collection, check.tenant)
+    return f"{status} {place} {check.name}: {check.detail}"
 
 
 def write_report(checks: list[Check], directory: Path) -> None:

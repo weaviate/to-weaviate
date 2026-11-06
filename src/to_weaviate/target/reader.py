@@ -18,6 +18,8 @@ SOURCE_ID = "source_id"
 
 
 class TargetReader(Protocol):
+    def exists(self, entry: CollectionPlan) -> bool: ...
+
     def count(self, entry: CollectionPlan) -> int: ...
 
     def fetch(
@@ -60,6 +62,16 @@ class WeaviateReader:
 
     def _call(self, call: Callable[[], T]) -> T:
         return with_retry(call, transient, sleep=self._sleep)
+
+    def exists(self, entry: CollectionPlan) -> bool:
+        """True when the collection exists, and the tenant when the entry has one."""
+        name, tenant = entry.target.name, entry.target.tenant
+        if not self._call(lambda: self._client.collections.exists(name)):
+            return False
+        if not tenant:
+            return True
+        tenants = self._client.collections.get(name).tenants
+        return self._call(lambda: tenants.exists(tenant))
 
     def count(self, entry: CollectionPlan) -> int:
         collection = self._collection(entry)

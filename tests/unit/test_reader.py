@@ -89,13 +89,19 @@ class FakeCollection:
     def __init__(self, objects: list[Any], failures: list[Exception]) -> None:
         self.objects = objects
         self.failures = failures
-        self.tenants: list[str] = []
+        self.applied_tenants: list[str] = []
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.aggregate = SimpleNamespace(over_all=self._over_all)
         self.query = SimpleNamespace(
             fetch_objects=self._fetch_objects, near_vector=self._near_vector
         )
         self.iterator_fail_at: int | None = None
+        self.tenant_names: set[str] = set()
+        self.tenants = SimpleNamespace(exists=self._tenant_exists)
+
+    def _tenant_exists(self, tenant: str) -> bool:
+        self.calls.append(("tenants.exists", {"tenant": tenant}))
+        return tenant in self.tenant_names
 
     def _call(self, name: str, kwargs: dict[str, Any]) -> None:
         self.calls.append((name, kwargs))
@@ -103,7 +109,7 @@ class FakeCollection:
             raise self.failures.pop(0)
 
     def with_tenant(self, tenant: str) -> "FakeCollection":
-        self.tenants.append(tenant)
+        self.applied_tenants.append(tenant)
         return self
 
     def _over_all(self, **kwargs: Any) -> Any:
@@ -135,7 +141,11 @@ class FakeClient:
     ) -> None:
         self.collection = FakeCollection(objects, failures or [])
         self.names: list[str] = []
-        self.collections = SimpleNamespace(get=self._get)
+        self.existing = {"Docs"}
+        self.collections = SimpleNamespace(get=self._get, exists=self._exists)
+
+    def _exists(self, name: str) -> bool:
+        return name in self.existing
 
     def _get(self, name: str) -> FakeCollection:
         self.names.append(name)
@@ -149,7 +159,7 @@ def reader(client: FakeClient) -> WeaviateReader:
 def test_count_reads_the_total_count_of_the_tenant():
     client = FakeClient([stored("a"), stored("b")])
     assert reader(client).count(make_entry(tenant="t1")) == 2
-    assert client.names == ["Docs"] and client.collection.tenants == ["t1"]
+    assert client.names == ["Docs"] and client.collection.applied_tenants == ["t1"]
     assert client.collection.calls == [("over_all", {"total_count": True})]
 
 
@@ -161,7 +171,7 @@ def test_without_a_tenant_none_is_applied():
     target.near_vector(ENTRY, [0.1, 0.2], 1)
     target.filter_equal(ENTRY, "year", 1, 1)
     list(target.source_ids(ENTRY))
-    assert client.collection.tenants == []
+    assert client.collection.applied_tenants == []
 
 
 def test_every_method_applies_the_tenant():
@@ -173,7 +183,7 @@ def test_every_method_applies_the_tenant():
     target.near_vector(entry, [0.1, 0.2], 1)
     target.filter_equal(entry, "year", 1, 1)
     list(target.source_ids(entry))
-    assert client.collection.tenants == ["t1"] * 5
+    assert client.collection.applied_tenants == ["t1"] * 5
 
 
 def test_fetch_asks_for_at_most_100_uuids_per_request():
@@ -261,3 +271,19 @@ def test_transient_errors_are_retried_and_others_raised():
     with pytest.raises(UnexpectedStatusCodeError):
         reader(client).count(ENTRY)
     assert len(client.collection.calls) == 1
+
+
+def test_exists_checks_the_collection_and_then_the_tenant():
+    client = FakeClient([])
+    client.collection.tenant_names = {"t1"}
+    target = reader(client)
+    assert target.exists(ENTRY) is True
+    assert target.exists(make_entry(tenant="t1")) is True
+    assert target.exists(make_entry(tenant="t2")) is False
+    assert [kwargs for name, kwargs in client.collection.calls] == [
+        {"tenant": "t1"},
+        {"tenant": "t2"},
+    ]
+    client.existing = set()
+    assert target.exists(make_entry(tenant="t1")) is False
+    assert len(client.collection.calls) == 2
