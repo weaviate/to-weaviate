@@ -70,6 +70,7 @@ from to_weaviate.engine.verify import (
     write_report,
 )
 from to_weaviate.events import Events
+from to_weaviate.lock import Locked, exclusive_lock
 from to_weaviate.output import (
     ERROR_EXIT,
     CliError,
@@ -128,6 +129,7 @@ DEFAULT_DIR = Path(".to-weaviate")
 INSPECT_FILE = "inspect.json"
 PLAN_FILE = "plan.yaml"
 STATE_FILE = "state.sqlite"
+LOCK_FILE = "copy.lock"
 EVENTS_FILE = "events.jsonl"
 REJECTS_FILE = "rejects.jsonl"
 DEFAULT_PARALLELISM = 5
@@ -732,6 +734,20 @@ def _planned_targets(
     return planned
 
 
+@contextmanager
+def _copy_lock(directory: Path) -> Iterator[None]:
+    """Hold the lock that lets one copy at a time use `directory`."""
+    try:
+        with exclusive_lock(directory / LOCK_FILE):
+            yield
+    except Locked as exc:
+        raise CliError(
+            "usage",
+            f"Another to-weaviate copy uses {directory}.",
+            "Wait for it to end, or use another --dir.",
+        ) from exc
+
+
 def _select(entries: list[CollectionPlan], names: list[str]) -> list[CollectionPlan]:
     if not names:
         return entries
@@ -776,45 +792,46 @@ def _copy(
     _require_provider_keys(
         plan.model_copy(update={"collections": entries}), target_settings
     )
-    source = factories.source(source_settings)
-    schema = factories.schema(target_settings)
-    writer = factories.writer(target_settings, consistency)
-    reader = factories.reader(target_settings)
-    source_names = {c.ref: c.name for c in inspected.values()}
-    source_names.update({e.source.ref: e.source.name for e in plan.collections})
-    state = State(directory / STATE_FILE)
-    try:
-        targets = _planned_targets(
-            state,
-            reader,
-            entries,
-            _target_host(target_settings),
-            source_names,
-            directory,
-        )
-        for group in selected.values():
-            schema.ensure(group)
-        events = Events(directory / EVENTS_FILE)
-        for entry in entries:
-            state.set_target(entry.source.ref, targets[entry.source.ref])
-            info(json_output, f"Copying {entry.source.name} to {entry.target.name}")
-            result = copy_collection(
-                source,
-                writer,
+    with _copy_lock(directory):
+        source = factories.source(source_settings)
+        schema = factories.schema(target_settings)
+        writer = factories.writer(target_settings, consistency)
+        reader = factories.reader(target_settings)
+        source_names = {c.ref: c.name for c in inspected.values()}
+        source_names.update({e.source.ref: e.source.name for e in plan.collections})
+        state = State(directory / STATE_FILE)
+        try:
+            targets = _planned_targets(
                 state,
-                events,
-                entry,
-                inspected[entry.source.ref],
-                parallelism,
+                reader,
+                entries,
+                _target_host(target_settings),
+                source_names,
+                directory,
             )
-            info(
-                json_output,
-                f"Copied {entry.source.name}: {_plural(result.copied, 'record')}, "
-                f"{_plural(result.rejects, 'reject')}",
-            )
-        progress = {p.ref: p for p in state.progress()}
-    finally:
-        state.close()
+            for group in selected.values():
+                schema.ensure(group)
+            events = Events(directory / EVENTS_FILE)
+            for entry in entries:
+                state.set_target(entry.source.ref, targets[entry.source.ref])
+                info(json_output, f"Copying {entry.source.name} to {entry.target.name}")
+                result = copy_collection(
+                    source,
+                    writer,
+                    state,
+                    events,
+                    entry,
+                    inspected[entry.source.ref],
+                    parallelism,
+                )
+                info(
+                    json_output,
+                    f"Copied {entry.source.name}: {_plural(result.copied, 'record')}, "
+                    f"{_plural(result.rejects, 'reject')}",
+                )
+            progress = {p.ref: p for p in state.progress()}
+        finally:
+            state.close()
     rows = _rows(entries, progress)
     document, text = _progress_output(entries, rows)
     rejects = sum(row["rejects"] for row in rows)

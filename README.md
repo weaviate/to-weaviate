@@ -80,6 +80,12 @@ or the target in `plan.yaml` names another target, or the target collection
 no longer exists, `copy` stops with `state_mismatch`. To copy to another
 target, use another `--dir`.
 
+One `copy` at a time uses a directory. It holds a lock on `copy.lock` while
+it runs, and a second `copy` on that directory exits with `usage`. The
+operating system releases the lock when the process ends, so a stopped run
+leaves no lock behind. On a system without `fcntl`, such as Windows, `copy`
+runs without the lock.
+
 - `--collection NAME`: copy only this plan entry. Repeatable.
 - `--parallelism N`: reads per collection, 1 to 8. Default: 5.
 - `--consistency ONE|QUORUM|ALL`: the write consistency level.
@@ -101,8 +107,8 @@ Shows the copy progress and the recorded target of each collection from
 ## Migration directory
 
 Every command takes `--dir`. The default is `./.to-weaviate`. The directory
-holds `inspect.json`, `plan.yaml`, `state.sqlite`, `events.jsonl`,
-`rejects.jsonl`, `report.md` and `report.json`.
+holds `inspect.json`, `plan.yaml`, `state.sqlite`, `copy.lock`,
+`events.jsonl`, `rejects.jsonl`, `report.md` and `report.json`.
 
 ## JSON output
 

@@ -1,4 +1,7 @@
+import fcntl
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -770,3 +773,44 @@ def test_status_prints_the_stored_target(tmp_path):
         "tenant": "a",
     }
     assert "SENTINEL" not in text.output + js.output
+
+
+LOCK_MESSAGE = "Another to-weaviate copy uses .to-weaviate."
+LOCK_HINT = "Wait for it to end, or use another --dir."
+
+
+@contextmanager
+def held_lock(directory: Path) -> Iterator[None]:
+    """Hold the copy lock of `directory` the way a running copy holds it."""
+    with (directory / "copy.lock").open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
+def test_copy_refuses_a_directory_that_another_copy_holds(tmp_path):
+    source = FakeSource(cli_records(10), page_size=2)
+    fakes = inspected(FakeFactories(source, writer=FakeWriter(fail_on_call=3)))
+    assert invoke(fakes, "copy", "--parallelism", "1").exit_code == 5
+    before = invoke(fakes, "status", "--json").stdout
+    calls = (source.read_calls, fakes.writer.calls, fakes.schema_calls)
+    with held_lock(tmp_path / DIR):
+        r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"], d["hint"]) == ("usage", LOCK_MESSAGE, LOCK_HINT)
+    assert invoke(fakes, "status", "--json").stdout == before
+    assert (source.read_calls, fakes.writer.calls, fakes.schema_calls) == calls
+    # The lock file stays, and a lock file that nobody holds does not block.
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["collections"][0]["copied"] == 10
+
+
+def test_status_and_verify_run_while_a_copy_holds_the_directory(tmp_path):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    assert invoke(fakes, "copy").exit_code == 0
+    with held_lock(tmp_path / DIR):
+        status = invoke(fakes, "status", "--json")
+        verify = invoke(fakes, "verify", "--json")
+    assert status.exit_code == 0, status.output
+    assert verify.exit_code == 0, verify.output
