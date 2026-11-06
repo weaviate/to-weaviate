@@ -143,6 +143,36 @@ def test_check_refuses_keep_with_a_different_model():
     assert "text-embedding-3-large" in r.output
 
 
+def test_copy_resumes_with_a_plan_that_holds_the_full_embedding_config(tmp_path):
+    source = FakeSource(cli_records(10), page_size=2, embedding=OPENAI_SMALL)
+    fakes = inspected(FakeFactories(source, writer=FakeWriter(fail_on_call=3)))
+    path = tmp_path / DIR / "plan.yaml"
+    plan = load_plan(path)
+    entry = plan.collections[0]
+    full = {
+        **OPENAI_SMALL,
+        "config": {
+            **OPENAI_SMALL["config"],
+            "api_key_env_var": "OPENAI_API_KEY",
+            "default_headers": {"X-Custom": "made-up-header"},
+            "organization_id": None,
+        },
+    }
+    old = entry.model_copy(
+        update={"source": entry.source.model_copy(update={"embedding": full})}
+    )
+    save_plan(plan.model_copy(update={"collections": [old]}), path)
+    assert load_plan(path).collections[0].source.embedding == full
+    key = {"OPENAI_API_KEY": "openai-key"}
+    assert invoke(fakes, "check", **key).exit_code == 0
+    r = invoke(fakes, "copy", "--parallelism", "1", **key)
+    assert r.exit_code == 5, r.output
+    r = invoke(fakes, "copy", "--json", **key)
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["collections"][0]["copied"] == 10
+    assert len(fakes.writer.objects) == 10
+
+
 def test_check_allows_keep_with_vectorizer_when_source_model_unknown(tmp_path):
     fakes = inspected(
         FakeFactories(FakeSource(cli_records(10))),

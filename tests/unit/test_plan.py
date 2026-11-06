@@ -143,6 +143,23 @@ def test_draft_both_keeps_the_source_vector_and_adds_a_new_one():
     assert vs[1].distance is None
 
 
+def test_draft_both_puts_the_chosen_vectorizer_on_the_new_vector_only():
+    chosen = VectorizerPlan(
+        module="text2vec-openai", options={"model": "text-embedding-3-large"}
+    )
+    plan = draft_plan(
+        SRC,
+        [make(embedding={"name": "x"})],
+        "both",
+        chosen,
+        vectorizer_for=lambda e: (VectorizerPlan(module="m"), []),
+    )
+    vs = target(plan).vectors
+    assert [(x.name, x.mode) for x in vs] == [("source", "keep"), ("default", "embed")]
+    assert vs[0].vectorizer is None
+    assert vs[1].vectorizer == chosen
+
+
 def test_draft_keep_uses_the_mapper_and_collects_notes():
     def mapper(embedding):
         return VectorizerPlan(module="text2vec-x"), ["mapped"]
@@ -163,6 +180,33 @@ def test_draft_keep_vectorizer_argument_wins_over_the_mapper():
         vectorizer_for=lambda e: (VectorizerPlan(module="m"), []),
     )
     assert target(plan).vectors[0].vectorizer == chosen
+
+
+@pytest.mark.parametrize("vectors", ["keep", "embed", "both"])
+def test_draft_puts_the_source_notes_first(vectors):
+    c, other = make(), make("other", ref="r2")
+    plan = draft_plan(
+        SRC, [c, other], vectors, source_notes={c.ref: ["from the source"]}
+    )
+    assert plan.collections[0].notes[0] == "from the source"
+    assert "from the source" not in plan.collections[1].notes
+
+
+def test_load_accepts_a_plan_with_the_full_embedding_config(tmp_path):
+    full = {
+        "type": "known",
+        "name": "openai",
+        "config": {
+            "api_key_env_var": "OPENAI_API_KEY",
+            "model_name": "m",
+            "api_base": "https://bob:made-up-pw@proxy.example.com/v1",
+            "default_headers": {"X-Custom": "made-up-header"},
+            "organization_id": None,
+        },
+    }
+    plan = draft_plan(SRC, [make(embedding=full)], "keep")
+    save_plan(plan, tmp_path / "plan.yaml")
+    assert load_plan(tmp_path / "plan.yaml").collections[0].source.embedding == full
 
 
 def test_draft_keep_without_mapper_has_no_vectorizer():

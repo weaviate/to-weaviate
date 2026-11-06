@@ -1,10 +1,11 @@
+import functools
 from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 from fakes import FakeRpcError, raise_grpc_failure
-from weaviate.classes.config import DataType, VectorDistances
+from weaviate.classes.config import Configure, DataType, VectorDistances
 from weaviate.collections.classes.config import (
     _BQConfig,
     _RQConfig,
@@ -549,6 +550,117 @@ def test_connect_cloud(monkeypatch):
     assert connect_module.connect(s) == "client"
     assert seen["cluster_url"] == "https://x.weaviate.cloud"
     assert seen["auth_credentials"] is not None and seen["headers"] is None
+
+
+HAND_WRITTEN_PLAN = """\
+version: 1
+source:
+  type: chroma
+  url: http://localhost:8001
+  tenant: null
+collections:
+- source:
+    ref: r
+    namespace: ns
+    name: docs
+    count: 1
+    dimension: 2
+    distance: cosine
+    embedding: null
+  target:
+    name: Docs
+    vectors:
+    - name: default
+      mode: embed
+      vectorizer:
+        module: text2vec-openai
+        options:
+          model: text-embedding-3-small
+          base_url: "https://bob:hunter2x@proxy.example.com/v1?token=abc#frag"
+    properties: []
+"""
+
+
+def test_kwargs_send_a_url_option_of_a_hand_written_plan_without_secrets(tmp_path):
+    path = tmp_path / "plan.yaml"
+    path.write_text(HAND_WRITTEN_PLAN)
+    k = collection_kwargs(p.load_plan(path).collections)
+    vectorizer = vec(k).vectorizer
+    assert str(vectorizer.baseURL) == "https://proxy.example.com/v1"
+    assert vectorizer.model == "text-embedding-3-small"
+    sent = repr(k)
+    for sentinel in ("bob", "hunter2x", "token", "abc", "frag"):
+        assert sentinel not in sent
+
+
+@pytest.mark.parametrize(
+    ("module", "options", "expected"),
+    [
+        (
+            "text2vec-openai",
+            {
+                "base_url": "https://bob:made-up-a@proxy.example.com/v1?k=made-up-b#c",
+                "endpoint": "https://bob:made-up-d@embed.example.com/e?k=made-up-e#f",
+            },
+            {
+                "baseURL": "https://proxy.example.com/v1",
+                "endpoint": "https://embed.example.com/e",
+            },
+        ),
+        (
+            "text2vec-transformers",
+            {
+                "passage_inference_url": "http://bob:made-up-a@passage:8080?k=made-up-b",
+                "query_inference_url": "http://bob:made-up-d@query:8080#made-up-e",
+            },
+            {
+                "passageInferenceUrl": "http://passage:8080",
+                "queryInferenceUrl": "http://query:8080",
+            },
+        ),
+        (
+            "text2vec-ollama",
+            {"api_endpoint": "http://bob:made-up@ollama:11434?k=made-up#f"},
+            {"apiEndpoint": "http://ollama:11434"},
+        ),
+    ],
+)
+def test_kwargs_send_every_url_option_without_userinfo_query_or_fragment(
+    module: str, options: dict[str, Any], expected: dict[str, str]
+) -> None:
+    v = p.VectorizerPlan(module=module, options=options)
+    k = collection_kwargs([entry(mode="embed", vectorizer=v)])
+    found = vec(k).vectorizer
+    assert {key: str(getattr(found, key)) for key in expected} == expected
+    assert "made-up" not in repr(k) and "bob" not in repr(k)
+
+
+@pytest.mark.parametrize("model", ["voyage-3@2025-01", "bob:x@host", "m?v=1#tag"])
+def test_kwargs_send_options_without_a_scheme_unchanged(model: str) -> None:
+    options = {"model": model, "dimensions": 256, "truncate": True}
+    v = p.VectorizerPlan(module="text2vec-voyageai", options=options)
+    found = vec(collection_kwargs([entry(mode="embed", vectorizer=v)])).vectorizer
+    assert (found.model, found.dimensions, found.truncate) == (model, 256, True)
+    assert found.truncate is True
+
+
+def test_kwargs_pass_a_list_option_to_the_factory_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: dict[str, Any] = {}
+
+    # No text2vec factory takes a list, so this one records its arguments.
+    # `wraps` keeps the signature that `_vector` checks the options against.
+    @functools.wraps(Configure.Vectors.text2vec_voyageai)
+    def record(**kwargs: Any) -> None:
+        sent.update(kwargs)
+
+    monkeypatch.setattr(Configure.Vectors, "text2vec_voyageai", record)
+    value = ["bob:x@host", "m?v=1#tag"]
+    v = p.VectorizerPlan(module="text2vec-voyageai", options={"model": value})
+    collection_kwargs([entry(mode="embed", vectorizer=v)])
+    assert sent["model"] is value
+    assert value == ["bob:x@host", "m?v=1#tag"]
 
 
 def test_kwargs_google_with_project_id_uses_vertex():

@@ -29,6 +29,7 @@ from to_weaviate.cli import app
 from to_weaviate.output import ERROR_EXIT, CliError
 from to_weaviate.plan import load_plan
 from to_weaviate.sources.chroma.client import ChromaError
+from to_weaviate.target.schema import collection_kwargs
 from to_weaviate.target.writer import WeaviateWriter
 
 COMMANDS = [["inspect", "chroma"], ["check"], ["copy"], ["status"]]
@@ -268,6 +269,71 @@ def test_url_password_is_not_stored_or_printed(tmp_path):
     plan = load_plan(tmp_path / ".to-weaviate" / "plan.yaml")
     assert plan.source.url == "https://chroma.example.com"
     assert "SENTINEL" not in inspect_run.output + check_run.output
+
+
+def test_embedding_config_secrets_are_not_stored_or_sent(tmp_path):
+    password, header_token, query_token = (
+        "F7-MADE-UP-PASSWORD",
+        "F7-MADE-UP-HEADER-TOKEN",
+        "F7-MADE-UP-QUERY-TOKEN",
+    )
+    embedding = {
+        "type": "known",
+        "name": "openai",
+        "config": {
+            "api_key_env_var": "OPENAI_API_KEY",
+            "model_name": "text-embedding-3-small",
+            "api_base": f"https://bob:{password}@proxy.example.com/v1"
+            f"?token={query_token}#{query_token}",
+            "default_headers": {"Authorization": f"Bearer {header_token}"},
+        },
+    }
+    fakes = FakeFactories(FakeSource(cli_records(10), embedding=embedding))
+    runs = [
+        invoke(fakes, "inspect", "chroma"),
+        invoke(fakes, "inspect", "chroma", "--force", "--json"),
+    ]
+    assert [r.exit_code for r in runs] == [0, 0], runs[0].output
+    directory = tmp_path / ".to-weaviate"
+    plan = load_plan(directory / "plan.yaml")
+    sent = repr(collection_kwargs(plan.collections))
+    texts = [(directory / name).read_text() for name in ("plan.yaml", "inspect.json")]
+    for text in [*texts, *(r.output for r in runs), sent]:
+        for value in (password, header_token, query_token, "bob"):
+            assert value not in text
+    entry = plan.collections[0]
+    assert entry.source.embedding == {
+        "type": "known",
+        "name": "openai",
+        "config": {
+            "model_name": "text-embedding-3-small",
+            "api_base": "https://proxy.example.com/v1",
+        },
+    }
+    vectorizer = entry.target.vectors[0].vectorizer
+    assert vectorizer is not None
+    assert vectorizer.options == {
+        "model": "text-embedding-3-small",
+        "base_url": "https://proxy.example.com",
+    }
+    assert [n for n in entry.notes if "api_key_env_var, default_headers" in n]
+
+
+def test_source_url_query_and_fragment_are_not_stored_or_printed(tmp_path):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    url = "https://user:SENTINEL-D@chroma.example.com/?token=SENTINEL-Q#SENTINEL-F"
+    runs = [
+        invoke(fakes, "inspect", "chroma", CHROMA_URL=url),
+        invoke(fakes, "inspect", "chroma", "--force", "--json", CHROMA_URL=url),
+    ]
+    assert [r.exit_code for r in runs] == [0, 0], runs[0].output
+    assert "Inspecting Chroma at https://chroma.example.com/\n" in runs[0].output
+    plan = load_plan(tmp_path / ".to-weaviate" / "plan.yaml")
+    assert plan.source.url == "https://chroma.example.com/"
+    for f in tmp_path.rglob("*"):
+        if f.is_file():
+            assert b"SENTINEL" not in f.read_bytes()
+    assert "SENTINEL" not in runs[0].output + runs[1].output
 
 
 @pytest.mark.parametrize("debug", [None, "1"])

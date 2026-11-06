@@ -97,12 +97,13 @@ from to_weaviate.settings import (
     chroma_settings,
     load_env,
     normalized_host,
+    stored_url,
     weaviate_settings,
     without_userinfo,
 )
 from to_weaviate.sources.base import FieldStats, Source, SourceCollection
 from to_weaviate.sources.chroma.client import ChromaClient, ChromaError
-from to_weaviate.sources.chroma.mapping import vectorizer_for
+from to_weaviate.sources.chroma.mapping import stored_embedding, vectorizer_for
 from to_weaviate.sources.chroma.source import ChromaSource
 from to_weaviate.state import CollectionProgress, State, Target
 from to_weaviate.target.connect import connect
@@ -483,6 +484,18 @@ def _no_collection(tenant: str, databases: list[str]) -> CliError:
     return CliError("usage", f"Chroma tenant {tenant} {where}.", NO_COLLECTION_HINT)
 
 
+def _stored_collections(
+    collections: list[SourceCollection],
+) -> tuple[list[SourceCollection], dict[str, list[str]]]:
+    """`collections` with the stored form of their embedding, and notes by ref."""
+    stored: list[SourceCollection] = []
+    notes: dict[str, list[str]] = {}
+    for collection in collections:
+        embedding, notes[collection.ref] = stored_embedding(collection.embedding)
+        stored.append(dataclasses.replace(collection, embedding=embedding))
+    return stored, notes
+
+
 def _inspect_chroma(
     factories: _Factories,
     directory: Path,
@@ -511,7 +524,7 @@ def _inspect_chroma(
     if not databases and settings.database is not None:
         databases = [settings.database]
     source = factories.source(settings)
-    info(json_output, f"Inspecting Chroma at {without_userinfo(settings.url)}")
+    info(json_output, f"Inspecting Chroma at {stored_url(settings.url)}")
     collections = source.inspect(databases or None, names or None, sample_pages)
     missing = sorted(set(names) - {c.name for c in collections})
     if missing:
@@ -523,11 +536,12 @@ def _inspect_chroma(
         )
     if not collections:
         raise _no_collection(source.tenant, databases or source.namespaces())
+    collections, source_notes = _stored_collections(collections)
     try:
         plan = draft_plan(
             SourcePlan(
                 type="chroma",
-                url=without_userinfo(settings.url),
+                url=stored_url(settings.url),
                 tenant=settings.tenant,
             ),
             collections,
@@ -535,6 +549,7 @@ def _inspect_chroma(
             vectorizer_plan,
             index=index_plan,
             vectorizer_for=vectorizer_for,
+            source_notes=source_notes,
         )
     except ValidationError as exc:
         raise CliError(

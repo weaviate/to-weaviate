@@ -33,6 +33,7 @@ from to_weaviate.plan import (
     VectorPlan,
 )
 from to_weaviate.retry import with_retry
+from to_weaviate.settings import stored_url
 
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 GRPC_RETRY_STATUSES = frozenset(
@@ -195,8 +196,14 @@ def _vector(plan: VectorPlan) -> Any:
         raise PlanMismatch(
             f"vectorizer module {module} is not supported by this client"
         )
+    # Weaviate stores the options in the schema, so a URL option is sent
+    # without its userinfo, query and fragment, whatever the plan holds.
+    options = {
+        key: stored_url(value) if isinstance(value, str) and "://" in value else value
+        for key, value in plan.vectorizer.options.items()
+    }
     accepted = inspect.signature(factory).parameters
-    for key in plan.vectorizer.options:
+    for key in options:
         if key in _RESERVED_OPTIONS or key not in accepted:
             raise PlanMismatch(f"vectorizer option {key} is not accepted by {module}")
     try:
@@ -204,7 +211,7 @@ def _vector(plan: VectorPlan) -> Any:
             **kwargs,
             source_properties=["document"],
             vectorize_collection_name=False,
-            **plan.vectorizer.options,
+            **options,
         )
     except ValidationError as exc:
         error = exc.errors()[0]
