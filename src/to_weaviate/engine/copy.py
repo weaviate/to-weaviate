@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -9,6 +10,8 @@ from to_weaviate.plan import CollectionPlan
 from to_weaviate.sources.base import Page, Partition, Record, Source, SourceCollection
 from to_weaviate.state import CollectionProgress, State
 from to_weaviate.target.writer import Reject, TargetObject, Writer, to_object
+
+NOT_A_NUMBER = "embedding holds a value that is not a number"
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,18 @@ def content_hash(record: Record) -> bytes:
         ensure_ascii=False,
     )
     return hashlib.blake2b(payload.encode("utf-8"), digest_size=16).digest()
+
+
+def _not_a_number(record: Record) -> Reject | None:
+    """The reject of a record whose vector holds a value that is not a number.
+
+    None, NaN and inf all count as not a number. A source decodes None as NaN.
+    The check is here and not in `to_object`, so that `verify` still compares
+    such a record with its target object.
+    """
+    if record.vector is not None and not all(map(math.isfinite, record.vector)):
+        return Reject(record.id, NOT_A_NUMBER)
+    return None
 
 
 def _progress(state: State, ref: str) -> CollectionProgress:
@@ -120,7 +135,7 @@ class _CollectionCopy:
         rejects: list[Reject] = []
         converted: list[tuple[Record, TargetObject]] = []
         for record in page.records:
-            result = to_object(record, self._entry)
+            result = _not_a_number(record) or to_object(record, self._entry)
             if isinstance(result, Reject):
                 rejects.append(result)
             else:

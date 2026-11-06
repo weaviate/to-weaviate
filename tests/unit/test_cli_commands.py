@@ -18,10 +18,12 @@ from fakes import (
 from typer.testing import Result
 from weaviate.exceptions import WeaviateInsertManyAllFailedError
 
+from to_weaviate.ids import to_uuid
 from to_weaviate.lock import Locked, exclusive_lock
 from to_weaviate.plan import load_plan, save_plan
 from to_weaviate.sources.base import Page, Partition, Record, SourceCollection
 from to_weaviate.sources.chroma.client import ChromaError
+from to_weaviate.sources.chroma.source import ChromaSource
 from to_weaviate.state import State
 from to_weaviate.target.schema import SchemaRejected
 from to_weaviate.target.writer import WeaviateWriter
@@ -438,6 +440,80 @@ def test_copy_after_a_refused_batch_copies_the_page():
     row = json.loads(r.stdout)["collections"][0]
     assert (client.calls - calls, row["copied"], row["rejects"]) == (1, 10, 0)
     assert r.exit_code == 0, r.output
+
+
+class ChromaRows:
+    """The ChromaClient calls of a ChromaSource, over rows of one collection."""
+
+    COLLECTION = {"id": "chroma-docs", "name": "docs", "dimension": 2}
+    COLUMNS = {
+        "embeddings": "embedding",
+        "documents": "document",
+        "uris": "uri",
+        "metadatas": "metadata",
+    }
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = rows
+
+    def databases(self, tenant: str) -> list[str]:
+        return ["db"]
+
+    def collections(self, tenant: str, database: str) -> list[dict[str, Any]]:
+        return [self.COLLECTION]
+
+    def count(self, tenant: str, database: str, ref: str) -> int:
+        return len(self.rows)
+
+    def get(
+        self,
+        tenant: str,
+        database: str,
+        ref: str,
+        *,
+        limit: int,
+        offset: int,
+        include: list[str],
+        where: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        rows = self.rows[offset : offset + limit]
+        response: dict[str, Any] = {"ids": [row["id"] for row in rows]}
+        for name, key in self.COLUMNS.items():
+            response[name] = [row[key] for row in rows] if name in include else None
+        return response
+
+
+def test_copy_rejects_a_record_whose_embedding_holds_a_null():
+    rows = [
+        {
+            "id": f"id-{i}",
+            "embedding": [float(i), 1.0],
+            "document": f"doc {i}",
+            "uri": None,
+            "metadata": {"year": 2000 + i},
+        }
+        for i in range(10)
+    ]
+    rows[4]["embedding"] = [None, 1.0]
+    fakes = inspected(FakeFactories(ChromaSource(ChromaRows(rows), "t")))  # type: ignore[arg-type]
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 1, r.output
+    row = json.loads(r.stdout)["collections"][0]
+    assert (row["copied"], row["rejects"]) == (9, 1)
+    assert len(fakes.writer.objects) == 9
+    assert to_uuid("id-4") not in fakes.writer.objects
+    reject = json.loads((DIR / "rejects.jsonl").read_text())
+    assert (reject["source_id"], reject["reason"]) == (
+        "id-4",
+        "embedding holds a value that is not a number",
+    )
+    r = invoke(fakes, "verify", "--json")
+    assert r.exit_code == 1 and json.loads(r.stdout)["code"] == "verification_failed"
+    records = next(c for c in json.loads(r.stdout)["checks"] if c["name"] == "records")
+    assert records["detail"] == (
+        'sampled 10, compared 10, rejects skipped 0, differing 1: "id-4": '
+        "missing in the target"
+    )
 
 
 def test_copy_resumes_at_the_refused_page_and_writes_each_object_once():

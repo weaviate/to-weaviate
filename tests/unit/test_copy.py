@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 from dataclasses import replace
 
 import pytest
@@ -143,6 +144,21 @@ def test_conversion_rejects_are_recorded(state, events):
     result = copy_collection(FakeSource(records), writer, state, events, ENTRY, C, 2)
     assert result == CopyResult(copied=999, rejects=1)
     assert to_uuid("id-10") not in writer.objects
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_vector_value_that_is_not_a_number_is_a_reject(state, events, tmp_path, value):
+    records = make_records(1000)
+    records[10] = replace(records[10], vector=[1.0, value])
+    writer = FakeWriter()
+    result = copy_collection(FakeSource(records), writer, state, events, ENTRY, C, 2)
+    assert result == CopyResult(copied=999, rejects=1)
+    assert to_uuid("id-10") not in writer.objects
+    reject = json.loads((tmp_path / "rejects.jsonl").read_text())
+    assert (reject["source_id"], reject["reason"]) == (
+        "id-10",
+        "embedding holds a value that is not a number",
+    )
 
 
 def test_copies_records_added_during_run(src, state, events):
