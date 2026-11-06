@@ -31,6 +31,8 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# tests/e2e.py holds the code that tests/acceptance and tests/cloud share.
+pythonpath = ["tests"]
 filterwarnings = ["ignore::authlib.deprecate.AuthlibDeprecationWarning"]
 
 [tool.ruff]

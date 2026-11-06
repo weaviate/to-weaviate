@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # setuptools_scm reads the version from the tag.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install build
+      - run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  cloud:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: cloud-tests
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # The suite runs the command of the wheel that publish uploads.
+      - run: pip install "$(ls dist/*.whl)[test]"
+      - run: pytest tests/cloud -v
+        env:
+          CHROMA_API_KEY: ${{ secrets.CHROMA_CLOUD_API_KEY }}
+          CHROMA_TENANT: ${{ secrets.CHROMA_CLOUD_TENANT }}
+          CHROMA_DATABASE: ${{ secrets.CHROMA_CLOUD_DATABASE }}
+          WEAVIATE_URL: ${{ secrets.WEAVIATE_CLOUD_URL }}
+          WEAVIATE_API_KEY: ${{ secrets.WEAVIATE_CLOUD_API_KEY }}
+          TO_WEAVIATE_REQUIRE_CLOUD: "1"
+
+  publish:
+    needs: cloud
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
