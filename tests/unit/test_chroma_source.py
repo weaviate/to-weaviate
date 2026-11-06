@@ -307,7 +307,23 @@ def test_sample_reads_ceil_pages(source, fake_client, inspected, count, size, pa
     assert len(limits) == pages and sum(limits) == size
     assert max(limits) == math.ceil(size / pages) <= CHROMA_MAX_PAGE
     assert all("embeddings" in c.include for c in fake_client.calls)
+    assert all(c.where is None for c in fake_client.calls)
     assert len({r.id for r in records}) == size
+
+
+# count = size + 1 is the smallest count that the sample does not read whole.
+@pytest.mark.parametrize("size", [10, 300, 10_000])
+def test_sample_of_one_less_than_the_count_comes_from_10_places(
+    source, fake_client, inspected, size
+):
+    fake_client.records = LazyRecords(size + 1)
+    fake_client.calls.clear()
+    records = source.sample(
+        replace(inspected, count=size + 1), size, random.Random(1), False
+    )
+    assert len({r.id for r in records}) == len(records) == size
+    offsets = [c.offset for c in fake_client.calls]
+    assert len(set(offsets)) == len(offsets) >= 10
 
 
 def test_sample_reads_the_live_count_not_the_inspected_one(
