@@ -491,7 +491,8 @@ def _inspect_chroma(
         raise CliError(
             "usage",
             f"Chroma has no collection named {', '.join(missing)}.",
-            "Check the --collection names, and --database for another database.",
+            "Check the --collection names, and --database or CHROMA_DATABASE for "
+            "another database.",
         )
     try:
         plan = draft_plan(

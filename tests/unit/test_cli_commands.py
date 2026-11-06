@@ -280,6 +280,14 @@ def test_inspect_usage_errors(tmp_path, args, named):
     assert not (tmp_path / DIR / "plan.yaml").exists()
 
 
+def test_inspect_unknown_collection_hint_names_both_database_settings():
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    r = invoke(fakes, "inspect", "chroma", "--collection", "nope", "--json")
+    assert r.exit_code == 2
+    hint = json.loads(r.stdout)["hint"]
+    assert "--database" in hint and "CHROMA_DATABASE" in hint
+
+
 DB = FakeSource.NAMESPACE
 
 
