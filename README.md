@@ -75,10 +75,11 @@ Each record that the tool cannot convert or that Weaviate refuses goes to
 `rejects.jsonl` with the reason.
 
 `state.sqlite` also records the target of each source collection: the
-Weaviate host and port, the collection and the tenant. When `WEAVIATE_URL`
-or the target in `plan.yaml` names another target, or the target collection
-no longer exists, `copy` stops with `state_mismatch`. To copy to another
-target, use another `--dir`.
+Weaviate host and port, the collection and the tenant. Once records of a
+source collection are copied, `copy` stops with `state_mismatch` when
+`WEAVIATE_URL` or the target in `plan.yaml` names another target, or when
+the target collection no longer exists. To copy to another target, use
+another `--dir`. Before any record is copied, a run takes the new target.
 
 One `copy` at a time uses a directory. It holds a lock on `copy.lock` while
 it runs, and a second `copy` on that directory exits with `usage`. The

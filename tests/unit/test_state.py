@@ -222,19 +222,19 @@ def test_set_target_replaces_the_stored_target(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("cursor", "copied"),
+    ("cursor", "copied", "expected"),
     [
-        (None, 0),  # finished, every record rejected
-        ("5", 0),  # one page read, every record rejected
-        ("5", 5),
+        (None, 0, True),  # finished, every record rejected
+        ("5", 5, True),
+        ("5", 0, False),  # one page read, every record rejected
     ],
 )
-def test_has_progress_after_an_advance(tmp_path, cursor, copied):
+def test_has_progress_after_an_advance(tmp_path, cursor, copied, expected):
     state = make_state(tmp_path)
     state.init_collection(REF, parts("a", "b"), 10)
     assert not state.has_progress(REF)
     state.advance(REF, "a", cursor, copied)
-    assert state.has_progress(REF)
+    assert state.has_progress(REF) is expected
     assert not state.has_progress("other")
 
 

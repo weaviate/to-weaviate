@@ -18,7 +18,8 @@ from fakes import (
 from typer.testing import Result
 
 from to_weaviate.plan import load_plan, save_plan
-from to_weaviate.sources.base import Partition
+from to_weaviate.sources.base import Page, Partition, Record, SourceCollection
+from to_weaviate.sources.chroma.client import ChromaError
 from to_weaviate.target.schema import SchemaRejected
 
 DIR = Path(".to-weaviate")
@@ -626,6 +627,49 @@ def test_copy_without_progress_accepts_a_target_without_the_collection():
     r = invoke(replaced, "copy", "--json")
     assert r.exit_code == 0, r.output
     assert len(replaced.writer.objects) == 10
+
+
+class FirstReadFails(FakeSource):
+    """FakeSource whose first read raises, like a source that went away."""
+
+    def __init__(self, records: list[Record]) -> None:
+        super().__init__(records)
+        self.failed = False
+
+    def read(
+        self,
+        collection: SourceCollection,
+        partition: Partition,
+        cursor: str | None,
+        with_vectors: bool,
+    ) -> Page:
+        if not self.failed:
+            self.failed = True
+            raise ChromaError(None, "ConnectError: refused")
+        return super().read(collection, partition, cursor, with_vectors)
+
+
+def stored_target(fakes: FakeFactories) -> dict[str, Any]:
+    status = json.loads(invoke(fakes, "status", "--json").stdout)
+    return status["collections"][0]["stored_target"]
+
+
+def test_copy_without_progress_replaces_the_stored_target(tmp_path):
+    fakes = inspected(FakeFactories(FirstReadFails(cli_records(10))))
+    first = invoke(fakes, "copy", "--parallelism", "1")
+    assert first.exit_code == 4, first.output
+    assert stored_target(fakes)["collection"] == "Docs"
+    retarget(tmp_path / DIR, "Docs2")
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["collections"][0]["copied"] == 10
+    assert len(fakes.writer.stored[("Docs2", None)]) == 10
+    assert ("Docs", None) not in fakes.writer.stored
+    assert stored_target(fakes) == {
+        "host": "localhost:8099",
+        "collection": "Docs2",
+        "tenant": None,
+    }
 
 
 def test_copy_refuses_a_target_that_the_state_holds_for_another_source(tmp_path):

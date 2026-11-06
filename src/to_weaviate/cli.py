@@ -699,18 +699,20 @@ def _planned_targets(
 ) -> dict[str, Target]:
     """The target of each entry by source ref, after a check against the state.
 
-    Raises state_mismatch when the state holds a copy of the entry's source to
-    another target, a copy of another source to this target, or progress of
-    the entry while its collection or tenant does not exist in the target. A
-    ref without a stored target and without progress is a first run.
+    Raises state_mismatch when the entry has progress and the state holds its
+    copy to another target, when the state holds this target for another
+    source, or when the entry has progress and its collection or tenant does
+    not exist in the target. An entry without progress is a first run: its
+    planned target replaces the stored one.
     """
     stored = state.targets()
     planned: dict[str, Target] = {}
     for entry in entries:
         ref, name = entry.source.ref, entry.source.name
         target = Target(host, collection_key(entry.target.name), entry.target.tenant)
+        progress = state.has_progress(ref)
         previous = stored.get(ref)
-        if previous is not None and previous != target:
+        if progress and previous is not None and previous != target:
             raise _state_mismatch(
                 directory,
                 f"{name} to {_target_text(previous)}",
@@ -723,7 +725,7 @@ def _planned_targets(
                 f"{source_names.get(other, other)} to {_target_text(target)}",
                 f"The plan now copies {name} there.",
             )
-        if state.has_progress(ref) and not reader.exists(entry):
+        if progress and not reader.exists(entry):
             missing = "collection or tenant" if target.tenant else "collection"
             raise _state_mismatch(
                 directory,

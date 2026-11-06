@@ -178,11 +178,11 @@ class State:
         ]
 
     def has_progress(self, ref: str) -> bool:
-        """True when a page of `ref` was copied: a partition moved or finished."""
+        """True when a record of `ref` was copied or a partition of it finished."""
         with self._lock:
             (found,) = self._db.execute(
                 "SELECT EXISTS (SELECT 1 FROM partitions WHERE ref = ? AND "
-                "(finished = 1 OR copied > 0 OR cursor IS NOT NULL))",
+                "(finished = 1 OR copied > 0))",
                 (ref,),
             ).fetchone()
         return bool(found)
