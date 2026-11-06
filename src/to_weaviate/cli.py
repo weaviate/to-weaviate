@@ -711,7 +711,11 @@ def _progress_output(
 
 
 def _target_host(settings: WeaviateSettings) -> str:
-    """The normalized host and port that `connect` uses for WEAVIATE_URL."""
+    """The normalized host and port of `settings.http`.
+
+    `connect` uses this host. Without WEAVIATE_GRPC_URL the client always uses
+    port 443, so an explicit port in WEAVIATE_URL is stored but not used.
+    """
     return settings.http.normalized
 
 

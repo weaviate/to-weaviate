@@ -245,9 +245,11 @@ class WeaviateSettings:
     Both have no path other than `/`. A `grpc_url` scheme is http or https.
     `http` is the endpoint of `url` and `grpc` the endpoint of `grpc_url`; a
     URL without a scheme is http. `target.connect` and the stored target
-    host read both. Without `grpc_url`, `connect` uses
+    host read both. Without `grpc_url`, `connect` passes only `http.host` to
     `connect_to_weaviate_cloud`, which connects over TLS to port 443 whatever
     the scheme says, so `http` is secure and a URL without a port gets 443.
+    An explicit port stays in `http` and in the stored host, but the client
+    does not use it.
     """
 
     url: str

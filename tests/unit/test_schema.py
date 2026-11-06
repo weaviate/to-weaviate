@@ -783,6 +783,36 @@ def test_weaviate_schema_keeps_other_status_errors():
         WeaviateSchema(client).ensure([entry()])  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://TOKEN@X.Weaviate.Cloud:8443",
+        "http://admin:pw@x.weaviate.cloud/",
+        "x.weaviate.cloud",
+    ],
+)
+def test_connect_cloud_passes_the_host_without_userinfo_or_port(monkeypatch, url):
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        connect_module.weaviate,
+        "connect_to_weaviate_cloud",
+        lambda **kw: seen.update(kw),
+    )
+    connect_module.connect(WeaviateSettings(url, None, None, {}))
+    assert seen["cluster_url"] == "https://x.weaviate.cloud"
+
+
+def test_connect_cloud_keeps_a_host_that_starts_with_http(monkeypatch):
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        connect_module.weaviate,
+        "connect_to_weaviate_cloud",
+        lambda **kw: seen.update(kw),
+    )
+    connect_module.connect(WeaviateSettings("httpx1.weaviate.cloud", None, None, {}))
+    assert seen["cluster_url"] == "https://httpx1.weaviate.cloud"
+
+
 def test_connect_cloud_without_api_key(monkeypatch):
     seen: dict[str, Any] = {}
     monkeypatch.setattr(

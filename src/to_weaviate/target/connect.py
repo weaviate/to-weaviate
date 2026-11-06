@@ -19,8 +19,11 @@ def connect(settings: WeaviateSettings) -> weaviate.WeaviateClient:
             headers=headers,
             auth_credentials=auth,
         )
+    # The client takes the host from a value that starts with "http" by
+    # parsing it as a URL, so a bare host such as "httpx1.weaviate.cloud"
+    # would become empty. Its port is always 443.
     return weaviate.connect_to_weaviate_cloud(
-        cluster_url=settings.url,
+        cluster_url=f"https://{settings.http.host}",
         auth_credentials=auth,  # type: ignore[arg-type]
         headers=headers,
     )
