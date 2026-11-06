@@ -64,7 +64,7 @@ KEY_VARIABLES = ["CHROMA_API_KEY", "WEAVIATE_API_KEY", "OPENAI_API_KEY", "XAI_AP
         "made\tup",
         "made\x00up",
         "made\x7fup",
-        "made up",
+        "made\u2028up",
         " made-up",
         "made-up\n",
         "made-up\r",
