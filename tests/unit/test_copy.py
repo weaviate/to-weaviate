@@ -161,6 +161,33 @@ def test_later_run_does_not_add_a_second_tail(src, state, events):
     assert second == first == CopyResult(copied=1050, rejects=0)
 
 
+def test_resume_with_a_larger_count_covers_the_gap(src, state, events):
+    writer = FakeWriter(fail_on_call=3)
+    with pytest.raises(RuntimeError, match="call 3$"):
+        copy_collection(src, writer, state, events, ENTRY, C, 2)
+    src.records.extend(make_records(100, start=1000))
+    writer.fail_on_call = None
+    grown = replace(C, count=1100)
+    result = copy_collection(src, writer, state, events, ENTRY, grown, 2)
+    assert len(writer.objects) == 1100 and result.copied == 1100
+
+
+def test_failed_run_adds_no_tail(src, state, events):
+    src.grow_after_partitions(make_records(50, start=1000))
+    with pytest.raises(RuntimeError, match="call 3$"):
+        copy_collection(src, FakeWriter(fail_on_call=3), state, events, ENTRY, C, 2)
+    assert [p for p in state.partitions(C.ref) if p.stop is None] == []
+
+
+def test_empty_collection_that_grew_gets_a_tail(state, events):
+    writer = FakeWriter()
+    empty = replace(C, count=0)
+    copy_collection(
+        FakeSource(make_records(30)), writer, state, events, ENTRY, empty, 2
+    )
+    assert len(writer.objects) == 30
+
+
 def test_parallelism_is_bounded(state, events):
     src = FakeSource(make_records(1000), read_delay=0.005)
     # Partitions stored by an earlier run with parallelism 8.

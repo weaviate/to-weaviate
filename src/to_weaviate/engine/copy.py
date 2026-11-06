@@ -35,6 +35,17 @@ def _progress(state: State, ref: str) -> CollectionProgress:
     return next(p for p in state.progress() if p.ref == ref)
 
 
+def _covered(stored: list[Partition]) -> int | None:
+    """End offset of the stored partitions, or None when a tail exists.
+
+    Stored partitions can come from an earlier run with a smaller count, so
+    this end can be lower than the current `collection.count`.
+    """
+    if any(p.stop is None for p in stored):
+        return None
+    return max((int(p.stop) for p in stored if p.stop is not None), default=0)
+
+
 class _CollectionCopy:
     """Copies the pending partitions of one collection.
 
@@ -156,8 +167,9 @@ def copy_collection(
     """Copy one collection and return its totals over all runs.
 
     Progress is stored in `state`, so a run after a failure resumes where the
-    last one stopped. Records that the source gained during the run are copied
-    by one extra partition that starts at `collection.count`.
+    last one stopped. Records beyond the end of the stored partitions are
+    copied by one extra partition without a stop. A collection gets at most
+    one such partition.
     """
     ref = collection.ref
     state.init_collection(
@@ -168,12 +180,13 @@ def copy_collection(
         source, writer, state, events, entry, collection, skip_unchanged
     )
     copy.run(state.pending(ref), parallelism)
-    count = source.count(collection)
-    if count > collection.count:
-        tail = Partition(f"{collection.count}-", str(collection.count), None)
-        state.add_partition(ref, tail)
-        copy.total = count
-        copy.run(state.pending(ref), parallelism)
+    covered = _covered(state.partitions(ref))
+    if covered is not None:
+        count = source.count(collection)
+        if count > covered:
+            state.add_partition(ref, Partition(f"{covered}-", str(covered), None))
+            copy.total = count
+            copy.run(state.pending(ref), parallelism)
     progress = _progress(state, ref)
     events.emit(
         "info",

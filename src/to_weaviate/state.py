@@ -92,6 +92,15 @@ class State:
             (Partition(key, start, stop), cursor) for key, start, stop, cursor in rows
         ]
 
+    def partitions(self, ref: str) -> list[Partition]:
+        """Every stored partition of `ref`, finished or not."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT key, start, stop FROM partitions WHERE ref = ? ORDER BY rowid",
+                (ref,),
+            ).fetchall()
+        return [Partition(key, start, stop) for key, start, stop in rows]
+
     def advance(self, ref: str, key: str, cursor: str | None, copied: int) -> None:
         with self._lock, self._db:
             self._db.execute(
