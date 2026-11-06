@@ -135,6 +135,7 @@ takes a secret, and the tool prints no secret and writes none to a file.
 | `CHROMA_URL` | Chroma server. Default: `https://api.trychroma.com` (Chroma Cloud). |
 | `CHROMA_API_KEY` | Chroma API key. Required for Chroma Cloud. |
 | `CHROMA_TENANT` | Chroma tenant. Default: the tenant of the API key. |
+| `CHROMA_DATABASE` | The database that `inspect chroma` reads when you give no `--database`. `--database` wins over it. With neither, `inspect chroma` reads every database of the tenant. |
 | `CHROMA_TOKEN_HEADER` | Header that carries the Chroma key. Default: `x-chroma-token`. With `Authorization`, the tool sends `Bearer <key>`. |
 | `WEAVIATE_URL` | Weaviate server. Required. |
 | `WEAVIATE_API_KEY` | Weaviate API key. |

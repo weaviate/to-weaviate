@@ -481,6 +481,8 @@ def _inspect_chroma(
     vectorizer_plan = _vectorizer_plan(vectorizer, vectorizer_options)
     index_plan = _index_plan(index, quantizer, quantizer_bits)
     settings = chroma_settings(load_env(Path.cwd()))
+    if not databases and settings.database is not None:
+        databases = [settings.database]
     source = factories.source(settings)
     info(json_output, f"Inspecting Chroma at {without_userinfo(settings.url)}")
     collections = source.inspect(databases or None, names or None, sample_pages)
@@ -851,7 +853,11 @@ def build_app(
     def inspect_chroma(
         database: Annotated[
             list[str] | None,
-            typer.Option("--database", metavar="NAME", help="Database. Repeatable."),
+            typer.Option(
+                "--database",
+                metavar="NAME",
+                help="Database. Repeatable. Default: CHROMA_DATABASE, else all.",
+            ),
         ] = None,
         collection: NamesOption = None,
         sample_pages: Annotated[

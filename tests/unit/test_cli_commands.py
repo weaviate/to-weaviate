@@ -280,6 +280,30 @@ def test_inspect_usage_errors(tmp_path, args, named):
     assert not (tmp_path / DIR / "plan.yaml").exists()
 
 
+DB = FakeSource.NAMESPACE
+
+
+# `asked` is the namespaces argument the source receives; None asks for all.
+# `recorded` is the database of each plan entry.
+@pytest.mark.parametrize(
+    "variable, args, asked, recorded",
+    [
+        pytest.param(DB, [], [DB], [DB], id="variable"),
+        pytest.param(DB, ["--database", "other"], ["other"], [], id="option-wins"),
+        pytest.param(None, [], None, [DB], id="neither"),
+    ],
+)
+def test_inspect_databases(tmp_path, variable, args, asked, recorded):
+    source = FakeSource(cli_records(10))
+    r = invoke(
+        FakeFactories(source), "inspect", "chroma", *args, CHROMA_DATABASE=variable
+    )
+    assert r.exit_code == 0, r.output
+    assert source.inspected_namespaces == [asked]
+    plan = load_plan(tmp_path / DIR / "plan.yaml")
+    assert [e.source.namespace for e in plan.collections] == recorded
+
+
 M = "vector index dynamic needs async indexing"
 
 
