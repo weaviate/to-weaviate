@@ -22,7 +22,7 @@ CONTROL_PLANE="$CLUSTER-control-plane"
 MARKER="$ROOT/.acceptance-kind-cluster"
 
 control_plane_id() {
-    docker inspect -f '{{.Id}}' "$CONTROL_PLANE" 2>/dev/null
+    docker inspect --type container -f '{{.Id}}' "$CONTROL_PLANE" 2>/dev/null
 }
 
 require_script() {
@@ -45,13 +45,19 @@ up() {
             "$CLUSTER exists. Nothing was started." >&2
         exit 1
     fi
-    if printf '%s\n' "$clusters" | grep -qx "$CLUSTER"; then
+    # A pipeline into grep -q could fail under pipefail when grep exits early.
+    if grep -qx -- "$CLUSTER" <<<"$clusters"; then
         echo "The kind cluster $CLUSTER exists. local-k8s.sh setup would reuse" \
             "its name. Nothing was started." >&2
         exit 1
     fi
-    local version
-    read -r version <"$VERSION_FILE"
+    local version=""
+    # read returns 1 for a last line without a newline, and still sets version.
+    read -r version <"$VERSION_FILE" || true
+    if [ -z "$version" ]; then
+        echo "$VERSION_FILE holds no Weaviate version. Nothing was started." >&2
+        exit 1
+    fi
 
     docker compose -f "$COMPOSE" up -d --wait
     # The default OBSERVABILITY=true of local-k8s.sh would take ports 3000 and 9091.
@@ -88,12 +94,12 @@ down() {
             "($MARKER does not exist). The cluster was left alone."
         return 0
     fi
-    local recorded current
-    read -r recorded <"$MARKER" || recorded=""
+    local recorded="" current
+    read -r recorded <"$MARKER" || true
     current="$(control_plane_id)" || current=""
     if [ -z "$current" ]; then
-        echo "The container $CONTROL_PLANE does not exist, so the cluster this" \
-            "checkout created is gone. Removed the stale marker $MARKER."
+        echo "The container $CONTROL_PLANE was not found. The cluster was left" \
+            "alone. Removed the stale marker $MARKER."
         rm -f "$MARKER"
         return 0
     fi
@@ -115,6 +121,13 @@ local-k8s.sh clean does all of this:
   - deletes the kind cluster $CLUSTER; after that no kubectl context is current
   - when ENABLE_BACKUP, S3_OFFLOAD, USAGE_S3 or COLLECTION_EXPORT is true in your shell, deletes the MinIO manifests in that context
 EOF
+    # A pipe or a file on stdin must not answer for a person.
+    if [ ! -t 0 ]; then
+        echo "This step needs a terminal for the answer, and stdin is not one." \
+            "local-k8s.sh clean was not run. To run it by hand:"
+        printf '  "%s" clean\n' "$SCRIPT"
+        return 0
+    fi
     local answer
     printf 'Type y to continue: '
     if ! read -r answer; then

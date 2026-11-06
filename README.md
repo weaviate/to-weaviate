@@ -231,10 +231,11 @@ cluster. It then prints the command that removes the cluster by hand:
 
 `make acceptance-down` always stops Chroma. It deletes the cluster only when
 `.acceptance-kind-cluster` exists and holds the id of the
-`weaviate-k8s-control-plane` container that exists now. When the container
-is gone or has another id, it removes the stale marker and leaves the
+`weaviate-k8s-control-plane` container that exists now. When that container
+is not found or has another id, it removes the stale marker and leaves the
 cluster alone. Otherwise it lists every effect of `local-k8s.sh clean` and
-runs it only after you type `y`. `clean` deletes the kind cluster
+runs it only after you type `y` on a terminal. With stdin from a pipe or a
+file, it does not run `clean` and prints the command to run by hand. `clean` deletes the kind cluster
 `weaviate-k8s`, switches the kubectl context to `kind-weaviate-k8s` first,
 and kills every `kubectl-relay` process and every
 `kubectl get pods -n weaviate -w` process on the machine. After it, no
