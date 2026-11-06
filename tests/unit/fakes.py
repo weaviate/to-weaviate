@@ -63,6 +63,7 @@ class FakeSource:
         self.page_size = page_size
         self.read_delay = read_delay
         self.embedding = embedding
+        self.inspected_namespaces: list[list[str] | None] = []
         self.read_calls = 0
         self.peak_concurrent_reads = 0
         self._active_reads = 0
@@ -79,6 +80,7 @@ class FakeSource:
         collections: list[str] | None,
         sample_pages: int | None,
     ) -> list[SourceCollection]:
+        self.inspected_namespaces.append(namespaces)
         if namespaces is not None and self.NAMESPACE not in namespaces:
             return []
         if collections is not None and self.COLLECTION not in collections:

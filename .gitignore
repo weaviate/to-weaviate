@@ -222,3 +222,7 @@ __marimo__/
 # to-weaviate
 .to-weaviate/
 tasks/
+
+# make acceptance-up writes it after local-k8s.sh setup succeeded. It holds
+# the id of the kind control-plane container.
+/.acceptance-kind-cluster
