@@ -382,6 +382,37 @@ def test_second_copy_reads_only_the_records_added_since():
     assert json.loads(r.stdout)["collections"][0]["copied"] == 11
 
 
+def test_every_copy_reads_the_records_added_since_the_last_run():
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    assert invoke(fakes, "copy").exit_code == 0
+    fakes.source.records.extend(cli_records(15)[10:])
+    assert invoke(fakes, "copy").exit_code == 0
+    fakes.source.records.extend(cli_records(20)[15:])
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    row = json.loads(r.stdout)["collections"][0]
+    assert (row["copied"], row["total"], len(fakes.writer.objects)) == (20, 20, 20)
+    assert set(fakes.writer.writes_per_uuid.values()) == {1}
+
+
+def copied_and_total(fakes: FakeFactories) -> tuple[int, int]:
+    r = invoke(fakes, "status", "--json")
+    assert r.exit_code == 0, r.output
+    row = json.loads(r.stdout)["collections"][0]
+    return row["copied"], row["total"]
+
+
+def test_status_after_a_tail_shows_the_highest_source_count():
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    assert invoke(fakes, "copy").exit_code == 0
+    fakes.source.records.extend(cli_records(15)[10:])
+    assert invoke(fakes, "copy").exit_code == 0
+    assert copied_and_total(fakes) == (15, 15)
+    # Each run gives init_collection the count of inspect.json, 10.
+    assert invoke(fakes, "copy").exit_code == 0
+    assert copied_and_total(fakes) == (15, 15)
+
+
 REFUSED = "vector lengths don't match"
 BATCH_HINT = "Fix the cause and run to-weaviate copy again. It resumes at this page."
 

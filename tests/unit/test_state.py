@@ -69,6 +69,35 @@ def test_init_twice_keeps_progress(tmp_path):
     assert state.progress() == [CollectionProgress(REF, 20, 10, 0, False)]
 
 
+def test_init_collection_does_not_lower_the_total(tmp_path):
+    state = make_state(tmp_path)
+    state.init_collection(REF, parts("a"), 20)
+    state.init_collection(REF, parts("a"), 10)
+    assert state.progress()[0].total == 20
+
+
+def test_raise_total_keeps_the_highest_count(tmp_path):
+    state = make_state(tmp_path)
+    state.init_collection(REF, parts("a"), 10)
+    state.raise_total(REF, 15)
+    state.raise_total(REF, 12)
+    assert state.progress()[0].total == 15
+
+
+def test_advance_stores_the_end_offset_of_a_finished_tail(tmp_path):
+    state = make_state(tmp_path)
+    state.init_collection(REF, [Partition("0-10", "0", "10")], 10)
+    state.add_partition(REF, Partition("10-", "10", None))
+    state.advance(REF, "10-", "12", 2)
+    state.advance(REF, "10-", None, 3, stop="15")
+    state.advance(REF, "0-10", None, 10)
+    assert state.partitions(REF) == [
+        Partition("0-10", "0", "10"),
+        Partition("10-", "10", "15"),
+    ]
+    assert state.progress()[0].copied == 15
+
+
 def test_progress_totals(tmp_path):
     state = make_state(tmp_path)
     state.init_collection(REF, parts("a", "b"), 100)

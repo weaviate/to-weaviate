@@ -1,8 +1,9 @@
 """Seed the local Chroma test server with the collections of the acceptance suite.
 
-Run it as a script, or call `seed()`. Both read CHROMA_URL and run only when it
-is TEST_URL. Each run deletes and recreates the collections, so every run sends
-the same data.
+Run it as a script, or call `seed()`. Each run deletes and recreates the
+collections, so every run sends the same data. `add_to_tiny_l2` and
+`delete_from_tiny_l2` add records to tiny.l2 and delete them again. Every
+function here reads CHROMA_URL and runs only when it is TEST_URL.
 """
 
 import os
@@ -62,8 +63,8 @@ def docs_cosine(rng: random.Random) -> list[Record]:
     return records
 
 
-def tiny_l2(rng: random.Random) -> list[Record]:
-    """10 records of 4 dimensions. Their ids are UUIDs."""
+def tiny_l2(rng: random.Random, start: int = 0, count: int = 10) -> list[Record]:
+    """`count` records of 4 dimensions, numbered from `start`. Their ids are UUIDs."""
     return [
         Record(
             id=str(uuid.UUID(int=rng.getrandbits(128), version=4)),
@@ -72,7 +73,7 @@ def tiny_l2(rng: random.Random) -> list[Record]:
             metadata={"position": i},
             uri=f"https://example.com/tiny/{i}",
         )
-        for i in range(10)
+        for i in range(start, start + count)
     ]
 
 
@@ -104,7 +105,10 @@ def _recreate(
         body["configuration"] = {"hnsw": {"space": space}}
     created = http.post("/collections", json=body)
     created.raise_for_status()
-    collection_id = created.json()["id"]
+    _add(http, created.json()["id"], records)
+
+
+def _add(http: httpx.Client, collection_id: str, records: list[Record]) -> None:
     for start in range(0, len(records), ADD_BATCH):
         batch = records[start : start + ADD_BATCH]
         added = http.post(
@@ -120,18 +124,45 @@ def _recreate(
         added.raise_for_status()
 
 
-def seed() -> None:
-    """Delete and recreate docs-cosine, tiny.l2 and docs-rq on the test server."""
+def _test_server() -> httpx.Client:
+    """A client of the test server. Raises ValueError for any other CHROMA_URL."""
     if os.environ.get("CHROMA_URL") != TEST_URL:
         raise ValueError(
-            "the seed deletes and recreates collections, so it runs only "
-            f"against the test server; set CHROMA_URL={TEST_URL}"
+            "the seed changes collections, so it runs only against the "
+            f"test server; set CHROMA_URL={TEST_URL}"
         )
+    return httpx.Client(base_url=TEST_URL + DATABASE_PATH, timeout=60)
+
+
+def _collection_id(http: httpx.Client, name: str) -> str:
+    found = http.get(f"/collections/{name}")
+    found.raise_for_status()
+    return str(found.json()["id"])
+
+
+def seed() -> None:
+    """Delete and recreate docs-cosine, tiny.l2 and docs-rq on the test server."""
     rng = random.Random(0)
-    with httpx.Client(base_url=TEST_URL + DATABASE_PATH, timeout=60) as http:
+    with _test_server() as http:
         _recreate(http, "docs-cosine", "cosine", docs_cosine(rng))
         _recreate(http, "tiny.l2", None, tiny_l2(rng))
         _recreate(http, "docs-rq", "cosine", docs_rq(rng))
+
+
+def add_to_tiny_l2(start: int, count: int) -> list[str]:
+    """Add `count` records numbered from `start` to tiny.l2. Returns their ids."""
+    records = tiny_l2(random.Random(start), start, count)
+    with _test_server() as http:
+        _add(http, _collection_id(http, "tiny.l2"), records)
+    return [r.id for r in records]
+
+
+def delete_from_tiny_l2(ids: list[str]) -> None:
+    """Delete the records with `ids` from tiny.l2."""
+    with _test_server() as http:
+        collection_id = _collection_id(http, "tiny.l2")
+        deleted = http.post(f"/collections/{collection_id}/delete", json={"ids": ids})
+        deleted.raise_for_status()
 
 
 if __name__ == "__main__":
