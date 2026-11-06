@@ -635,6 +635,21 @@ def test_kwargs_send_every_url_option_without_userinfo_query_or_fragment(
     assert "made-up" not in repr(k) and "bob" not in repr(k)
 
 
+@pytest.mark.parametrize("char", "/?#")
+def test_kwargs_refuse_a_url_option_that_keeps_its_userinfo(char: str) -> None:
+    options = {
+        "model": "text-embedding-3-small",
+        "base_url": f"https://bob:made{char}up-pw@proxy.example.com/v1",
+    }
+    v = p.VectorizerPlan(module="text2vec-openai", options=options)
+    with pytest.raises(PlanMismatch) as e:
+        collection_kwargs([entry(mode="embed", vectorizer=v)])
+    assert str(e.value) == (
+        "vectorizer option base_url of text2vec-openai in My_docs holds userinfo "
+        "that cannot be removed"
+    )
+
+
 @pytest.mark.parametrize("model", ["voyage-3@2025-01", "bob:x@host", "m?v=1#tag"])
 def test_kwargs_send_options_without_a_scheme_unchanged(model: str) -> None:
     options = {"model": model, "dimensions": 256, "truncate": True}
@@ -752,6 +767,36 @@ def test_weaviate_schema_keeps_other_status_errors():
     client.collections.fail = [_status_error(401)]
     with pytest.raises(UnexpectedStatusCodeError):
         WeaviateSchema(client).ensure([entry()])  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://TOKEN@X.Weaviate.Cloud:8443",
+        "http://admin:pw@x.weaviate.cloud/",
+        "x.weaviate.cloud",
+    ],
+)
+def test_connect_cloud_passes_the_host_without_userinfo_or_port(monkeypatch, url):
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        connect_module.weaviate,
+        "connect_to_weaviate_cloud",
+        lambda **kw: seen.update(kw),
+    )
+    connect_module.connect(WeaviateSettings(url, None, None, {}))
+    assert seen["cluster_url"] == "https://x.weaviate.cloud"
+
+
+def test_connect_cloud_keeps_a_host_that_starts_with_http(monkeypatch):
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        connect_module.weaviate,
+        "connect_to_weaviate_cloud",
+        lambda **kw: seen.update(kw),
+    )
+    connect_module.connect(WeaviateSettings("httpx1.weaviate.cloud", None, None, {}))
+    assert seen["cluster_url"] == "https://httpx1.weaviate.cloud"
 
 
 def test_connect_cloud_without_api_key(monkeypatch):

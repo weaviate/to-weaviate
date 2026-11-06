@@ -2,7 +2,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import SplitResult, unquote, urlparse, urlsplit, urlunsplit
+from urllib.parse import SplitResult, unquote, urlsplit, urlunsplit
 
 from dotenv import dotenv_values
 
@@ -48,6 +48,20 @@ API_KEY_MAP = {
 
 
 URL_VARIABLES = ("CHROMA_URL", "WEAVIATE_URL", "WEAVIATE_GRPC_URL")
+URL_HINT = "Percent-encode #, ?, / and @ in a password."
+HTTP_SCHEMES = frozenset({"http", "https"})
+
+
+class InvalidSetting(Exception):
+    """A variable holds a value that the tool refuses.
+
+    The message names the variable and never holds the value. `hint` says
+    how to fix it.
+    """
+
+    def __init__(self, message: str, hint: str) -> None:
+        super().__init__(message)
+        self.hint = hint
 
 
 def _split(url: str) -> tuple[SplitResult, str]:
@@ -84,37 +98,102 @@ def without_userinfo(url: str) -> str:
     return urlunsplit(parts._replace(netloc=netloc))[len(prefix) :]
 
 
-def stored_url(url: str) -> str:
-    """`url` without its userinfo, query and fragment. Never raises.
+def stored_url(url: str) -> str | None:
+    """`url` without its userinfo, query and fragment, or None. Never raises.
 
     The form of a URL that the tool writes to a file or prints, because a
-    query or a fragment can hold a token.
+    query or a fragment can hold a token. None when the value still holds an
+    `@` after its userinfo is removed: an unencoded `/`, `?` or `#` in a
+    password leaves the userinfo in place, so such a value is not stored.
     """
     bare = without_userinfo(url)
+    if "@" in bare:
+        return None
     ends = [i for i in (bare.find("?"), bare.find("#")) if i >= 0]
     return bare[: min(ends)] if ends else bare
 
 
-def normalized_host(url: str, default_scheme: str = "http") -> str:
-    """The `host:port` of `url`, equal for two ways to write one server.
+@dataclass(frozen=True)
+class Endpoint:
+    """A host, a port and whether TLS is used.
 
-    The host is in lower case, without userinfo and without a trailing dot. An
-    IPv6 host is in brackets. The path, query and fragment are dropped. A URL
-    without a port gets 443 for https and 80 for any other scheme, as
-    `target.connect` does. A URL without a scheme gets `default_scheme`. For
-    WEAVIATE_URL that is http when WEAVIATE_GRPC_URL is set, because `connect`
-    adds http://, and https when it is not, because `connect` then connects
-    to Weaviate Cloud over https on port 443.
-
-    Raises ValueError when `url` cannot be split or its port is not a number.
+    `host` is in lower case, without userinfo. An IPv6 host has no brackets.
     """
-    parts, _ = _split(url)
-    scheme = parts.scheme or default_scheme
-    host = (parts.hostname or "").removesuffix(".")
-    if ":" in host:
-        host = f"[{host}]"
-    port = parts.port or (443 if scheme == "https" else 80)
-    return f"{host}:{port}"
+
+    host: str
+    port: int
+    secure: bool
+
+    @property
+    def normalized(self) -> str:
+        """`host:port`, equal for two ways to write one server.
+
+        The host has no trailing dot. An IPv6 host is in brackets.
+        """
+        host = self.host.removesuffix(".")
+        if ":" in host:
+            host = f"[{host}]"
+        return f"{host}:{self.port}"
+
+
+def _endpoint(parts: SplitResult, default_scheme: str) -> Endpoint:
+    """The endpoint of `parts`; a URL without a scheme gets `default_scheme`.
+
+    A URL without a port gets 443 for https and 80 for any other scheme.
+    """
+    secure = (parts.scheme or default_scheme) == "https"
+    return Endpoint(parts.hostname or "", parts.port or (443 if secure else 80), secure)
+
+
+def _parsed_url(
+    var: str, url: str, schemes: frozenset[str] | None, any_path: bool
+) -> tuple[SplitResult, str]:
+    """`url` split and its `stored_url` form, or InvalidSetting.
+
+    Refused for every variable: a value that cannot be split, a port that is
+    not a number, a fragment, and an `@` in the path or the query, which is
+    where `stored_url` finds an `@` once the userinfo is removed. An
+    unencoded `#`, `?` or `/` in a password gives these shapes. `schemes` are
+    the accepted schemes, with "" for none; None accepts any scheme. Without
+    `any_path`, the path is empty or `/`.
+    """
+    message = f"{var} is not a valid URL."
+    try:
+        parts, _ = _split(url)
+        parts.port  # noqa: B018 - raises ValueError for a port that is not a number
+    except ValueError:
+        # The ValueError can quote the port text, which can be a password.
+        raise InvalidSetting(message, URL_HINT) from None
+    stored = stored_url(url)
+    if (
+        "#" in url
+        or stored is None
+        or (schemes is not None and parts.scheme not in schemes)
+        or (not any_path and parts.path not in ("", "/"))
+    ):
+        raise InvalidSetting(message, URL_HINT)
+    return parts, stored
+
+
+def _userinfo(url: str) -> str | None:
+    """The userinfo of `url`, or None. Never raises."""
+    try:
+        netloc = _split(url)[0].netloc
+    except ValueError:
+        return _plain_userinfo(url)[0]
+    return netloc.rpartition("@")[0] if "@" in netloc else None
+
+
+def url_tokens(url: str) -> list[str]:
+    """The userinfo of `url` when it has no colon, as written and decoded.
+
+    A userinfo without a colon, as in `https://TOKEN@host`, is a token.
+    Never raises.
+    """
+    userinfo = _userinfo(url)
+    if not userinfo or ":" in userinfo:
+        return []
+    return list(dict.fromkeys([userinfo, unquote(userinfo)]))
 
 
 def url_passwords(url: str) -> list[str]:
@@ -138,19 +217,62 @@ class MissingCredential(Exception):
 
 @dataclass(frozen=True)
 class ChromaSettings:
+    """Raises InvalidSetting when `url` is refused. CHROMA_URL needs http or https.
+
+    `host` is the host of `url` in lower case, without a trailing dot.
+    `stored_url` is `url` without its userinfo, query and fragment: the form
+    that inspect prints and that the plan stores.
+    """
+
     url: str
     api_key: str | None = field(repr=False)
     tenant: str | None
     database: str | None
     token_header: str
+    host: str = field(init=False)
+    stored_url: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        parts, stored = _parsed_url("CHROMA_URL", self.url, HTTP_SCHEMES, any_path=True)
+        object.__setattr__(self, "host", (parts.hostname or "").removesuffix("."))
+        object.__setattr__(self, "stored_url", stored)
 
 
 @dataclass(frozen=True)
 class WeaviateSettings:
+    """Raises InvalidSetting when `url` or `grpc_url` is refused.
+
+    Both have no path other than `/`. A `grpc_url` scheme is http or https.
+    `http` is the endpoint of `url` and `grpc` the endpoint of `grpc_url`; a
+    URL without a scheme is http. `target.connect` and the stored target
+    host read both. Without `grpc_url`, `connect` passes only `http.host` to
+    `connect_to_weaviate_cloud`, which connects over TLS to port 443 whatever
+    the scheme says, so `http` is secure and a URL without a port gets 443.
+    An explicit port stays in `http` and in the stored host, but the client
+    does not use it.
+    """
+
     url: str
     api_key: str | None = field(repr=False)
     grpc_url: str | None
     headers: dict[str, str] = field(repr=False)
+    http: Endpoint = field(init=False)
+    grpc: Endpoint | None = field(init=False)
+
+    def __post_init__(self) -> None:
+        http, _ = _parsed_url("WEAVIATE_URL", self.url, None, any_path=False)
+        grpc = None
+        if self.grpc_url:
+            parts, _ = _parsed_url(
+                "WEAVIATE_GRPC_URL", self.grpc_url, HTTP_SCHEMES | {""}, any_path=False
+            )
+            grpc = _endpoint(parts, "http")
+        if grpc is None:
+            endpoint = Endpoint(http.hostname or "", http.port or 443, True)
+        else:
+            endpoint = _endpoint(http, "http")
+        object.__setattr__(self, "http", endpoint)
+        object.__setattr__(self, "grpc", grpc)
 
 
 def load_env(cwd: Path) -> dict[str, str]:
@@ -165,23 +287,40 @@ def _get(env: Mapping[str, str], name: str) -> str | None:
     return value or None
 
 
-def _is_chroma_cloud(url: str) -> bool:
-    host = urlparse(url).hostname or ""
+def _key(env: Mapping[str, str], name: str) -> str | None:
+    """The key in variable `name`, like `_get`, or InvalidSetting.
+
+    A key is refused when it holds a character for which `str.isprintable()`
+    is false, or when it has leading or trailing whitespace. Such a value
+    reaches h11, whose error text shows the header value in an escaped form
+    that `redact` may not match. An empty or blank value is not set.
+    """
+    raw = env.get(name, "")
+    value = raw.strip()
+    if value and (value != raw or not value.isprintable()):
+        raise InvalidSetting(
+            f"{name} holds a control character.",
+            f"Set {name} without control characters or leading and trailing "
+            "whitespace.",
+        )
+    return value or None
+
+
+def _is_chroma_cloud(host: str) -> bool:
     return host == CHROMA_CLOUD_DOMAIN or host.endswith("." + CHROMA_CLOUD_DOMAIN)
 
 
 def chroma_settings(env: Mapping[str, str]) -> ChromaSettings:
-    url = _get(env, "CHROMA_URL") or DEFAULT_CHROMA_URL
-    api_key = _get(env, "CHROMA_API_KEY")
-    if api_key is None and _is_chroma_cloud(url):
-        raise MissingCredential("CHROMA_API_KEY")
-    return ChromaSettings(
-        url=url,
-        api_key=api_key,
+    settings = ChromaSettings(
+        url=_get(env, "CHROMA_URL") or DEFAULT_CHROMA_URL,
+        api_key=_key(env, "CHROMA_API_KEY"),
         tenant=_get(env, "CHROMA_TENANT"),
         database=_get(env, "CHROMA_DATABASE"),
         token_header=_get(env, "CHROMA_TOKEN_HEADER") or DEFAULT_TOKEN_HEADER,
     )
+    if settings.api_key is None and _is_chroma_cloud(settings.host):
+        raise MissingCredential("CHROMA_API_KEY")
+    return settings
 
 
 def weaviate_settings(env: Mapping[str, str]) -> WeaviateSettings:
@@ -190,12 +329,12 @@ def weaviate_settings(env: Mapping[str, str]) -> WeaviateSettings:
         raise MissingCredential("WEAVIATE_URL")
     headers: dict[str, str] = {}
     for var, header in API_KEY_MAP.items():
-        value = _get(env, var)
+        value = _key(env, var)
         if value is not None and header not in headers:
             headers[header] = value
     return WeaviateSettings(
         url=url,
-        api_key=_get(env, "WEAVIATE_API_KEY"),
+        api_key=_key(env, "WEAVIATE_API_KEY"),
         grpc_url=_get(env, "WEAVIATE_GRPC_URL"),
         headers=headers,
     )

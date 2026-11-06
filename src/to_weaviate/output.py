@@ -3,7 +3,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from to_weaviate.settings import API_KEY_MAP, URL_VARIABLES, url_passwords
+from to_weaviate.settings import API_KEY_MAP, URL_VARIABLES, url_passwords, url_tokens
 
 REDACTED = "***"
 SECRET_VARIABLES = ("CHROMA_API_KEY", "WEAVIATE_API_KEY", *API_KEY_MAP)
@@ -79,13 +79,14 @@ def info(json_output: bool, line: str) -> None:
 
 
 def secret_values(env: Mapping[str, str]) -> list[str]:
-    """Secret values in `env`: the key variables and the URL passwords.
+    """Secret values in `env`: the key variables, the URL passwords and tokens.
 
     Values are stripped like settings strips them. Empty values are skipped.
     """
     values = [env.get(var, "").strip() for var in SECRET_VARIABLES]
     for var in URL_VARIABLES:
-        values.extend(url_passwords(env.get(var, "").strip()))
+        url = env.get(var, "").strip()
+        values.extend([*url_passwords(url), *url_tokens(url)])
     return list(dict.fromkeys(v for v in values if v))
 
 

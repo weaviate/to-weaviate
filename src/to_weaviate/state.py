@@ -58,7 +58,7 @@ class CollectionProgress:
 class Target:
     """The place a copy writes to.
 
-    `host` comes from `settings.normalized_host`. `name` is the collection
+    `host` comes from `settings.Endpoint.normalized`. `name` is the collection
     name that Weaviate stores.
     """
 

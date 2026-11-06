@@ -83,14 +83,26 @@ def _config_of(embedding: dict[str, Any]) -> dict[str, Any]:
     return config if isinstance(config, dict) else {}
 
 
+def _table_keys(name: Any) -> frozenset[str]:
+    return CONFIG_KEYS.get(name, frozenset())
+
+
 def _stored_config(name: Any, config: dict[str, Any]) -> dict[str, Any]:
-    """The keys of `config` in CONFIG_KEYS; URL values via `stored_url`."""
-    keys = CONFIG_KEYS.get(name, frozenset())
-    return {
-        key: stored_url(value) if key in _URL_KEYS and isinstance(value, str) else value
-        for key, value in config.items()
-        if key in keys
-    }
+    """The keys of `config` in CONFIG_KEYS; URL values via `stored_url`.
+
+    A URL value that `stored_url` does not store is left out.
+    """
+    keys = _table_keys(name)
+    stored: dict[str, Any] = {}
+    for key, value in config.items():
+        if key not in keys:
+            continue
+        if key in _URL_KEYS and isinstance(value, str):
+            value = stored_url(value)
+            if value is None:
+                continue
+        stored[key] = value
+    return stored
 
 
 def stored_embedding(
@@ -99,8 +111,9 @@ def stored_embedding(
     """`embedding` as inspect.json and plan.yaml store it, and notes.
 
     The stored form has the type, the name and the config keys in
-    CONFIG_KEYS. A URL value has no userinfo, query or fragment. The note
-    names the dropped keys whose value is not null, never their values.
+    CONFIG_KEYS. A URL value has no userinfo, query or fragment; a URL value
+    that keeps its userinfo is dropped. The note names the dropped keys whose
+    value is not null, never their values.
     """
     if embedding is None:
         return None, []
@@ -114,10 +127,21 @@ def stored_embedding(
     )
     if not dropped:
         return stored, []
-    return stored, [
+    # A key that the mapping reads is dropped only for its URL value.
+    unclean = [k for k in dropped if k in _table_keys(name)]
+    unread = [k for k in dropped if k not in unclean]
+    reason = ""
+    if unread:
+        reason = "; the mapping does not read "
+        reason += ", ".join(unread) if unclean else "them"
+    note = (
         f"The keys {', '.join(dropped)} of the embedding function {name!r} are "
-        "not stored; the mapping does not read them."
-    ]
+        f"not stored{reason}."
+    )
+    note += "".join(
+        f" The value of {key} holds userinfo that cannot be removed." for key in unclean
+    )
+    return stored, [note]
 
 
 def _openai_base(api_base: str) -> str:
