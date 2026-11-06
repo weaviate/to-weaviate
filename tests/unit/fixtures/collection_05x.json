@@ -1,0 +1,14 @@
+{
+  "id": "9a7d6f3c-1b2e-4c8d-a5f6-7e8f9a0b1c33",
+  "name": "old-docs",
+  "tenant": "t",
+  "database": "db",
+  "dimension": 768,
+  "metadata": {"hnsw:space": "cosine"},
+  "configuration_json": {
+    "_type": "CollectionConfigurationInternal",
+    "hnsw_configuration": {"_type": "HNSWConfigurationInternal", "space": "l2", "ef_construction": 100,
+                           "ef_search": 10, "num_threads": 16, "M": 16, "resize_factor": 1.2,
+                           "batch_size": 100, "sync_threshold": 1000}
+  }
+}
