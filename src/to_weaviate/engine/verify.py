@@ -1,0 +1,238 @@
+import itertools
+import json
+import math
+import random
+import sqlite3
+import tempfile
+from collections.abc import Iterable, Iterator
+from contextlib import closing
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, TypeVar
+
+from to_weaviate.ids import to_uuid
+from to_weaviate.plan import CollectionPlan
+from to_weaviate.sources.base import Source, SourceCollection
+from to_weaviate.target.reader import TargetReader
+from to_weaviate.target.writer import TargetObject, to_object
+
+T = TypeVar("T")
+
+VECTOR_TOLERANCE = 1e-5
+ID_SAMPLE = 20
+LISTED_FAILURES = 10
+ID_BATCH = 1000
+REPORT_MD = "report.md"
+REPORT_JSON = "report.json"
+
+_TABLES = """
+PRAGMA journal_mode = OFF;
+PRAGMA synchronous = OFF;
+CREATE TABLE source (source_id TEXT PRIMARY KEY, uuid TEXT NOT NULL);
+CREATE TABLE target (uuid TEXT PRIMARY KEY, source_id TEXT NOT NULL);
+"""
+_MISSING = (
+    "FROM source s WHERE NOT EXISTS (SELECT 1 FROM target t WHERE t.uuid = s.uuid)"
+)
+_EXTRA = "FROM target t WHERE NOT EXISTS (SELECT 1 FROM source s WHERE s.uuid = t.uuid)"
+
+
+@dataclass(frozen=True)
+class Check:
+    name: str
+    collection: str  # target collection name
+    passed: bool
+    detail: str
+
+
+@dataclass(frozen=True)
+class IdDiff:
+    missing: int
+    extra: int
+    missing_sample: list[str]  # source ids, at most ID_SAMPLE
+    extra_sample: list[str]  # source ids, at most ID_SAMPLE
+
+
+def _quoted(value: Any) -> str:
+    """JSON text of a source id or a list of them, so that each stays on one line."""
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _batches(items: Iterable[T], size: int) -> Iterator[list[T]]:
+    iterator = iter(items)
+    while batch := list(itertools.islice(iterator, size)):
+        yield batch
+
+
+def verify_counts(
+    source: Source,
+    reader: TargetReader,
+    entry: CollectionPlan,
+    collection: SourceCollection,
+) -> Check:
+    expected = source.count(collection)
+    found = reader.count(entry)
+    detail = f"source count {expected}, target count {found}"
+    if expected != found:
+        detail += "; run to-weaviate sync"
+    return Check("count", entry.target.name, expected == found, detail)
+
+
+def _diff(
+    db: sqlite3.Connection,
+    source_ids: Iterable[str],
+    target_pairs: Iterable[tuple[str, str]],
+) -> IdDiff:
+    db.executescript(_TABLES)
+    for batch in _batches(((i, to_uuid(i)) for i in source_ids), ID_BATCH):
+        db.executemany("INSERT OR IGNORE INTO source VALUES (?, ?)", batch)
+        db.commit()
+    for pairs in _batches(target_pairs, ID_BATCH):
+        db.executemany("INSERT OR IGNORE INTO target VALUES (?, ?)", pairs)
+        db.commit()
+    db.execute("CREATE INDEX source_uuid ON source (uuid)")
+
+    def count(where: str) -> int:
+        return int(db.execute(f"SELECT COUNT(*) {where}").fetchone()[0])
+
+    def sample(column: str, where: str) -> list[str]:
+        rows = db.execute(f"SELECT {column} {where} LIMIT ?", (ID_SAMPLE,))
+        return [str(row[0]) for row in rows]
+
+    return IdDiff(
+        missing=count(_MISSING),
+        extra=count(_EXTRA),
+        missing_sample=sample("s.source_id", _MISSING),
+        extra_sample=sample("t.source_id", _EXTRA),
+    )
+
+
+def diff_ids(
+    source: Source,
+    reader: TargetReader,
+    entry: CollectionPlan,
+    collection: SourceCollection,
+    workdir: Path,
+) -> IdDiff:
+    """Source ids without a target object, and target objects without a source id.
+
+    The ids go through a temporary sqlite file under `workdir`, so memory does
+    not grow with the collection. The file is removed before this returns.
+    """
+    with tempfile.TemporaryDirectory(prefix="verify-", dir=workdir) as scratch:
+        with closing(sqlite3.connect(Path(scratch) / "ids.sqlite")) as db:
+            return _diff(db, source.ids(collection), reader.source_ids(entry))
+
+
+def verify_ids(diff: IdDiff, entry: CollectionPlan) -> Check:
+    detail = f"missing {diff.missing}, extra {diff.extra}"
+    if diff.missing_sample:
+        detail += f"; missing ids {_quoted(diff.missing_sample)}"
+    if diff.extra_sample:
+        detail += f"; extra ids {_quoted(diff.extra_sample)}"
+    return Check("ids", entry.target.name, diff.missing == diff.extra == 0, detail)
+
+
+def _same(expected: Any, found: Any) -> bool:
+    if isinstance(expected, list) and isinstance(found, list):
+        return len(expected) == len(found) and all(map(_same, expected, found))
+    if isinstance(expected, float) or isinstance(found, float):
+        numbers = (int, float)
+        return (
+            isinstance(expected, numbers)
+            and isinstance(found, numbers)
+            and math.isclose(expected, found)
+        )
+    return bool(expected == found)
+
+
+def _vector_problem(
+    name: str, expected: list[float], found: list[float] | None
+) -> str | None:
+    if found is None:
+        return f"vector {name} is missing"
+    if len(found) != len(expected):
+        return f"vector {name} has length {len(found)}, the source has {len(expected)}"
+    worst = max((abs(a - b) for a, b in zip(expected, found, strict=True)), default=0.0)
+    if worst > VECTOR_TOLERANCE:
+        return f"vector {name} differs by up to {worst:.3g}"
+    return None
+
+
+def _problems(
+    entry: CollectionPlan, expected: TargetObject, found: TargetObject
+) -> list[str]:
+    """Names of the differing properties and kept vectors. Values are not quoted."""
+    out = [
+        f"property {name} differs"
+        for name in sorted(set(expected.properties) | set(found.properties))
+        if not _same(expected.properties.get(name), found.properties.get(name))
+    ]
+    for vector in entry.target.vectors:
+        if vector.mode == "keep":
+            problem = _vector_problem(
+                vector.name,
+                expected.vectors[vector.name],
+                found.vectors.get(vector.name),
+            )
+            if problem:
+                out.append(problem)
+    return out
+
+
+def verify_records(
+    source: Source,
+    reader: TargetReader,
+    entry: CollectionPlan,
+    collection: SourceCollection,
+    sample: int,
+    rng: random.Random,
+) -> Check:
+    """Compare `sample` source records with their target objects.
+
+    A record that converts to a reject is counted and not compared.
+    """
+    with_vectors = any(v.mode == "keep" for v in entry.target.vectors)
+    records = source.sample(collection, sample, rng, with_vectors)
+    expected: list[tuple[str, TargetObject]] = []
+    for record in records:
+        obj = to_object(record, entry)
+        if isinstance(obj, TargetObject):
+            expected.append((record.id, obj))
+    stored = reader.fetch(entry, [obj.uuid for _, obj in expected])
+    failures: list[str] = []
+    for source_id, obj in expected:
+        found = stored.get(obj.uuid)
+        problems = (
+            ["missing in the target"] if found is None else _problems(entry, obj, found)
+        )
+        if problems:
+            failures.append(f"{_quoted(source_id)}: {', '.join(problems)}")
+    detail = (
+        f"sampled {len(records)}, compared {len(expected)}, "
+        f"rejects skipped {len(records) - len(expected)}, differing {len(failures)}"
+    )
+    if failures:
+        detail += ": " + "; ".join(failures[:LISTED_FAILURES])
+        if len(failures) > LISTED_FAILURES:
+            detail += f"; {len(failures) - LISTED_FAILURES} more"
+    return Check("records", entry.target.name, not failures, detail)
+
+
+def check_line(check: Check) -> str:
+    status = "PASS" if check.passed else "FAIL"
+    return f"{status} {check.collection} {check.name}: {check.detail}"
+
+
+def write_report(checks: list[Check], directory: Path) -> None:
+    """Write report.md and report.json into `directory`."""
+    # Blank lines keep each check its own paragraph when the markdown renders.
+    lines = ["# to-weaviate verification report", *(check_line(c) for c in checks)]
+    (directory / REPORT_MD).write_text("\n\n".join(lines) + "\n", encoding="utf-8")
+    document = {
+        "passed": all(c.passed for c in checks),
+        "checks": [asdict(c) for c in checks],
+    }
+    (directory / REPORT_JSON).write_text(
+        json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
