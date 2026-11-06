@@ -145,6 +145,10 @@ EDIT_PLAN_HINT = (
     "Edit plan.yaml, or run to-weaviate inspect chroma --force to draft it again."
 )
 USERINFO_HINT = "Percent-encode the password in plan.yaml or remove the option."
+UTF8_HINT = (
+    "Save the file as UTF-8, or run to-weaviate inspect chroma --force to write "
+    "it again."
+)
 CHROMA_HINT = "Check CHROMA_URL and that the Chroma server is running."
 NO_COLLECTION_HINT = "Check --database, CHROMA_DATABASE and CHROMA_TENANT."
 WEAVIATE_HINT = (
@@ -357,12 +361,18 @@ def _handled(json_output: bool) -> Iterator[None]:
         raise typer.Exit(report.exit_code) from None
 
 
+def _not_utf8(path: Path) -> CliError:
+    return CliError("invalid_plan", f"{path} is not UTF-8 text.", UTF8_HINT)
+
+
 def _load_plan(directory: Path) -> Plan:
     path = directory / PLAN_FILE
     if not path.exists():
         raise CliError("usage", f"{path} does not exist.", INSPECT_HINT)
     try:
         plan = load_plan(path)
+    except UnicodeDecodeError as exc:
+        raise _not_utf8(path) from exc
     except (ValidationError, yaml.YAMLError) as exc:
         detail = _validation_text(exc) if isinstance(exc, ValidationError) else str(exc)
         raise CliError(
@@ -390,8 +400,10 @@ def _load_inspected(directory: Path) -> dict[str, SourceCollection] | None:
     if not path.exists():
         return None
     try:
-        raw = json.loads(path.read_text())
+        raw = json.loads(path.read_text(encoding="utf-8"))
         collections = [_source_collection(c) for c in raw["collections"]]
+    except UnicodeDecodeError as exc:
+        raise _not_utf8(path) from exc
     except (ValueError, KeyError, TypeError) as exc:
         raise CliError(
             "usage", f"{path} cannot be read: {exc}", REINSPECT_HINT
@@ -556,7 +568,9 @@ def _inspect_chroma(
         ) from exc
     directory.mkdir(parents=True, exist_ok=True)
     inspect_document = {"collections": [dataclasses.asdict(c) for c in collections]}
-    (directory / INSPECT_FILE).write_text(json.dumps(inspect_document, indent=2))
+    (directory / INSPECT_FILE).write_text(
+        json.dumps(inspect_document, indent=2), encoding="utf-8"
+    )
     save_plan(plan, plan_path)
 
     found = decisions(plan, {c.ref: c for c in collections})

@@ -1,3 +1,5 @@
+import io
+
 import pytest
 from pydantic import ValidationError
 
@@ -289,6 +291,17 @@ def test_draft_applies_index_to_every_vector():
 def test_round_trip(tmp_path, collection_with_fields):
     plan = draft_plan(SRC, [collection_with_fields, make("b", distance="dot")], "both")
     save_plan(plan, tmp_path / "plan.yaml")
+    assert load_plan(tmp_path / "plan.yaml") == plan
+
+
+def test_plan_is_written_and_read_as_utf8_in_any_locale(tmp_path, monkeypatch):
+    # pathlib asks io.text_encoding for the locale encoding when none is given.
+    monkeypatch.setattr(
+        io, "text_encoding", lambda encoding, stacklevel=2: encoding or "latin-1"
+    )
+    plan = draft_plan(SRC, [make(fields=[FieldStats("名前 año", {"text": 1})])])
+    save_plan(plan, tmp_path / "plan.yaml")
+    assert "名前 año" in (tmp_path / "plan.yaml").read_bytes().decode("utf-8")
     assert load_plan(tmp_path / "plan.yaml") == plan
 
 

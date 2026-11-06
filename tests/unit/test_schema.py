@@ -323,6 +323,12 @@ def test_differences_reports_mismatch(plan_kwargs, cfg, expected):
     assert found and expected in " ".join(found)
 
 
+def test_differences_skip_a_property_type_without_a_mapping():
+    props = [*PROPS[:2], p.PropertyPlan(source_key="year", name="year", type="date")]
+    found = differences(FakeClient(FakeCollection(config())), [entry(properties=props)])  # type: ignore[arg-type]
+    assert found == []
+
+
 def test_differences_missing_property():
     cfg = config()
     cfg.properties = [x for x in cfg.properties if x.name != "year"]

@@ -10,6 +10,8 @@ from to_weaviate.plan import (
 )
 from to_weaviate.sources.base import SourceCollection
 from to_weaviate.target.schema import (
+    DISTANCES,
+    PROPERTY_TYPES,
     USERINFO_TEXT,
     PlanMismatch,
     collection_kwargs,
@@ -219,6 +221,32 @@ def _keep_model_findings(
     return out
 
 
+def _value_findings(entry: CollectionPlan) -> list[Finding]:
+    """Property types and distances that the schema mapping does not have."""
+    name = entry.target.name
+    out = [
+        Finding(
+            "invalid_type",
+            name,
+            f"property {prop.name}: type {prop.type} is not one of "
+            f"{', '.join(PROPERTY_TYPES)}",
+        )
+        for prop in entry.target.properties
+        if prop.type not in PROPERTY_TYPES
+    ]
+    out.extend(
+        Finding(
+            "invalid_distance",
+            name,
+            f"vector {vector.name}: distance {vector.distance} is not one of "
+            f"{', '.join(DISTANCES)}",
+        )
+        for vector in entry.target.vectors
+        if vector.distance is not None and vector.distance not in DISTANCES
+    )
+    return out
+
+
 def vectorizer_findings(groups: Mapping[str, list[CollectionPlan]]) -> list[Finding]:
     """Vectorizer settings that the client cannot turn into a collection."""
     out: list[Finding] = []
@@ -248,7 +276,14 @@ def plan_findings(
     warnings: list[Finding] = []
     errors.extend(_duplicate_findings(plan.collections))
     errors.extend(_duplicate_source_findings(plan.collections))
-    errors.extend(vectorizer_findings(target_groups(plan.collections)))
+    value_errors = [f for e in plan.collections for f in _value_findings(e)]
+    errors.extend(value_errors)
+    # collection_kwargs cannot map a group that has a value error.
+    unmapped = {f.collection for f in value_errors}
+    groups = target_groups(plan.collections)
+    errors.extend(
+        vectorizer_findings({n: g for n, g in groups.items() if n not in unmapped})
+    )
     for entry in plan.collections:
         errors.extend(_keep_model_findings(entry, vectorizer_for))
         for prop in entry.target.properties:

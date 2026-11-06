@@ -53,6 +53,8 @@ _DATA_TYPES = {
     "number[]": DataType.NUMBER_ARRAY,
     "boolean[]": DataType.BOOL_ARRAY,
 }
+PROPERTY_TYPES = tuple(sorted(_DATA_TYPES))
+DISTANCES = tuple(sorted(d.value for d in VectorDistances))
 _QUANTIZER_CLASSES: dict[type, str] = {
     _RQConfig: "rq",
     _PQConfig: "pq",
@@ -331,9 +333,11 @@ def differences(
             out.extend(_vector_differences(plan, found))
     actual = {p.name: _val(p.data_type) for p in cfg.properties}
     for prop in _properties(group):
+        # A type without a mapping is an invalid_type finding of the plan.
+        planned_type = _DATA_TYPES.get(prop.type)
         if prop.name not in actual:
             out.append(f"property {prop.name}: missing in the collection")
-        elif actual[prop.name] != _DATA_TYPES[prop.type].value:
+        elif planned_type is not None and actual[prop.name] != planned_type.value:
             out.append(
                 f"property {prop.name}: type is {actual[prop.name]}, "
                 f"plan has {prop.type}"

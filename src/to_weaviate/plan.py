@@ -320,12 +320,13 @@ def draft_plan(
 
 
 def load_plan(path: Path) -> Plan:
-    return Plan.model_validate(yaml.safe_load(path.read_text()))
+    return Plan.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
 
 
 def save_plan(plan: Plan, path: Path) -> None:
     path.write_text(
         yaml.safe_dump(
             plan.model_dump(mode="json"), sort_keys=False, allow_unicode=True
-        )
+        ),
+        encoding="utf-8",
     )

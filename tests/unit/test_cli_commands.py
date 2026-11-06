@@ -1237,3 +1237,79 @@ def test_copy_holds_the_lock_while_it_copies_records(tmp_path):
     assert len(fakes.writer.objects) == 10
     assert source.read_calls == 5
     assert (source.refused, source.taken) == (5, 0)
+
+
+def edit_target(directory: Path, **update: Any) -> None:
+    """Replace fields of the target of the first plan entry."""
+    path = directory / "plan.yaml"
+    plan = load_plan(path)
+    first = plan.collections[0]
+    entry = first.model_copy(update={"target": first.target.model_copy(update=update)})
+    save_plan(plan.model_copy(update={"collections": [entry]}), path)
+
+
+def plan_errors(r: Result) -> list[dict[str, str]]:
+    d = json.loads(r.stdout)
+    assert (r.exit_code, d["code"]) == (2, "invalid_plan"), r.output
+    return d["errors"]
+
+
+TYPES = "boolean, boolean[], int, int[], number, number[], text, text[]"
+DISTANCES = "cosine, dot, hamming, l2-squared, manhattan"
+
+
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_a_property_type_without_a_mapping_is_an_invalid_plan(tmp_path, cmd):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    properties = [
+        p.model_copy(update={"type": "date"}) if p.name == "year" else p
+        for p in target.properties
+    ]
+    edit_target(tmp_path / DIR, properties=properties)
+    r = invoke(fakes, cmd, "--json")
+    message = f"property year: type date is not one of {TYPES}"
+    assert plan_errors(r) == [
+        {"code": "invalid_type", "collection": "Docs", "message": message}
+    ]
+    assert fakes.writer.calls == 0
+
+
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_a_distance_without_a_mapping_is_an_invalid_plan(tmp_path, cmd):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))), "--index", "hnsw")
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    vectors = [v.model_copy(update={"distance": "Cosine"}) for v in target.vectors]
+    edit_target(tmp_path / DIR, vectors=vectors)
+    r = invoke(fakes, cmd, "--json")
+    message = f"vector default: distance Cosine is not one of {DISTANCES}"
+    assert plan_errors(r) == [
+        {"code": "invalid_distance", "collection": "Docs", "message": message}
+    ]
+    assert fakes.writer.calls == 0
+
+
+@pytest.mark.parametrize("cmd", ["check", "copy", "status", "verify"])
+def test_a_plan_that_is_not_utf8_is_an_invalid_plan(tmp_path, cmd):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    path = tmp_path / DIR / "plan.yaml"
+    path.write_bytes(path.read_bytes().replace(b"name: docs", b"name: d\xf6cs"))
+    r = invoke(fakes, cmd, "--json")
+    assert error_of(r)[:3] == (
+        2,
+        "invalid_plan",
+        f"{DIR / 'plan.yaml'} is not UTF-8 text.",
+    )
+
+
+@pytest.mark.parametrize("cmd", ["check", "copy", "verify"])
+def test_an_inspection_that_is_not_utf8_is_an_invalid_plan(tmp_path, cmd):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    path = tmp_path / DIR / "inspect.json"
+    path.write_bytes(path.read_bytes().replace(b'"docs"', b'"d\xf6cs"'))
+    r = invoke(fakes, cmd, "--json")
+    assert error_of(r)[:3] == (
+        2,
+        "invalid_plan",
+        f"{DIR / 'inspect.json'} is not UTF-8 text.",
+    )
