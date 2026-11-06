@@ -367,6 +367,18 @@ def test_inspect_that_finds_no_collection_exits_2_and_writes_no_file(tmp_path):
         assert r.exit_code == 2 and json.loads(r.stdout)["code"] == "usage", r.output
 
 
+def test_inspect_that_finds_no_collection_in_text_mode_writes_no_file(tmp_path):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    r = invoke(fakes, "inspect", "chroma", "--database", "nope")
+    assert r.exit_code == 2, r.output
+    assert r.stderr.splitlines()[-2:] == [
+        f"Error: Chroma tenant {FakeSource.TENANT} has no collection in database "
+        "nope.",
+        f"Hint: {NO_COLLECTION_HINT}",
+    ]
+    assert not (tmp_path / DIR).exists()
+
+
 @pytest.mark.parametrize(
     "args, variable, searched",
     [
