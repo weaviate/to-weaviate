@@ -223,6 +223,34 @@ def test_error_message_from_error_field_and_truncation():
     assert len(e.value.message) == 500
 
 
+CUT_KEY = "B5-MADE-UP-CHROMA-KEY-0123456789abcdefghij"
+CUT_PASSWORD = "B5-MADE-UP-URL-PASSWORD-0123456789abcdefghij"
+
+
+@pytest.mark.parametrize("secret", [CUT_KEY, CUT_PASSWORD])
+@pytest.mark.parametrize("as_json", [False, True])
+def test_error_message_is_redacted_before_the_cut(secret, as_json):
+    text = "x" * 480 + secret + "y" * 100
+    assert text.index(secret) < 490 and text.index(secret) + len(secret) > 510
+
+    def handler(request):
+        if as_json:
+            return httpx.Response(400, json={"message": text})
+        return httpx.Response(400, text=text)
+
+    client, _ = make(
+        handler,
+        api_key=CUT_KEY,
+        url=f"http://user:{CUT_PASSWORD}@chroma.test",
+    )
+    with pytest.raises(ChromaError) as e:
+        client.identity()
+    assert len(e.value.message) <= 500
+    slices = [secret[i : i + 8] for i in range(len(secret) - 7)]
+    assert not [s for s in slices if s in str(e.value)]
+    assert "***" in e.value.message
+
+
 def test_api_key_not_in_repr_or_error():
     client, _ = make(lambda r: httpx.Response(401, text="nope"))
     with pytest.raises(ChromaError) as e:
