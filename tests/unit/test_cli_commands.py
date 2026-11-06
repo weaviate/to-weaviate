@@ -11,12 +11,12 @@ from fakes import (
     FakeSchema,
     FakeSource,
     FakeWriter,
+    all_failed,
     cli_records,
     invoke,
     old_state_file,
 )
 from typer.testing import Result
-from weaviate.exceptions import WeaviateInsertManyAllFailedError
 
 from to_weaviate.ids import to_uuid
 from to_weaviate.lock import Locked, exclusive_lock
@@ -417,11 +417,6 @@ REFUSED = "vector lengths don't match"
 BATCH_HINT = "Fix the cause and run to-weaviate copy again. It resumes at this page."
 
 
-def all_failed(reason: str = REFUSED) -> WeaviateInsertManyAllFailedError:
-    """What client 4.24.1 raises when Weaviate refuses every object of a batch."""
-    return WeaviateInsertManyAllFailedError(f"Here is the set of all errors: {reason}")
-
-
 def refusing(
     records: int, fail: Callable[[int], Exception | None]
 ) -> tuple[FakeFactories, FakeInsertClient]:
@@ -455,7 +450,7 @@ def test_copy_stops_when_weaviate_refuses_every_object_of_a_batch(tmp_path):
 
 
 def test_copy_retries_a_batch_that_weaviate_refused_once():
-    fakes, client = refusing(10, lambda n: all_failed() if n == 1 else None)
+    fakes, client = refusing(10, lambda n: all_failed(REFUSED) if n == 1 else None)
     r = invoke(fakes, "copy", "--json")
     assert r.exit_code == 0, r.output
     assert len(client.writes_per_uuid) == 10
@@ -463,7 +458,7 @@ def test_copy_retries_a_batch_that_weaviate_refused_once():
 
 
 def test_copy_after_a_refused_batch_copies_the_page():
-    fakes, client = refusing(10, lambda n: all_failed())
+    fakes, client = refusing(10, lambda n: all_failed(REFUSED))
     invoke(fakes, "copy", "--parallelism", "1")
     client.fail = lambda n: None
     calls = client.calls
@@ -548,7 +543,7 @@ def test_copy_rejects_a_record_whose_embedding_holds_a_null():
 
 
 def test_copy_resumes_at_the_refused_page_and_writes_each_object_once():
-    fakes, client = refusing(250, lambda n: all_failed() if n > 1 else None)
+    fakes, client = refusing(250, lambda n: all_failed(REFUSED) if n > 1 else None)
     assert invoke(fakes, "copy", "--parallelism", "1").exit_code == 4
     assert len(client.writes_per_uuid) == 100
     client.fail = lambda n: None

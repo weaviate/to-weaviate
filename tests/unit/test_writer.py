@@ -3,7 +3,7 @@ from typing import Any
 
 import httpx
 import pytest
-from fakes import raise_grpc_failure
+from fakes import all_failed, raise_grpc_failure
 from weaviate.exceptions import (
     UnexpectedStatusCodeError,
     WeaviateBatchError,
@@ -234,11 +234,6 @@ def test_all_failed_exception_becomes_rejects():
     assert [r.source_id for r in rejects] == ["s0"]
     assert all("nope" in r.reason for r in rejects)
     assert len(data.calls) == 1
-
-
-def all_failed(reason: str) -> WeaviateInsertManyAllFailedError:
-    """What client 4.24.1 raises when Weaviate refuses every object of a batch."""
-    return WeaviateInsertManyAllFailedError(f"Here is the set of all errors: {reason}")
 
 
 def test_all_failed_batch_is_retried_and_then_raises():

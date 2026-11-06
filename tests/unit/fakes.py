@@ -12,7 +12,7 @@ from typing import Any, ClassVar, Literal, NoReturn
 
 import typer
 from typer.testing import CliRunner, Result
-from weaviate.exceptions import WeaviateRetryError
+from weaviate.exceptions import WeaviateInsertManyAllFailedError, WeaviateRetryError
 
 from to_weaviate.cli import build_app
 from to_weaviate.plan import CollectionPlan
@@ -237,6 +237,11 @@ def raise_grpc_failure(
         if batch:
             raise
         raise error(str(retry))  # noqa: B904
+
+
+def all_failed(reason: str) -> WeaviateInsertManyAllFailedError:
+    """What client 4.24.1 raises when Weaviate refuses every object of a batch."""
+    return WeaviateInsertManyAllFailedError(f"Here is the set of all errors: {reason}")
 
 
 def _source_id(obj: TargetObject) -> str:
