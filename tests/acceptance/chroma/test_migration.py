@@ -1,4 +1,9 @@
-from chroma.seed import add_to_tiny_l2, delete_from_tiny_l2
+from chroma.seed import (
+    add_to_tiny_l2,
+    delete_from_tiny_l2,
+    extra_tiny_l2_ids,
+    tiny_l2_count,
+)
 from conftest import run, weaviate_config, weaviate_count, weaviate_object
 
 
@@ -19,20 +24,23 @@ def test_end_to_end(seeded, tmp_path):
     assert r.exit_code == 0 and weaviate_count("Docs_cosine") == 700, r
 
 
+# (start, count) of each add to tiny.l2, after its 10 seed records.
+TINY_L2_ADDS = [(10, 5), (15, 5)]
+
+
 def test_each_copy_adds_the_records_that_the_source_gained(seeded, tmp_path):
     r = run(["inspect", "chroma", "--collection", "tiny.l2"], tmp_path)
     assert r.exit_code == 0, r
-    added: list[str] = []
-    # The other tests expect tiny.l2 as the seed made it.
+    # The other tests expect tiny.l2 as the seed made it. The cleanup deletes
+    # every id an add can store, also when that add failed or never ran.
+    intended = [i for add in TINY_L2_ADDS for i in extra_tiny_l2_ids(*add)]
     try:
         r = run(["copy"], tmp_path)
         assert r.exit_code == 0, r
-        added += add_to_tiny_l2(10, 5)
-        r = run(["copy"], tmp_path)
-        assert r.exit_code == 0, r
-        added += add_to_tiny_l2(15, 5)
-        r = run(["copy"], tmp_path)
-        assert r.exit_code == 0, r
+        for add in TINY_L2_ADDS:
+            add_to_tiny_l2(*add)
+            r = run(["copy"], tmp_path)
+            assert r.exit_code == 0, r
         assert weaviate_count("Tiny_l2") == 20
         r = run(["status"], tmp_path)
         row = r.data["collections"][0]
@@ -40,7 +48,8 @@ def test_each_copy_adds_the_records_that_the_source_gained(seeded, tmp_path):
         r = run(["verify"], tmp_path)
         assert r.exit_code == 0 and r.data["status"] == "success", r
     finally:
-        delete_from_tiny_l2(added)
+        delete_from_tiny_l2(intended)
+        assert tiny_l2_count() == 10
 
 
 def test_wrong_or_missing_api_key_exits_3(seeded, tmp_path):

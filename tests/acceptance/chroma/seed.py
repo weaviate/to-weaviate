@@ -3,7 +3,8 @@
 Run it as a script, or call `seed()`. Each run deletes and recreates the
 collections, so every run sends the same data. `add_to_tiny_l2` and
 `delete_from_tiny_l2` add records to tiny.l2 and delete them again. Every
-function here reads CHROMA_URL and runs only when it is TEST_URL.
+function here that sends a request reads CHROMA_URL and runs only when it is
+TEST_URL.
 """
 
 import os
@@ -149,20 +150,42 @@ def seed() -> None:
         _recreate(http, "docs-rq", "cosine", docs_rq(rng))
 
 
-def add_to_tiny_l2(start: int, count: int) -> list[str]:
-    """Add `count` records numbered from `start` to tiny.l2. Returns their ids."""
-    records = tiny_l2(random.Random(start), start, count)
+def _extra_tiny_l2(start: int, count: int) -> list[Record]:
+    return tiny_l2(random.Random(start), start, count)
+
+
+def extra_tiny_l2_ids(start: int, count: int) -> list[str]:
+    """The ids that `add_to_tiny_l2(start, count)` adds. Sends no request."""
+    return [r.id for r in _extra_tiny_l2(start, count)]
+
+
+def add_to_tiny_l2(start: int, count: int) -> None:
+    """Add `count` records numbered from `start` to tiny.l2."""
     with _test_server() as http:
-        _add(http, _collection_id(http, "tiny.l2"), records)
-    return [r.id for r in records]
+        _add(http, _collection_id(http, "tiny.l2"), _extra_tiny_l2(start, count))
 
 
 def delete_from_tiny_l2(ids: list[str]) -> None:
-    """Delete the records with `ids` from tiny.l2."""
+    """Delete the records with `ids` from tiny.l2. An id that is missing is no error.
+
+    Chroma answers 200 for ids that do not exist and 400 for an empty list,
+    so an empty list sends no request.
+    """
+    if not ids:
+        return
     with _test_server() as http:
         collection_id = _collection_id(http, "tiny.l2")
         deleted = http.post(f"/collections/{collection_id}/delete", json={"ids": ids})
         deleted.raise_for_status()
+
+
+def tiny_l2_count() -> int:
+    """The number of records in tiny.l2."""
+    with _test_server() as http:
+        collection_id = _collection_id(http, "tiny.l2")
+        counted = http.get(f"/collections/{collection_id}/count")
+        counted.raise_for_status()
+        return int(counted.json())
 
 
 if __name__ == "__main__":
