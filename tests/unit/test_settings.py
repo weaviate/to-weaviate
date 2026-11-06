@@ -3,9 +3,9 @@ import pytest
 from to_weaviate.settings import (
     InvalidSetting,
     MissingCredential,
+    WeaviateSettings,
     chroma_settings,
     load_env,
-    normalized_host,
     stored_url,
     url_passwords,
     url_tokens,
@@ -172,31 +172,30 @@ def test_url_passwords(url, expected):
     assert url_passwords(url) == expected
 
 
+GRPC = "localhost:50099"
+
+
+# (WEAVIATE_URL, WEAVIATE_GRPC_URL, stored host)
 @pytest.mark.parametrize(
-    ("url", "default_scheme", "expected"),
+    ("url", "grpc", "expected"),
     [
-        ("http://localhost:8099", "http", "localhost:8099"),
-        ("HTTP://LocalHost:8099", "http", "localhost:8099"),
-        ("http://admin:pw@localhost:8099", "http", "localhost:8099"),
-        ("http://localhost:8099/v1/schema", "http", "localhost:8099"),
-        ("http://localhost:8099/?a=1#top", "http", "localhost:8099"),
-        ("http://localhost.:8099", "http", "localhost:8099"),
-        ("http://weaviate.test", "http", "weaviate.test:80"),
-        ("http://weaviate.test:80", "http", "weaviate.test:80"),
-        ("https://c.weaviate.cloud", "http", "c.weaviate.cloud:443"),
-        ("https://C.Weaviate.Cloud.:443/", "http", "c.weaviate.cloud:443"),
-        ("localhost:8099", "http", "localhost:8099"),
-        ("user:pw@weaviate.test", "http", "weaviate.test:80"),
-        ("c.weaviate.cloud", "https", "c.weaviate.cloud:443"),
-        ("http://[::1]:8099", "http", "[::1]:8099"),
+        ("http://localhost:8099", GRPC, "localhost:8099"),
+        ("HTTP://LocalHost:8099", GRPC, "localhost:8099"),
+        ("http://admin:pw@localhost:8099", GRPC, "localhost:8099"),
+        ("http://localhost.:8099", GRPC, "localhost:8099"),
+        ("http://weaviate.test", GRPC, "weaviate.test:80"),
+        ("http://weaviate.test:80", GRPC, "weaviate.test:80"),
+        ("https://c.weaviate.cloud", GRPC, "c.weaviate.cloud:443"),
+        ("https://C.Weaviate.Cloud.:443/", GRPC, "c.weaviate.cloud:443"),
+        ("localhost:8099", GRPC, "localhost:8099"),
+        ("user:pw@weaviate.test", GRPC, "weaviate.test:80"),
+        ("c.weaviate.cloud", None, "c.weaviate.cloud:443"),
+        ("http://[::1]:8099", GRPC, "[::1]:8099"),
+        ("weaviate.test", GRPC, "weaviate.test:80"),
     ],
 )
-def test_normalized_host(url, default_scheme, expected):
-    assert normalized_host(url, default_scheme) == expected
-
-
-def test_normalized_host_defaults_to_http():
-    assert normalized_host("weaviate.test") == "weaviate.test:80"
+def test_stored_host_is_equal_for_two_ways_to_write_one_server(url, grpc, expected):
+    assert WeaviateSettings(url, None, grpc, {}).http.normalized == expected
 
 
 @pytest.mark.parametrize(

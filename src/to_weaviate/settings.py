@@ -145,18 +145,6 @@ def _endpoint(parts: SplitResult, default_scheme: str) -> Endpoint:
     return Endpoint(parts.hostname or "", parts.port or (443 if secure else 80), secure)
 
 
-def normalized_host(url: str, default_scheme: str = "http") -> str:
-    """The `host:port` of `url`, equal for two ways to write one server.
-
-    See `Endpoint.normalized`. The userinfo, path, query and fragment are
-    dropped. A URL without a port gets 443 for https and 80 for any other
-    scheme. A URL without a scheme gets `default_scheme`.
-
-    Raises ValueError when `url` cannot be split or its port is not a number.
-    """
-    return _endpoint(_split(url)[0], default_scheme).normalized
-
-
 def _parsed_url(
     var: str, url: str, schemes: frozenset[str] | None, any_path: bool
 ) -> SplitResult:
