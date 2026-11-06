@@ -12,6 +12,7 @@ from typing import Any, ClassVar, Literal, NoReturn
 
 import typer
 from typer.testing import CliRunner, Result
+from weaviate.exceptions import WeaviateRetryError
 
 from to_weaviate.cli import build_app
 from to_weaviate.plan import CollectionPlan
@@ -24,7 +25,7 @@ from to_weaviate.sources.base import (
     SourceCollection,
 )
 from to_weaviate.target.schema import PlanMismatch
-from to_weaviate.target.writer import Reject, TargetObject
+from to_weaviate.target.writer import Reject, TargetObject, WeaviateWriter
 from to_weaviate.types import SPARSE_VECTOR, value_type
 
 
@@ -214,15 +215,28 @@ class FakeRpcError(Exception):
         return SimpleNamespace(name=self.status)
 
 
-def raise_grpc_failure(status: str, error: Callable[[str], Exception]) -> NoReturn:
-    """Raise `error` inside the except block of a FakeRpcError, as the client does.
+def raise_grpc_failure(
+    status: str, error: Callable[[str], Exception], batch: bool = False
+) -> NoReturn:
+    """Raise what client 4.24.1 raises when a gRPC call fails with `status`.
 
-    The FakeRpcError becomes the `__context__` of the raised error.
+    For UNAVAILABLE the client retries, then raises WeaviateRetryError from the
+    FakeRpcError. A batch call lets that error pass. A search or aggregate call
+    raises `error` inside its except block, so the WeaviateRetryError becomes
+    the `__context__`. For any other status, `error` is raised inside the
+    except block of the FakeRpcError, which becomes the `__context__`.
     """
     try:
-        raise FakeRpcError(status)
-    except FakeRpcError:
-        raise error(f"fake gRPC failure {status}")  # noqa: B904
+        try:
+            raise FakeRpcError(status)
+        except FakeRpcError as rpc:
+            if status != "UNAVAILABLE":
+                raise error(f"fake gRPC failure {status}")  # noqa: B904
+            raise WeaviateRetryError(str(rpc), 3) from rpc
+    except WeaviateRetryError as retry:
+        if batch:
+            raise
+        raise error(str(retry))  # noqa: B904
 
 
 def _source_id(obj: TargetObject) -> str:
@@ -269,10 +283,66 @@ class FakeWriter:
             return rejects
 
 
-class FakeReader:
-    """TargetReader over a FakeWriter's objects of one collection and tenant."""
+class FakeInsertClient:
+    """The part of a WeaviateClient that WeaviateWriter uses. Thread-safe.
 
-    def __init__(self, writer: FakeWriter) -> None:
+    Call `n` (1-based) of `insert_many` raises `fail(n)` when that returns an
+    error. Otherwise it stores the objects and reports no errors. `stored` has
+    the shape of `FakeWriter.stored`, so a FakeReader can read it.
+    """
+
+    def __init__(
+        self, fail: Callable[[int], Exception | None] = lambda n: None
+    ) -> None:
+        self.fail = fail
+        self.calls = 0
+        self.stored: dict[tuple[str, str | None], dict[str, TargetObject]] = {}
+        self.writes_per_uuid: Counter[str] = Counter()
+        self.collections = SimpleNamespace(
+            get=lambda name: _InsertCollection(self, name)
+        )
+        self._lock = threading.Lock()
+
+    def insert_many(
+        self, place: tuple[str, str | None], objects: list[Any]
+    ) -> SimpleNamespace:
+        with self._lock:
+            self.calls += 1
+            error = self.fail(self.calls)
+            if error is not None:
+                raise error
+            stored = self.stored.setdefault(place, {})
+            for obj in objects:
+                uuid = str(obj.uuid)
+                vectors = dict(obj.vector or {})
+                stored[uuid] = TargetObject(uuid, dict(obj.properties), vectors)
+                self.writes_per_uuid[uuid] += 1
+        return SimpleNamespace(errors={})
+
+
+class _InsertCollection:
+    def __init__(
+        self, client: FakeInsertClient, name: str, tenant: str | None = None
+    ) -> None:
+        self._client = client
+        self._name = name
+        self._tenant = tenant
+        self.data = SimpleNamespace(insert_many=self._insert_many)
+
+    def _insert_many(self, objects: list[Any]) -> SimpleNamespace:
+        return self._client.insert_many((self._name, self._tenant), objects)
+
+    def with_tenant(self, tenant: str) -> "_InsertCollection":
+        return _InsertCollection(self._client, self._name, tenant)
+
+    def with_consistency_level(self, level: Any) -> "_InsertCollection":
+        return self
+
+
+class FakeReader:
+    """TargetReader over the stored objects of a FakeWriter or FakeInsertClient."""
+
+    def __init__(self, writer: FakeWriter | FakeInsertClient) -> None:
         self.writer = writer
 
     def _objects(self, entry: CollectionPlan) -> dict[str, TargetObject]:
@@ -360,19 +430,22 @@ class FakeFactories:
 
     `source_error` is raised by the source factory, `target_error` by the
     writer, reader and schema factories, like a failed connection. The reader
-    reads what the writer stored.
+    reads what the writer stored. A WeaviateWriter over a FakeInsertClient
+    needs that client as `store`.
     """
 
     def __init__(
         self,
         source: FakeSource,
-        writer: FakeWriter | None = None,
+        writer: FakeWriter | WeaviateWriter | None = None,
         schema: FakeSchema | None = None,
         source_error: Exception | None = None,
         target_error: Exception | None = None,
+        store: FakeInsertClient | None = None,
     ) -> None:
         self.source = source
         self.writer = writer or FakeWriter()
+        self.store = store
         self.schema = schema or FakeSchema()
         self.source_error = source_error
         self.target_error = target_error
@@ -391,7 +464,7 @@ class FakeFactories:
 
     def _writer(
         self, settings: WeaviateSettings, consistency: str | None
-    ) -> FakeWriter:
+    ) -> FakeWriter | WeaviateWriter:
         if self.target_error is not None:
             raise self.target_error
         self.consistency.append(consistency)
@@ -400,7 +473,7 @@ class FakeFactories:
     def _reader(self, settings: WeaviateSettings) -> FakeReader:
         if self.target_error is not None:
             raise self.target_error
-        return FakeReader(self.writer)
+        return FakeReader(self.store or self.writer)
 
     def _schema(self, settings: WeaviateSettings) -> FakeSchema:
         self.schema_calls += 1

@@ -7,6 +7,7 @@ import pytest
 import typer
 from fakes import (
     FakeFactories,
+    FakeInsertClient,
     FakeSchema,
     FakeSource,
     FakeWriter,
@@ -19,6 +20,7 @@ from weaviate.exceptions import (
     UnexpectedStatusCodeError,
     WeaviateConnectionError,
     WeaviateGRPCUnavailableError,
+    WeaviateRetryError,
     WeaviateStartUpError,
     WeaviateTimeoutError,
 )
@@ -27,6 +29,7 @@ from to_weaviate.cli import app
 from to_weaviate.output import ERROR_EXIT, CliError
 from to_weaviate.plan import load_plan
 from to_weaviate.sources.chroma.client import ChromaError
+from to_weaviate.target.writer import WeaviateWriter
 
 COMMANDS = [["inspect", "chroma"], ["check"], ["copy"], ["status"]]
 PROGRESS = {
@@ -373,6 +376,18 @@ def test_other_weaviate_errors_are_target_unreachable():
     d = json.loads(r.stdout)
     assert d["code"] == "target_unreachable"
     assert "UnexpectedStatusCodeError" in d["message"] and "500" in d["message"]
+
+
+def test_copy_retries_a_retry_error_and_then_reports_target_unreachable():
+    client = FakeInsertClient(lambda n: WeaviateRetryError("UNAVAILABLE", 3))
+    writer = WeaviateWriter(client, sleep=lambda s: None)  # type: ignore[arg-type]
+    fakes = FakeFactories(FakeSource(cli_records(10)), writer=writer, store=client)
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json")
+    assert r.exit_code == 4
+    d = json.loads(r.stdout)
+    assert d["code"] == "target_unreachable" and "WeaviateRetryError" in d["message"]
+    assert client.calls == 6
 
 
 def test_click_errors_and_version_keep_their_behavior():

@@ -166,7 +166,7 @@ class FakeData:
         self.calls.append(objects)
         outcome = self.outcomes.pop(0) if self.outcomes else SimpleNamespace(errors={})
         if isinstance(outcome, str):
-            raise_grpc_failure(outcome, WeaviateBatchError)
+            raise_grpc_failure(outcome, WeaviateBatchError, batch=True)
         if isinstance(outcome, Exception):
             raise outcome
         return outcome

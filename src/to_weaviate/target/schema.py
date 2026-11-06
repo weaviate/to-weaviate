@@ -22,7 +22,7 @@ from weaviate.collections.classes.config import (
 from weaviate.exceptions import (
     UnexpectedStatusCodeError,
     WeaviateConnectionError,
-    WeaviateQueryError,
+    WeaviateRetryError,
     WeaviateTimeoutError,
 )
 
@@ -38,6 +38,7 @@ RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 GRPC_RETRY_STATUSES = frozenset(
     {"UNAVAILABLE", "DEADLINE_EXCEEDED", "RESOURCE_EXHAUSTED"}
 )
+CHAIN_DEPTH = 5
 
 _DATA_TYPES = {
     "text": DataType.TEXT,
@@ -106,16 +107,30 @@ def _grpc_status(exc: BaseException | None) -> str | None:
     return getattr(code(), "name", None) if callable(code) else None
 
 
+def _chain(exc: BaseException) -> list[BaseException]:
+    """`exc` and its causes and contexts, up to CHAIN_DEPTH links below it."""
+    found = [exc]
+    level = [exc]
+    for _ in range(CHAIN_DEPTH):
+        links = (e for error in level for e in (error.__cause__, error.__context__))
+        level = list({id(e): e for e in links if e is not None}.values())
+        found.extend(level)
+    return found
+
+
 def transient(exc: Exception) -> float | None:
     if isinstance(exc, WeaviateConnectionError | WeaviateTimeoutError):
         return 0.0
     if isinstance(exc, UnexpectedStatusCodeError) and exc.status_code in RETRY_STATUSES:
         return 0.0
-    # The client raises WeaviateQueryError inside the except block of the gRPC
-    # error, so that error is the cause or the context.
-    if isinstance(exc, WeaviateQueryError) and any(
-        _grpc_status(link) in GRPC_RETRY_STATUSES
-        for link in (exc.__cause__, exc.__context__)
+    # The client raises its own error inside the except block of the gRPC
+    # error, so the gRPC error is in the chain. After its own retries of
+    # UNAVAILABLE, the client raises WeaviateRetryError, or a query error inside
+    # the except block of one.
+    if any(
+        isinstance(link, WeaviateRetryError)
+        or _grpc_status(link) in GRPC_RETRY_STATUSES
+        for link in _chain(exc)
     ):
         return 0.0
     return None
