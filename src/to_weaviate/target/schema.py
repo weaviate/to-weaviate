@@ -108,7 +108,10 @@ def _grpc_status(exc: BaseException | None) -> str | None:
 
 
 def _chain(exc: BaseException) -> list[BaseException]:
-    """`exc` and its causes and contexts, up to CHAIN_DEPTH links below it."""
+    """`exc` and its causes and contexts, up to CHAIN_DEPTH links below it.
+
+    Nearer links come first. On one level a cause comes before a context.
+    """
     found = [exc]
     level = [exc]
     for _ in range(CHAIN_DEPTH):
@@ -124,15 +127,17 @@ def transient(exc: Exception) -> float | None:
     if isinstance(exc, UnexpectedStatusCodeError) and exc.status_code in RETRY_STATUSES:
         return 0.0
     # The client raises its own error inside the except block of the gRPC
-    # error, so the gRPC error is in the chain. After its own retries of
-    # UNAVAILABLE, the client raises WeaviateRetryError, or a query error inside
-    # the except block of one.
-    if any(
-        isinstance(link, WeaviateRetryError)
-        or _grpc_status(link) in GRPC_RETRY_STATUSES
-        for link in _chain(exc)
-    ):
-        return 0.0
+    # error, so the gRPC error is in the chain. Only the nearest gRPC error
+    # decides: the client's retry makes each attempt inside the except block of
+    # the one before, so a deeper link can be an earlier attempt. After its own
+    # retries of UNAVAILABLE, the client raises WeaviateRetryError, or a query
+    # error inside the except block of one.
+    for link in _chain(exc):
+        if isinstance(link, WeaviateRetryError):
+            return 0.0
+        status = _grpc_status(link)
+        if status is not None:
+            return 0.0 if status in GRPC_RETRY_STATUSES else None
     return None
 
 

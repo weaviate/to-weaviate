@@ -470,6 +470,23 @@ def test_transient_reads_the_chain_up_to_5_levels():
     assert schema.transient(_chain(6)) is None
 
 
+@pytest.mark.parametrize("status", ["INVALID_ARGUMENT", "PERMISSION_DENIED"])
+def test_transient_judges_the_nearest_grpc_error_only(status):
+    # The client's retry makes each attempt inside the except block of the
+    # attempt before, so an earlier UNAVAILABLE is the context of the last one.
+    with pytest.raises(WeaviateBatchError) as info:
+        try:
+            try:
+                raise FakeRpcError("UNAVAILABLE")
+            except FakeRpcError:
+                raise FakeRpcError(status)  # noqa: B904
+        except FakeRpcError:
+            raise WeaviateBatchError("fake")  # noqa: B904
+    earlier = info.value.__context__.__context__
+    assert isinstance(earlier, FakeRpcError) and earlier.status == "UNAVAILABLE"
+    assert schema.transient(info.value) is None
+
+
 def test_transient_stops_on_a_cyclic_chain_and_objects_without_code():
     first = ValueError("first")
     second = KeyError("second")
