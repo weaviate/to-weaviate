@@ -551,6 +551,57 @@ def test_connect_cloud(monkeypatch):
     assert seen["auth_credentials"] is not None and seen["headers"] is None
 
 
+HAND_WRITTEN_PLAN = """\
+version: 1
+source:
+  type: chroma
+  url: http://localhost:8001
+  tenant: null
+collections:
+- source:
+    ref: r
+    namespace: ns
+    name: docs
+    count: 1
+    dimension: 2
+    distance: cosine
+    embedding: null
+  target:
+    name: Docs
+    vectors:
+    - name: default
+      mode: embed
+      vectorizer:
+        module: text2vec-openai
+        options:
+          model: text-embedding-3-small
+          base_url: "https://bob:hunter2x@proxy.example.com/v1?token=abc#frag"
+    properties: []
+"""
+
+
+def test_kwargs_send_a_url_option_of_a_hand_written_plan_without_secrets(tmp_path):
+    path = tmp_path / "plan.yaml"
+    path.write_text(HAND_WRITTEN_PLAN)
+    k = collection_kwargs(p.load_plan(path).collections)
+    vectorizer = vec(k).vectorizer
+    assert str(vectorizer.baseURL) == "https://proxy.example.com/v1"
+    assert vectorizer.model == "text-embedding-3-small"
+    sent = repr(k)
+    for sentinel in ("bob", "hunter2x", "token", "abc", "frag"):
+        assert sentinel not in sent
+
+
+def test_kwargs_send_every_url_option_without_userinfo_query_or_fragment():
+    v = p.VectorizerPlan(
+        module="text2vec-ollama",
+        options={"api_endpoint": "http://bob:made-up@ollama:11434?k=made-up#f"},
+    )
+    k = collection_kwargs([entry(mode="embed", vectorizer=v)])
+    assert vec(k).vectorizer.apiEndpoint == "http://ollama:11434"
+    assert "made-up" not in repr(k) and "bob" not in repr(k)
+
+
 def test_kwargs_google_with_project_id_uses_vertex():
     v = p.VectorizerPlan(module="text2vec-google", options={"project_id": "proj"})
     k = collection_kwargs([entry(mode="embed", vectorizer=v)])
