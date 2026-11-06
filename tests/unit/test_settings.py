@@ -53,6 +53,51 @@ def test_repr_hides_secrets():
     assert "SENTINEL" not in repr(s)
 
 
+KEY_VARIABLES = ["CHROMA_API_KEY", "WEAVIATE_API_KEY", "OPENAI_API_KEY", "XAI_APIKEY"]
+
+
+@pytest.mark.parametrize("var", KEY_VARIABLES)
+@pytest.mark.parametrize(
+    "value",
+    [
+        "made\nup",
+        "made\tup",
+        "made\x00up",
+        "made\x7fup",
+        "made up",
+        " made-up",
+        "made-up\n",
+        "made-up\r",
+    ],
+)
+def test_key_with_a_control_character_is_refused(var, value):
+    env = {"WEAVIATE_URL": "http://localhost:8099", var: value}
+    load = chroma_settings if var == "CHROMA_API_KEY" else weaviate_settings
+    with pytest.raises(InvalidSetting) as e:
+        load(env)
+    assert str(e.value) == f"{var} holds a control character."
+    assert e.value.hint == (
+        f"Set {var} without control characters or leading and trailing whitespace."
+    )
+
+
+@pytest.mark.parametrize("var", KEY_VARIABLES)
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("made up", "made up"), ("madé-up", "madé-up"), ("", None), (" \n ", None)],
+)
+def test_key_without_a_control_character_is_kept(var, value, expected):
+    env = {"WEAVIATE_URL": "http://localhost:8099", var: value}
+    if var == "CHROMA_API_KEY":
+        env["CHROMA_URL"] = "http://localhost:8001"
+        assert chroma_settings(env).api_key == expected
+    elif var == "WEAVIATE_API_KEY":
+        assert weaviate_settings(env).api_key == expected
+    else:
+        headers = weaviate_settings(env).headers
+        assert list(headers.values()) == ([expected] if expected else [])
+
+
 def test_environ_wins_over_dotenv(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text("WEAVIATE_URL=from-file\n")
     monkeypatch.setenv("WEAVIATE_URL", "from-env")

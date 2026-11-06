@@ -291,6 +291,25 @@ def _get(env: Mapping[str, str], name: str) -> str | None:
     return value or None
 
 
+def _key(env: Mapping[str, str], name: str) -> str | None:
+    """The key in variable `name`, like `_get`, or InvalidSetting.
+
+    A key is refused when it holds a character for which `str.isprintable()`
+    is false, or when it has leading or trailing whitespace. Such a value
+    reaches h11, whose error text shows the header value in an escaped form
+    that `redact` may not match. An empty or blank value is not set.
+    """
+    raw = env.get(name, "")
+    value = raw.strip()
+    if value and (value != raw or not value.isprintable()):
+        raise InvalidSetting(
+            f"{name} holds a control character.",
+            f"Set {name} without control characters or leading and trailing "
+            "whitespace.",
+        )
+    return value or None
+
+
 def _is_chroma_cloud(host: str) -> bool:
     return host == CHROMA_CLOUD_DOMAIN or host.endswith("." + CHROMA_CLOUD_DOMAIN)
 
@@ -298,7 +317,7 @@ def _is_chroma_cloud(host: str) -> bool:
 def chroma_settings(env: Mapping[str, str]) -> ChromaSettings:
     settings = ChromaSettings(
         url=_get(env, "CHROMA_URL") or DEFAULT_CHROMA_URL,
-        api_key=_get(env, "CHROMA_API_KEY"),
+        api_key=_key(env, "CHROMA_API_KEY"),
         tenant=_get(env, "CHROMA_TENANT"),
         database=_get(env, "CHROMA_DATABASE"),
         token_header=_get(env, "CHROMA_TOKEN_HEADER") or DEFAULT_TOKEN_HEADER,
@@ -314,12 +333,12 @@ def weaviate_settings(env: Mapping[str, str]) -> WeaviateSettings:
         raise MissingCredential("WEAVIATE_URL")
     headers: dict[str, str] = {}
     for var, header in API_KEY_MAP.items():
-        value = _get(env, var)
+        value = _key(env, var)
         if value is not None and header not in headers:
             headers[header] = value
     return WeaviateSettings(
         url=url,
-        api_key=_get(env, "WEAVIATE_API_KEY"),
+        api_key=_key(env, "WEAVIATE_API_KEY"),
         grpc_url=_get(env, "WEAVIATE_GRPC_URL"),
         headers=headers,
     )

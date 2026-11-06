@@ -223,7 +223,7 @@ def test_secret_in_an_exception_is_redacted(mode):
 
 LONG_KEY = (
     "".join(chr(ord("a") + i * 7 % 26) for i in range(230))
-    + "\n"
+    + "é"
     + "".join(chr(ord("A") + i * 11 % 26) for i in range(230))
 )
 
@@ -248,11 +248,38 @@ def test_long_secret_is_redacted_before_shortening(mode):
 def test_secret_with_whitespace_is_redacted_before_collapsing(mode):
     fakes = FakeFactories(FakeSource(cli_records(10)))
     assert invoke(fakes, "inspect", "chroma").exit_code == 0
-    fakes.target_error = RuntimeError("headers: top\nsecret")
-    r = invoke(fakes, "check", *mode, WEAVIATE_API_KEY="top\nsecret")
+    fakes.target_error = RuntimeError("headers: top  secret")
+    r = invoke(fakes, "check", *mode, WEAVIATE_API_KEY="top  secret")
     assert r.exit_code == 5
     assert "top secret" not in r.output and "top\nsecret" not in r.output
     assert "secret" not in r.output
+
+
+@pytest.mark.parametrize("mode", [[], ["--json"]])
+@pytest.mark.parametrize(
+    ("cmd", "var"),
+    [
+        (["check"], "WEAVIATE_API_KEY"),
+        (["check"], "OPENAI_API_KEY"),
+        (["inspect", "chroma", "--force"], "CHROMA_API_KEY"),
+    ],
+)
+def test_key_with_a_control_character_is_a_usage_error(cmd, var, mode):
+    key = "B5-MADE-UP\nKEY-VALUE"
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    fakes.source_error = ChromaError(None, f"Illegal header value {key.encode()!r}")
+    fakes.target_error = httpx.LocalProtocolError(f"Illegal header {key.encode()!r}")
+    r = invoke(fakes, *cmd, *mode, TO_WEAVIATE_DEBUG="1", **{var: key})
+    assert r.exit_code == 2, r.output
+    message = f"{var} holds a control character."
+    if mode:
+        d = json.loads(r.stdout)
+        assert (d["code"], d["message"]) == ("usage", message)
+    else:
+        assert f"Error: {message}" in r.stderr
+    for part in ("B5-MADE", "UP\\nKEY", "KEY-VALUE"):
+        assert part not in r.output
 
 
 def test_url_password_is_not_stored_or_printed(tmp_path):
