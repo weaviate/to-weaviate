@@ -144,6 +144,7 @@ EDIT_PLAN_HINT = (
     "Edit plan.yaml, or run to-weaviate inspect chroma --force to draft it again."
 )
 CHROMA_HINT = "Check CHROMA_URL and that the Chroma server is running."
+NO_COLLECTION_HINT = "Check --database, CHROMA_DATABASE and CHROMA_TENANT."
 WEAVIATE_HINT = (
     "Check WEAVIATE_URL, WEAVIATE_GRPC_URL and that the Weaviate server is running."
 )
@@ -357,7 +358,7 @@ def _load_plan(directory: Path) -> Plan:
     if not path.exists():
         raise CliError("usage", f"{path} does not exist.", INSPECT_HINT)
     try:
-        return load_plan(path)
+        plan = load_plan(path)
     except (ValidationError, yaml.YAMLError) as exc:
         detail = _validation_text(exc) if isinstance(exc, ValidationError) else str(exc)
         raise CliError(
@@ -365,6 +366,13 @@ def _load_plan(directory: Path) -> Plan:
             f"{path} is not a valid plan: {detail}",
             EDIT_PLAN_HINT,
         ) from exc
+    if not plan.collections:
+        raise CliError(
+            "invalid_plan",
+            f"{path} is not a valid plan: collections is empty.",
+            EDIT_PLAN_HINT,
+        )
+    return plan
 
 
 def _source_collection(raw: dict[str, Any]) -> SourceCollection:
@@ -466,6 +474,15 @@ def _vectors_text(entry: CollectionPlan) -> str:
     return ", ".join(parts)
 
 
+def _no_collection(tenant: str, databases: list[str]) -> CliError:
+    """The error of an inspection that found no collection in `databases`."""
+    if databases:
+        where = f"has no collection in database {', '.join(databases)}"
+    else:
+        where = "has no database"
+    return CliError("usage", f"Chroma tenant {tenant} {where}.", NO_COLLECTION_HINT)
+
+
 def _inspect_chroma(
     factories: _Factories,
     directory: Path,
@@ -504,6 +521,8 @@ def _inspect_chroma(
             "Check the --collection names, and --database or CHROMA_DATABASE for "
             "another database.",
         )
+    if not collections:
+        raise _no_collection(source.tenant, databases or source.namespaces())
     try:
         plan = draft_plan(
             SourcePlan(

@@ -90,15 +90,20 @@ class ChromaSource:
             where=where,
         )
 
+    @property
+    def tenant(self) -> str:
+        return self._tenant
+
+    def namespaces(self) -> list[str]:
+        return self._client.databases(self._tenant)
+
     def inspect(
         self,
         namespaces: list[str] | None,
         collections: list[str] | None,
         sample_pages: int | None,
     ) -> list[SourceCollection]:
-        databases = (
-            self._client.databases(self._tenant) if namespaces is None else namespaces
-        )
+        databases = self.namespaces() if namespaces is None else namespaces
         found: list[SourceCollection] = []
         for database in databases:
             for raw in self._client.collections(self._tenant, database):

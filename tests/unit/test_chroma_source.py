@@ -248,6 +248,11 @@ def test_count(source, inspected):
     assert source.count(inspected) == 650
 
 
+def test_tenant_and_namespaces(source):
+    assert source.tenant == "t"
+    assert source.namespaces() == ["db"]
+
+
 def test_sample_size_and_offsets(source, inspected):
     records = source.sample(inspected, 100, random.Random(1), False)
     assert 0 < len(records) <= 100

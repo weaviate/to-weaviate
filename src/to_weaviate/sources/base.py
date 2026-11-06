@@ -50,6 +50,13 @@ class Source(Protocol):
     name: ClassVar[str]
     capabilities: ClassVar[frozenset[str]]  # subset of vectors, vector_search, filter
 
+    @property
+    def tenant(self) -> str: ...
+
+    def namespaces(self) -> list[str]:
+        """Every namespace of the tenant, in the order the source lists them."""
+        ...
+
     def inspect(
         self,
         namespaces: list[str] | None,

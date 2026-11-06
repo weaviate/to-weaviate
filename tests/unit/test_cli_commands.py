@@ -306,12 +306,13 @@ DB = FakeSource.NAMESPACE
 
 
 # `asked` is the namespaces argument the source receives; None asks for all.
-# `recorded` is the database of each plan entry.
+# `recorded` is the database of each plan entry. None means that inspect finds
+# no collection there and exits 2.
 @pytest.mark.parametrize(
     "variable, args, asked, recorded",
     [
         pytest.param(DB, [], [DB], [DB], id="variable"),
-        pytest.param(DB, ["--database", "other"], ["other"], [], id="option-wins"),
+        pytest.param(DB, ["--database", "other"], ["other"], None, id="option-wins"),
         pytest.param(None, [], None, [DB], id="neither"),
     ],
 )
@@ -320,10 +321,112 @@ def test_inspect_databases(tmp_path, variable, args, asked, recorded):
     r = invoke(
         FakeFactories(source), "inspect", "chroma", *args, CHROMA_DATABASE=variable
     )
-    assert r.exit_code == 0, r.output
     assert source.inspected_namespaces == [asked]
+    if recorded is None:
+        assert r.exit_code == 2 and "in database other." in r.output, r.output
+        return
+    assert r.exit_code == 0, r.output
     plan = load_plan(tmp_path / DIR / "plan.yaml")
     assert [e.source.namespace for e in plan.collections] == recorded
+
+
+NO_COLLECTION_HINT = "Check --database, CHROMA_DATABASE and CHROMA_TENANT."
+
+
+class NoCollections:
+    """The ChromaClient calls that inspect makes, for databases without collections."""
+
+    def __init__(self, databases: list[str]) -> None:
+        self.names = databases
+
+    def databases(self, tenant: str) -> list[str]:
+        return self.names
+
+    def collections(self, tenant: str, database: str) -> list[dict[str, Any]]:
+        return []
+
+
+def error_of(r: Result) -> tuple[int, str, str, str]:
+    d = json.loads(r.stdout)
+    assert (r.exit_code, d["status"]) != (0, "success"), r.output
+    return r.exit_code, d["code"], d["message"], d["hint"]
+
+
+def test_inspect_that_finds_no_collection_exits_2_and_writes_no_file(tmp_path):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    r = invoke(fakes, "inspect", "chroma", "--database", "nope", "--json")
+    assert error_of(r) == (
+        2,
+        "usage",
+        f"Chroma tenant {FakeSource.TENANT} has no collection in database nope.",
+        NO_COLLECTION_HINT,
+    )
+    assert not (tmp_path / DIR).exists()
+    for command in ("check", "copy", "verify", "status"):
+        r = invoke(fakes, command, "--json")
+        assert r.exit_code == 2 and json.loads(r.stdout)["code"] == "usage", r.output
+
+
+@pytest.mark.parametrize(
+    "args, variable, searched",
+    [
+        pytest.param(
+            ["--database", "zeta", "--database", "alpha"],
+            None,
+            "zeta, alpha",
+            id="options",
+        ),
+        pytest.param([], "nope", "nope", id="variable"),
+    ],
+)
+def test_inspect_that_finds_no_collection_names_the_databases_in_search_order(
+    args, variable, searched
+):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    r = invoke(fakes, "inspect", "chroma", *args, "--json", CHROMA_DATABASE=variable)
+    assert error_of(r)[:3] == (
+        2,
+        "usage",
+        f"Chroma tenant {FakeSource.TENANT} has no collection in database "
+        f"{searched}.",
+    )
+
+
+def test_inspect_of_every_database_names_them_in_the_order_chroma_lists_them():
+    source = ChromaSource(NoCollections(["db-b", "db-a"]), "t")
+    r = invoke(FakeFactories(source), "inspect", "chroma", "--json")  # type: ignore[arg-type]
+    assert error_of(r) == (
+        2,
+        "usage",
+        "Chroma tenant t has no collection in database db-b, db-a.",
+        NO_COLLECTION_HINT,
+    )
+    assert not DIR.exists()
+
+
+def test_inspect_of_a_tenant_without_a_database_exits_2():
+    source = ChromaSource(NoCollections([]), "t")
+    r = invoke(FakeFactories(source), "inspect", "chroma", "--json")  # type: ignore[arg-type]
+    assert error_of(r) == (
+        2,
+        "usage",
+        "Chroma tenant t has no database.",
+        NO_COLLECTION_HINT,
+    )
+    assert not DIR.exists()
+
+
+@pytest.mark.parametrize("command", ["check", "copy", "verify", "status"])
+def test_plan_without_a_collection_is_refused_on_load(tmp_path, command):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    path = tmp_path / DIR / "plan.yaml"
+    save_plan(load_plan(path).model_copy(update={"collections": []}), path)
+    r = invoke(fakes, command, "--json")
+    assert error_of(r)[:3] == (
+        2,
+        "invalid_plan",
+        f"{DIR / 'plan.yaml'} is not a valid plan: collections is empty.",
+    )
 
 
 M = "vector index dynamic needs async indexing"
