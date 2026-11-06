@@ -165,6 +165,33 @@ def test_draft_keep_vectorizer_argument_wins_over_the_mapper():
     assert target(plan).vectors[0].vectorizer == chosen
 
 
+@pytest.mark.parametrize("vectors", ["keep", "embed", "both"])
+def test_draft_puts_the_source_notes_first(vectors):
+    c, other = make(), make("other", ref="r2")
+    plan = draft_plan(
+        SRC, [c, other], vectors, source_notes={c.ref: ["from the source"]}
+    )
+    assert plan.collections[0].notes[0] == "from the source"
+    assert "from the source" not in plan.collections[1].notes
+
+
+def test_load_accepts_a_plan_with_the_full_embedding_config(tmp_path):
+    full = {
+        "type": "known",
+        "name": "openai",
+        "config": {
+            "api_key_env_var": "OPENAI_API_KEY",
+            "model_name": "m",
+            "api_base": "https://bob:made-up-pw@proxy.example.com/v1",
+            "default_headers": {"X-Custom": "made-up-header"},
+            "organization_id": None,
+        },
+    }
+    plan = draft_plan(SRC, [make(embedding=full)], "keep")
+    save_plan(plan, tmp_path / "plan.yaml")
+    assert load_plan(tmp_path / "plan.yaml").collections[0].source.embedding == full
+
+
 def test_draft_keep_without_mapper_has_no_vectorizer():
     assert target(draft_plan(SRC, [make()], "keep")).vectors[0].vectorizer is None
 

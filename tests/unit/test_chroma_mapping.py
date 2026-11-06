@@ -1,7 +1,11 @@
 import pytest
 
 from to_weaviate.plan import CollectionPlan, SourceRef, TargetPlan, VectorPlan
-from to_weaviate.sources.chroma.mapping import vectorizer_for
+from to_weaviate.sources.chroma.mapping import (
+    CONFIG_KEYS,
+    stored_embedding,
+    vectorizer_for,
+)
 from to_weaviate.target.schema import collection_kwargs
 
 
@@ -261,3 +265,109 @@ def test_chroma_hosted_model_note():
 def test_unmapped_name_is_named_in_a_note():
     v, notes = vectorizer_for(known("onnx_thing"))
     assert v is None and any("onnx_thing" in n for n in notes)
+
+
+def test_config_keys_are_the_keys_the_mapping_reads():
+    assert CONFIG_KEYS == {
+        "openai": {"model_name", "dimensions", "api_base", "api_type"},
+        "cohere": {"model_name"},
+        "jina": {"model_name", "dimensions"},
+        "voyageai": {"model_name"},
+        "mistral": {"model"},
+        "huggingface": {"model_name"},
+        "google_generative_ai": {"model_name", "dimension"},
+        "google_gemini": {"model_name", "vertexai", "project", "location"},
+        "google_vertex": {"model_name", "project_id", "region"},
+        "ollama": {"url", "model_name"},
+    }
+
+
+def test_stored_embedding_keeps_only_the_listed_keys():
+    embedding = {
+        **known(
+            "openai",
+            api_key_env_var="OPENAI_API_KEY",
+            model_name="m",
+            api_base="https://bob:made-up-pw@proxy.example.com/v1?k=made-up-q#f",
+            default_headers={"Authorization": "Bearer made-up-header"},
+            organization_id=None,
+            api_type=None,
+        ),
+        "extra": "made-up-extra",
+    }
+    stored, notes = stored_embedding(embedding)
+    assert stored == {
+        "type": "known",
+        "name": "openai",
+        "config": {
+            "model_name": "m",
+            "api_base": "https://proxy.example.com/v1",
+            "api_type": None,
+        },
+    }
+    assert len(notes) == 1
+    for key in ("api_key_env_var", "default_headers", "extra", "organization_id"):
+        assert key in notes[0]
+    for value in ("made-up", "bob", "OPENAI_API_KEY"):
+        assert value not in notes[0]
+
+
+def test_stored_embedding_of_an_unmapped_function_keeps_no_config_key():
+    stored, notes = stored_embedding(known("onnx_thing", token="made-up-token"))
+    assert stored == {"type": "known", "name": "onnx_thing", "config": {}}
+    assert len(notes) == 1 and "token" in notes[0] and "made-up" not in notes[0]
+
+
+def test_stored_embedding_cleans_the_ollama_url():
+    stored, _ = stored_embedding(
+        known("ollama", url="http://u:made-up@ollama:11434/api?x=1#f", model_name="n")
+    )
+    assert stored is not None
+    assert stored["config"] == {"url": "http://ollama:11434/api", "model_name": "n"}
+
+
+def test_stored_embedding_without_dropped_keys_has_no_note():
+    embedding = known("cohere", model_name="c")
+    assert stored_embedding(embedding) == (embedding, [])
+
+
+def test_stored_embedding_of_none():
+    assert stored_embedding(None) == (None, [])
+
+
+def test_keys_outside_the_table_are_ignored():
+    full = known(
+        "openai",
+        api_key_env_var="OPENAI_API_KEY",
+        model_name="m",
+        api_base="https://proxy.example.com/v1",
+        default_headers={"X-Custom": "made-up"},
+        organization_id="o",
+    )
+    stored, _ = stored_embedding(full)
+    assert vectorizer_for(full) == vectorizer_for(stored)
+
+
+@pytest.mark.parametrize(
+    ("name", "config", "options"),
+    [
+        (
+            "openai",
+            {
+                "model_name": "m",
+                "api_base": "https://bob:made-up-pw@proxy.example.com/v1?k=made-up#f",
+            },
+            {"model": "m", "base_url": "https://proxy.example.com"},
+        ),
+        (
+            "ollama",
+            {"model_name": "n", "url": "http://bob:made-up-pw@ollama:11434?k=made-up"},
+            {"model": "n", "api_endpoint": "http://ollama:11434"},
+        ),
+    ],
+)
+def test_vectorizer_options_have_no_userinfo_query_or_fragment(name, config, options):
+    v, notes = vectorizer_for(known(name, **config))
+    assert v is not None
+    assert v.options == options
+    assert not [n for n in notes if "made-up" in n or "bob" in n]

@@ -1,6 +1,7 @@
 from typing import Any, NamedTuple
 
 from to_weaviate.plan import VectorizerPlan
+from to_weaviate.settings import stored_url
 
 # The OpenAI client's default base URL, https://api.openai.com/v1, after
 # `_openai_base`. Weaviate uses it when base_url is not set.
@@ -54,6 +55,61 @@ _GEMINI_VERTEX = _Function(
     ("model_name", "project"),
 )
 
+# Config keys that `vectorizer_for` reads, per Chroma embedding function.
+# inspect.json and plan.yaml store only these keys. default_headers is never
+# one of them, because a header can hold a token.
+CONFIG_KEYS: dict[str, frozenset[str]] = {
+    **{name: frozenset(function.renames) for name, function in _FUNCTIONS.items()},
+    "openai": frozenset({*_FUNCTIONS["openai"].renames, "api_type"}),
+    "google_gemini": frozenset(
+        {*_FUNCTIONS["google_gemini"].renames, *_GEMINI_VERTEX.renames, "vertexai"}
+    ),
+}
+_URL_KEYS = frozenset({"api_base", "url"})
+_EMBEDDING_KEYS = frozenset({"type", "name", "config"})
+
+
+def _config_of(embedding: dict[str, Any]) -> dict[str, Any]:
+    config = embedding.get("config")
+    return config if isinstance(config, dict) else {}
+
+
+def _stored_config(name: Any, config: dict[str, Any]) -> dict[str, Any]:
+    """The keys of `config` in CONFIG_KEYS; URL values via `stored_url`."""
+    keys = CONFIG_KEYS.get(name, frozenset())
+    return {
+        key: stored_url(value) if key in _URL_KEYS and isinstance(value, str) else value
+        for key, value in config.items()
+        if key in keys
+    }
+
+
+def stored_embedding(
+    embedding: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """`embedding` as inspect.json and plan.yaml store it, and notes.
+
+    The stored form has the type, the name and the config keys in
+    CONFIG_KEYS. A URL value has no userinfo, query or fragment. The note
+    names the dropped keys, never their values.
+    """
+    if embedding is None:
+        return None, []
+    name = embedding.get("name")
+    config = _config_of(embedding)
+    kept = _stored_config(name, config)
+    stored = {"type": embedding.get("type"), "name": name, "config": kept}
+    dropped = sorted(
+        {key for key in embedding if key not in _EMBEDDING_KEYS}
+        | {key for key in config if key not in kept}
+    )
+    if not dropped:
+        return stored, []
+    return stored, [
+        f"The keys {', '.join(dropped)} of the embedding function {name!r} are "
+        "not stored; the mapping does not read them."
+    ]
+
 
 def _openai_base(api_base: str) -> str:
     """`api_base` without one trailing `/v1` and without a trailing slash.
@@ -77,7 +133,7 @@ def vectorizer_for(
     if embedding is None:
         return None, []
     name = embedding.get("name")
-    config = embedding.get("config") or {}
+    config = _stored_config(name, _config_of(embedding))
 
     if name == "default":
         return None, [

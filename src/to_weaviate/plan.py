@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Literal
 
@@ -223,8 +223,9 @@ def _draft_collection(
     vectorizer: VectorizerPlan | None,
     index: IndexPlan,
     vectorizer_for: VectorizerMapper | None,
+    source_notes: list[str],
 ) -> CollectionPlan:
-    notes: list[str] = []
+    notes = list(source_notes)
     name = collection_name(source.name, taken_names)
     taken_names.add(name)
     props, dropped = _properties(source)
@@ -297,11 +298,19 @@ def draft_plan(
     vectorizer: VectorizerPlan | None = None,
     index: IndexPlan | None = None,
     vectorizer_for: VectorizerMapper | None = None,
+    source_notes: Mapping[str, list[str]] | None = None,
 ) -> Plan:
+    """A plan for `collections`. `source_notes` holds notes by source ref."""
     taken: set[str] = set()
     drafted = [
         _draft_collection(
-            c, taken, vectors, vectorizer, index or IndexPlan(), vectorizer_for
+            c,
+            taken,
+            vectors,
+            vectorizer,
+            index or IndexPlan(),
+            vectorizer_for,
+            (source_notes or {}).get(c.ref, []),
         )
         for c in collections
     ]
