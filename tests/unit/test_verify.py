@@ -1,5 +1,7 @@
 import json
+import math
 import random
+import struct
 from dataclasses import replace
 from pathlib import Path
 
@@ -20,6 +22,7 @@ from to_weaviate.engine.verify import (
 )
 from to_weaviate.plan import load_plan, save_plan
 from to_weaviate.sources.base import Record, SourceCollection
+from to_weaviate.sources.chroma.client import ChromaError
 from to_weaviate.target.writer import TargetObject, to_object
 
 DIR = Path(".to-weaviate")
@@ -257,6 +260,47 @@ def test_vector_of_another_length_fails():
     assert '"id-6"' in check.detail and "vector default" in check.detail
 
 
+def float32(value: float) -> float:
+    return float(struct.unpack("<f", struct.pack("<f", value))[0])
+
+
+def test_source_vector_is_compared_as_float32():
+    records = [replace(r, vector=[300.123, 1.0]) for r in make_records(10)]
+    assert abs(300.123 - float32(300.123)) > 1e-5
+    stored = [
+        replace(o, vectors={"default": [float32(300.123), 1.0]})
+        for o in converted(records, ENTRY)
+    ]
+    check = records_check(records, ENTRY, stored)
+    assert check.passed, check.detail
+
+
+def test_source_vector_outside_the_float32_range_fails():
+    records = make_records(10)
+    stored = converted(records, ENTRY)
+    records[4] = replace(records[4], vector=[1e39, 1.0])
+    check = records_check(records, ENTRY, stored)
+    assert not check.passed
+    assert '"id-4": vector default' in check.detail
+    assert "float32 range" in check.detail
+
+
+def test_nan_in_the_source_vector_fails():
+    records = make_records(10)
+    stored = converted(records, ENTRY)
+    records[3] = replace(records[3], vector=[math.nan, 1.0])
+    check = records_check(records, ENTRY, stored)
+    assert not check.passed and '"id-3": vector default' in check.detail
+
+
+def test_nan_in_the_stored_vector_fails():
+    records = make_records(10)
+    stored = converted(records, ENTRY)
+    stored[3] = replace(stored[3], vectors={"default": [math.nan, math.nan]})
+    check = records_check(records, ENTRY, stored)
+    assert not check.passed and '"id-3": vector default' in check.detail
+
+
 def test_embed_mode_skips_vector_equality():
     entry = make_entry("embed")
     records = make_records(10)
@@ -488,3 +532,39 @@ def test_verify_before_copy_fails_one_count_check(in_tmp):
             "tenant": None,
         }
     ]
+
+
+@pytest.mark.parametrize(("sample", "exit_code"), [("10000", 0), ("10001", 2)])
+def test_sample_accepts_at_most_10000(in_tmp, sample, exit_code):
+    r = invoke(copied(), "verify", "--sample", sample, "--json")
+    assert r.exit_code == exit_code, r.output
+    if exit_code == 2:
+        assert r.stdout == "" and "Invalid value" in r.stderr
+
+
+class FailingIdsSource(FakeSource):
+    """FakeSource whose ids() raises `ids_error`, when it is set, after five ids."""
+
+    ids_error: Exception | None = None
+
+    def ids(self, collection):
+        for position, record_id in enumerate(super().ids(collection)):
+            if self.ids_error is not None and position == 5:
+                raise self.ids_error
+            yield record_id
+
+
+def test_failed_verify_leaves_no_old_report(in_tmp):
+    source = FailingIdsSource(cli_records(10))
+    fakes = FakeFactories(source)
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    assert invoke(fakes, "copy").exit_code == 0
+    assert invoke(fakes, "verify").exit_code == 0
+    assert (DIR / "report.md").exists() and (DIR / "report.json").exists()
+    source.ids_error = ChromaError(None, "ConnectError: connection refused")
+    r = invoke(fakes, "verify", "--json")
+    assert r.exit_code == 4, r.output
+    assert json.loads(r.stdout)["code"] == "source_unreachable"
+    assert not (DIR / "report.md").exists()
+    assert not (DIR / "report.json").exists()
+    assert list(DIR.glob("verify-*")) == []

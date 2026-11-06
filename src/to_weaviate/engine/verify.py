@@ -3,6 +3,7 @@ import json
 import math
 import random
 import sqlite3
+import struct
 import tempfile
 from collections.abc import Iterable, Iterator
 from contextlib import closing
@@ -173,6 +174,18 @@ def _same(expected: Any, found: Any) -> bool:
     return bool(expected == found)
 
 
+def _float32(values: list[float]) -> list[float] | None:
+    """`values` rounded to float32, as the target stores them.
+
+    None when a value is outside the float32 range.
+    """
+    layout = f"<{len(values)}f"
+    try:
+        return list(struct.unpack(layout, struct.pack(layout, *values)))
+    except OverflowError:
+        return None
+
+
 def _vector_problem(
     name: str, expected: list[float], found: list[float] | None
 ) -> str | None:
@@ -180,7 +193,12 @@ def _vector_problem(
         return f"vector {name} is missing"
     if len(found) != len(expected):
         return f"vector {name} has length {len(found)}, the source has {len(expected)}"
-    worst = max((abs(a - b) for a, b in zip(expected, found, strict=True)), default=0.0)
+    rounded = _float32(expected)
+    if rounded is None:
+        return f"vector {name} has a source value outside the float32 range"
+    if not all(math.isfinite(value) for value in (*rounded, *found)):
+        return f"vector {name} holds a NaN or an infinite value"
+    worst = max((abs(a - b) for a, b in zip(rounded, found, strict=True)), default=0.0)
     if worst > VECTOR_TOLERANCE:
         return f"vector {name} differs by up to {worst:.3g}"
     return None
@@ -250,6 +268,12 @@ def check_line(check: Check) -> str:
     status = "PASS" if check.passed else "FAIL"
     place = target_label(check.collection, check.tenant)
     return f"{status} {place} {check.name}: {check.detail}"
+
+
+def remove_report(directory: Path) -> None:
+    """Remove report.md and report.json from `directory` when they exist."""
+    for name in (REPORT_MD, REPORT_JSON):
+        (directory / name).unlink(missing_ok=True)
 
 
 def write_report(checks: list[Check], directory: Path) -> None:

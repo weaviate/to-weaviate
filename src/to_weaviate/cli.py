@@ -57,6 +57,7 @@ from to_weaviate.engine.verify import (
     check_line,
     diff_ids,
     missing_target,
+    remove_report,
     target_label,
     verify_counts,
     verify_ids,
@@ -126,6 +127,7 @@ REJECTS_FILE = "rejects.jsonl"
 DEFAULT_PARALLELISM = 5
 MAX_PARALLELISM = 8
 DEFAULT_SAMPLE = 300
+MAX_SAMPLE = 10_000
 MAX_MESSAGE_CHARS = 500
 
 INSPECT_HINT = "Run to-weaviate inspect chroma to create it."
@@ -749,6 +751,8 @@ def _verify(
     quick: bool,
     json_output: bool,
 ) -> None:
+    # A run that fails must not leave the report of an earlier run.
+    remove_report(directory)
     plan, inspected = _load_plan_and_inspection(directory)
     env = load_env(Path.cwd())
     source_settings = chroma_settings(env)
@@ -956,8 +960,9 @@ def build_app(
             typer.Option(
                 "--sample",
                 min=1,
+                max=MAX_SAMPLE,
                 metavar="N",
-                help="Records to compare per collection.",
+                help=f"Records to compare per collection, 1 to {MAX_SAMPLE}.",
             ),
         ] = DEFAULT_SAMPLE,
         quick: Annotated[
