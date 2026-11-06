@@ -17,6 +17,9 @@ class Events:
         self._lock = threading.Lock()
         self._last_progress: dict[str, float] = {}
 
+    def close(self) -> None:
+        """No-op: each line is written through a short-lived file handle."""
+
     def emit(self, level: str, event: str, **fields: Any) -> None:
         with self._lock:
             self._write(level, event, fields)

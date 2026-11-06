@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from to_weaviate.events import Events
 
 
@@ -10,6 +12,21 @@ class FakeClock:
 
     def __call__(self) -> float:
         return self.now
+
+
+@pytest.fixture(autouse=True)
+def _close_events(monkeypatch):
+    opened: list[Events] = []
+    original = Events.__init__
+
+    def init(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        opened.append(self)
+
+    monkeypatch.setattr(Events, "__init__", init)
+    yield
+    for ev in opened:
+        ev.close()
 
 
 def read(path: Path) -> list[dict]:

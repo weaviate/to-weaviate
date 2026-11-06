@@ -62,6 +62,10 @@ class State:
         with self._lock, self._db:
             self._db.executescript(_SCHEMA)
 
+    def close(self) -> None:
+        with self._lock:
+            self._db.close()
+
     def init_collection(
         self, ref: str, partitions: list[Partition], total: int
     ) -> None:
@@ -101,17 +105,22 @@ class State:
             self._insert_partitions(ref, [partition])
 
     def add_rejects(self, ref: str, rejects: list[Reject]) -> None:
-        with self._lock:
+        """Store rejects and append the new ones to rejects.jsonl.
+
+        The file lines are written and closed before the sqlite commit. A crash
+        between the two leaves a line without a row, and the retry writes that
+        line again. A duplicate line is accepted, a missing line is not.
+        """
+        with self._lock, self._db:
             added: list[Reject] = []
-            with self._db:
-                for reject in rejects:
-                    cur = self._db.execute(
-                        "INSERT OR IGNORE INTO rejects (ref, source_id, reason) "
-                        "VALUES (?, ?, ?)",
-                        (ref, reject.source_id, reject.reason),
-                    )
-                    if cur.rowcount:
-                        added.append(reject)
+            for reject in rejects:
+                cur = self._db.execute(
+                    "INSERT OR IGNORE INTO rejects (ref, source_id, reason) "
+                    "VALUES (?, ?, ?)",
+                    (ref, reject.source_id, reject.reason),
+                )
+                if cur.rowcount:
+                    added.append(reject)
             if added:
                 with self._rejects_path.open("a", encoding="utf-8") as handle:
                     for reject in added:

@@ -1,6 +1,9 @@
 import json
 import threading
+import time
 from pathlib import Path
+
+import pytest
 
 from to_weaviate.sources.base import Partition
 from to_weaviate.state import CollectionProgress, State
@@ -9,8 +12,20 @@ from to_weaviate.target.writer import Reject
 REF = "default/c1"
 
 
+_opened: list[State] = []
+
+
+@pytest.fixture(autouse=True)
+def _close_states():
+    yield
+    while _opened:
+        _opened.pop().close()
+
+
 def make_state(tmp_path: Path) -> State:
-    return State(tmp_path / "state" / "state.sqlite")
+    state = State(tmp_path / "state" / "state.sqlite")
+    _opened.append(state)
+    return state
 
 
 def parts(*keys: str) -> list[Partition]:
@@ -31,7 +46,7 @@ def test_cursor_survives_reopen(tmp_path):
     part = Partition("0-300", "0", "300")
     state.init_collection(REF, [part], 300)
     state.advance(REF, "0-300", "150", 150)
-    assert State(tmp_path / "state" / "state.sqlite").pending(REF) == [(part, "150")]
+    assert make_state(tmp_path).pending(REF) == [(part, "150")]
 
 
 def test_pending_cursor_is_none_before_first_advance(tmp_path):
@@ -156,21 +171,99 @@ def test_reset_clears_stored_rejects_and_keeps_file(tmp_path):
     assert len((tmp_path / "state" / "rejects.jsonl").read_text().splitlines()) == 1
 
 
-def test_concurrent_advance_and_add_rejects_lose_nothing(tmp_path):
+def test_rejects_file_failure_leaves_no_rows_and_retry_writes_lines(tmp_path):
     state = make_state(tmp_path)
+    state.init_collection(REF, parts("a"), 10)
+    rejects_file = tmp_path / "state" / "rejects.jsonl"
+    rejects = [Reject("r1", "bad"), Reject("r2", "worse")]
+    rejects_file.mkdir()
+    with pytest.raises(OSError):
+        state.add_rejects(REF, rejects)
+    assert state.progress()[0].rejects == 0
+    rejects_file.rmdir()
+    state.add_rejects(REF, rejects)
+    lines = rejects_file.read_text().splitlines()
+    assert [json.loads(line)["source_id"] for line in lines] == ["r1", "r2"]
+    assert state.progress()[0].rejects == 2
+
+
+class OverlapProxy:
+    """Reports two threads between a first execute and the commit."""
+
+    def __init__(self, conn):
+        self._conn = conn
+        self._guard = threading.Lock()
+        self._owner = None
+        self.overlap = False
+
+    def __enter__(self):
+        self._conn.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            return self._conn.__exit__(*exc)
+        finally:
+            self._owner = None
+
+    def execute(self, *args):
+        me = threading.get_ident()
+        with self._guard:
+            if self._owner not in (None, me):
+                self.overlap = True
+            self._owner = me
+        time.sleep(0.002)
+        return self._conn.execute(*args)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+class NoLock:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def run_workload(state: State, threads_n: int = 4, per_thread: int = 10) -> None:
     state.init_collection(REF, parts("a"), 10_000)
-    threads_n, per_thread = 8, 50
 
     def work(n: int) -> None:
-        for i in range(per_thread):
-            state.advance(REF, "a", str(i), 1)
-            state.add_rejects(REF, [Reject(f"{n}-{i}", "bad")])
+        try:
+            for i in range(per_thread):
+                state.advance(REF, "a", str(i), 1)
+                state.add_rejects(REF, [Reject(f"{n}-{i}", "bad")])
+        except Exception:  # noqa: BLE001
+            pass  # sqlite may fail when the lock is removed
 
     threads = [threading.Thread(target=work, args=(n,)) for n in range(threads_n)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
+
+
+def test_lock_keeps_statement_spans_from_overlapping(tmp_path):
+    state = make_state(tmp_path)
+    real = state._db
+    proxy = OverlapProxy(real)
+    state._db = proxy
+    run_workload(state)
+    state._db = real
+    assert not proxy.overlap
     result = state.progress()[0]
-    assert result.copied == threads_n * per_thread
-    assert result.rejects == threads_n * per_thread
+    assert result.copied == 40
+    assert result.rejects == 40
+
+
+def test_overlap_proxy_detects_missing_lock(tmp_path):
+    state = make_state(tmp_path)
+    real = state._db
+    proxy = OverlapProxy(real)
+    state._db = proxy
+    state._lock = NoLock()
+    run_workload(state)
+    state._db = real
+    assert proxy.overlap
