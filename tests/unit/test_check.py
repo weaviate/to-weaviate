@@ -182,18 +182,18 @@ def test_duplicate_source_names_each_target_collection_of_the_ref():
     )
 
 
-def test_a_url_option_that_keeps_its_userinfo_gives_a_warning():
+def test_a_url_option_that_keeps_its_userinfo_is_an_error():
     base_url = "https://bob:made/up@proxy.example.com/v1"
-    plan = plan_of(
-        entry([embed("text2vec-openai", base_url=base_url)]),
-        entry([embed("text2vec-openai", base_url="https://h/v1")], name="Other"),
-    )
+    plan = plan_of(entry([embed("text2vec-openai", base_url=base_url)]))
     errors, warnings = plan_findings(plan, None, vectorizer_for)
-    assert warnings == [
+    assert errors == [
         Finding(
-            "dropped_option",
+            "invalid_vectorizer",
             "Docs",
-            "vectorizer option base_url of text2vec-openai is not sent: its URL "
-            "holds userinfo that cannot be removed",
+            "vectorizer option base_url of text2vec-openai in Docs holds userinfo "
+            "that cannot be removed",
         )
     ]
+    assert warnings == []
+    clean = plan_of(entry([embed("text2vec-openai", base_url="https://u:p@h/v1")]))
+    assert plan_findings(clean, None, vectorizer_for) == ([], [])

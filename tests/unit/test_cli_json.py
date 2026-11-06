@@ -27,7 +27,7 @@ from weaviate.exceptions import (
 
 from to_weaviate.cli import app
 from to_weaviate.output import ERROR_EXIT, CliError
-from to_weaviate.plan import load_plan
+from to_weaviate.plan import load_plan, save_plan
 from to_weaviate.sources.chroma.client import ChromaError
 from to_weaviate.target.schema import collection_kwargs
 from to_weaviate.target.writer import WeaviateWriter
@@ -379,32 +379,70 @@ def test_embedding_url_that_keeps_its_userinfo_is_not_stored_or_sent(tmp_path, c
     assert [n for n in entry.notes if "api_base holds userinfo" in n]
 
 
-@pytest.mark.parametrize("char", "/?#")
-def test_check_notes_a_planned_url_option_that_is_not_sent(tmp_path, char):
-    password = f"B5-MADE{char}UP-PW"
-    fakes = FakeFactories(FakeSource(cli_records(10)))
+USERINFO_HINT = "Percent-encode the password in plan.yaml or remove the option."
+
+
+def plan_with_url_option(tmp_path, fakes, password):
+    """Inspect with a text2vec-openai base_url that holds `password`."""
     embed = ["--vectors", "embed", "--vectorizer", "text2vec-openai"]
     option = f"base_url=https://bob:{password}@proxy.example.com/v1"
     args = [*embed, "--vectorizer-option", option]
     assert invoke(fakes, "inspect", "chroma", *args).exit_code == 0
-    plan = load_plan(tmp_path / ".to-weaviate" / "plan.yaml")
-    runs = [
-        invoke(fakes, "check", OPENAI_API_KEY="openai-key"),
-        invoke(fakes, "check", "--json", OPENAI_API_KEY="openai-key"),
-    ]
-    assert [r.exit_code for r in runs] == [0, 0], runs[0].output
+
+
+@pytest.mark.parametrize("mode", [[], ["--json"]])
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+@pytest.mark.parametrize("char", "/?#")
+def test_check_and_copy_refuse_a_url_option_that_keeps_its_userinfo(
+    tmp_path, char, cmd, mode
+):
+    password = f"B5-MADE{char}UP-PW"
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    plan_with_url_option(tmp_path, fakes, password)
+    r = invoke(fakes, cmd, *mode, OPENAI_API_KEY="openai-key")
+    assert r.exit_code == 2, r.output
     message = (
-        "vectorizer option base_url of text2vec-openai is not sent: its URL "
-        "holds userinfo that cannot be removed"
+        "vectorizer option base_url of text2vec-openai in Docs holds userinfo "
+        "that cannot be removed"
     )
-    assert f"warning dropped_option Docs: {message}" in runs[0].stdout
-    assert json.loads(runs[1].stdout)["warnings"] == [
-        {"code": "dropped_option", "collection": "Docs", "message": message}
-    ]
-    sent = repr(collection_kwargs(plan.collections))
-    for text in [*(r.output for r in runs), sent]:
-        for value in ("bob", password, *password.split(char)):
-            assert value not in text
+    if mode:
+        d = json.loads(r.stdout)
+        assert (d["code"], d["hint"]) == ("invalid_plan", USERINFO_HINT)
+        assert d["errors"] == [
+            {"code": "invalid_vectorizer", "collection": "Docs", "message": message}
+        ]
+        assert d["warnings"] == []
+    else:
+        assert f"error invalid_vectorizer Docs: {message}" in r.stdout
+        assert f"Hint: {USERINFO_HINT}" in r.stderr
+    assert fakes.schema.ensured == [] and fakes.writer.calls == 0
+    assert fakes.source.read_calls == 0
+    if cmd == "copy":
+        assert fakes.schema_calls == 0
+    for value in ("bob", password, *password.split(char)):
+        assert value not in r.output
+
+
+def test_plan_errors_of_other_kinds_keep_the_plan_hint(tmp_path):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    plan_with_url_option(tmp_path, fakes, "B5-MADE/UP-PW")
+    path = tmp_path / ".to-weaviate" / "plan.yaml"
+    plan = load_plan(path)
+    first = plan.collections[0]
+    twin = first.model_copy(
+        update={"target": first.target.model_copy(update={"name": "Docs2"})}
+    )
+    save_plan(plan.model_copy(update={"collections": [first, twin]}), path)
+    r = invoke(fakes, "check", "--json", OPENAI_API_KEY="openai-key")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert {e["code"] for e in d["errors"]} == {
+        "duplicate_source",
+        "invalid_vectorizer",
+    }
+    assert d["hint"] == (
+        "Edit plan.yaml, or run to-weaviate inspect chroma --force to draft it again."
+    )
 
 
 def test_source_url_query_and_fragment_are_not_stored_or_printed(tmp_path):

@@ -10,9 +10,9 @@ from to_weaviate.plan import (
 )
 from to_weaviate.sources.base import SourceCollection
 from to_weaviate.target.schema import (
+    USERINFO_TEXT,
     PlanMismatch,
     collection_kwargs,
-    dropped_options,
     module_names,
 )
 
@@ -230,25 +230,12 @@ def vectorizer_findings(groups: Mapping[str, list[CollectionPlan]]) -> list[Find
     return out
 
 
-def dropped_option_findings(
-    groups: Mapping[str, list[CollectionPlan]],
-) -> list[Finding]:
-    """URL options that `collection_kwargs` leaves out, as warnings.
-
-    `collection_kwargs` sends the vectors of the first entry of a group.
-    """
-    return [
-        Finding(
-            "dropped_option",
-            name,
-            f"vectorizer option {key} of {vector.vectorizer.module} is not sent: "
-            "its URL holds userinfo that cannot be removed",
-        )
-        for name, group in groups.items()
-        for vector in group[0].target.vectors
-        if vector.vectorizer is not None
-        for key in dropped_options(vector.vectorizer)
-    ]
+def userinfo_only(errors: list[Finding]) -> bool:
+    """Whether every one of `errors` is a URL option that keeps its userinfo."""
+    return bool(errors) and all(
+        e.code == "invalid_vectorizer" and e.message.endswith(USERINFO_TEXT)
+        for e in errors
+    )
 
 
 def plan_findings(
@@ -261,9 +248,7 @@ def plan_findings(
     warnings: list[Finding] = []
     errors.extend(_duplicate_findings(plan.collections))
     errors.extend(_duplicate_source_findings(plan.collections))
-    groups = target_groups(plan.collections)
-    errors.extend(vectorizer_findings(groups))
-    warnings.extend(dropped_option_findings(groups))
+    errors.extend(vectorizer_findings(target_groups(plan.collections)))
     for entry in plan.collections:
         errors.extend(_keep_model_findings(entry, vectorizer_for))
         for prop in entry.target.properties:

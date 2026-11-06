@@ -32,7 +32,6 @@ from to_weaviate.target.schema import (
     WeaviateSchema,
     collection_kwargs,
     differences,
-    dropped_options,
     ensure_collection,
 )
 
@@ -637,31 +636,18 @@ def test_kwargs_send_every_url_option_without_userinfo_query_or_fragment(
 
 
 @pytest.mark.parametrize("char", "/?#")
-def test_kwargs_leave_out_a_url_option_that_keeps_its_userinfo(char: str) -> None:
+def test_kwargs_refuse_a_url_option_that_keeps_its_userinfo(char: str) -> None:
     options = {
         "model": "text-embedding-3-small",
         "base_url": f"https://bob:made{char}up-pw@proxy.example.com/v1",
-        "endpoint": "https://bob:made-up-pw@embed.example.com/e",
     }
     v = p.VectorizerPlan(module="text2vec-openai", options=options)
-    assert dropped_options(v) == ["base_url"]
-    k = collection_kwargs([entry(mode="embed", vectorizer=v)])
-    found = vec(k).vectorizer
-    assert (
-        found.baseURL is None and str(found.endpoint) == "https://embed.example.com/e"
+    with pytest.raises(PlanMismatch) as e:
+        collection_kwargs([entry(mode="embed", vectorizer=v)])
+    assert str(e.value) == (
+        "vectorizer option base_url of text2vec-openai in My_docs holds userinfo "
+        "that cannot be removed"
     )
-    for value in ("bob", "made", "up-pw", "@"):
-        assert value not in repr(k)
-
-
-def test_dropped_options_skip_values_that_clean():
-    options = {
-        "base_url": "https://bob:pw@proxy.example.com/v1?k=x#f",
-        "model": "bob:x@host",
-        "dimensions": 256,
-    }
-    v = p.VectorizerPlan(module="text2vec-openai", options=options)
-    assert dropped_options(v) == []
 
 
 @pytest.mark.parametrize("model", ["voyage-3@2025-01", "bob:x@host", "m?v=1#tag"])

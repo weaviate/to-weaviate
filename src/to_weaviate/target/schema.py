@@ -41,6 +41,7 @@ GRPC_RETRY_STATUSES = frozenset(
     {"UNAVAILABLE", "DEADLINE_EXCEEDED", "RESOURCE_EXHAUSTED"}
 )
 CHAIN_DEPTH = 5
+USERINFO_TEXT = "holds userinfo that cannot be removed"
 
 _DATA_TYPES = {
     "text": DataType.TEXT,
@@ -173,33 +174,28 @@ def _is_url(value: Any) -> bool:
     return isinstance(value, str) and "://" in value
 
 
-def _sent_options(vectorizer: VectorizerPlan) -> dict[str, Any]:
+def _sent_options(vectorizer: VectorizerPlan, collection: str) -> dict[str, Any]:
     """The options of `vectorizer` as Weaviate gets them.
 
     Weaviate stores the options in the schema, so a URL option is sent
     without its userinfo, query and fragment, whatever the plan holds. A URL
-    option that `stored_url` does not store is left out.
+    option that `stored_url` does not store raises PlanMismatch: without it,
+    the provider would get the text at its default endpoint.
     """
     sent: dict[str, Any] = {}
     for key, value in vectorizer.options.items():
         if _is_url(value):
             value = stored_url(value)
             if value is None:
-                continue
+                raise PlanMismatch(
+                    f"vectorizer option {key} of {vectorizer.module} in "
+                    f"{collection} {USERINFO_TEXT}"
+                )
         sent[key] = value
     return sent
 
 
-def dropped_options(vectorizer: VectorizerPlan) -> list[str]:
-    """The keys of the URL options of `vectorizer` that are not sent."""
-    return [
-        key
-        for key, value in vectorizer.options.items()
-        if _is_url(value) and stored_url(value) is None
-    ]
-
-
-def _vector(plan: VectorPlan) -> Any:
+def _vector(plan: VectorPlan, collection: str) -> Any:
     kwargs: dict[str, Any] = {"name": plan.name}
     index = plan.index
     if index.type != "default":
@@ -227,7 +223,7 @@ def _vector(plan: VectorPlan) -> Any:
         raise PlanMismatch(
             f"vectorizer module {module} is not supported by this client"
         )
-    options = _sent_options(plan.vectorizer)
+    options = _sent_options(plan.vectorizer, collection)
     accepted = inspect.signature(factory).parameters
     for key in options:
         if key in _RESERVED_OPTIONS or key not in accepted:
@@ -260,10 +256,11 @@ def _tenants(group: list[CollectionPlan]) -> list[str]:
 
 
 def collection_kwargs(group: list[CollectionPlan]) -> dict[str, Any]:
+    name = group[0].target.name
     kwargs: dict[str, Any] = {
-        "name": group[0].target.name,
+        "name": name,
         "properties": [_property(p) for p in _properties(group)],
-        "vector_config": [_vector(v) for v in group[0].target.vectors],
+        "vector_config": [_vector(v, name) for v in group[0].target.vectors],
     }
     if _tenants(group):
         kwargs["multi_tenancy_config"] = Configure.multi_tenancy(enabled=True)

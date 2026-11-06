@@ -54,6 +54,7 @@ from to_weaviate.engine.check import (
     plan_findings,
     provider_keys,
     target_groups,
+    userinfo_only,
 )
 from to_weaviate.engine.copy import copy_collection
 from to_weaviate.engine.verify import (
@@ -143,6 +144,7 @@ REINSPECT_HINT = "Run to-weaviate inspect chroma --force to inspect again."
 EDIT_PLAN_HINT = (
     "Edit plan.yaml, or run to-weaviate inspect chroma --force to draft it again."
 )
+USERINFO_HINT = "Percent-encode the password in plan.yaml or remove the option."
 CHROMA_HINT = "Check CHROMA_URL and that the Chroma server is running."
 NO_COLLECTION_HINT = "Check --database, CHROMA_DATABASE and CHROMA_TENANT."
 WEAVIATE_HINT = (
@@ -628,7 +630,7 @@ def _plan_errors(errors: list[Finding], warnings: list[Finding]) -> CliError:
     return CliError(
         "invalid_plan",
         f"The plan has {_plural(len(errors), 'error')}.",
-        EDIT_PLAN_HINT,
+        USERINFO_HINT if userinfo_only(errors) else EDIT_PLAN_HINT,
         fields=_findings_document(errors, warnings),
         text="\n".join(_findings_text(errors, warnings)),
     )
