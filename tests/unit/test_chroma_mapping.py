@@ -226,6 +226,16 @@ def test_voyage_and_google_without_a_required_key_have_no_vectorizer(
             {"modelId": "m", "projectId": "p", "location": "l"},
         ),
         (
+            "google_gemini",
+            {"model_name": "m", "dimension": 256},
+            {"modelId": "m", "dimensions": 256, "projectId": None},
+        ),
+        (
+            "google_gemini",
+            {"model_name": "m", "dimension": 256, "vertexai": True, "project": "p"},
+            {"modelId": "m", "dimensions": 256, "projectId": "p"},
+        ),
+        (
             "google_vertex",
             {"model_name": "m", "project_id": "p", "region": "l"},
             {"modelId": "m", "projectId": "p", "location": "l"},
@@ -252,6 +262,20 @@ def test_voyage_and_google_options_reach_the_collection_config(name, config, exp
     assert {key: getattr(found, key) for key in expected} == expected
 
 
+@pytest.mark.parametrize(
+    "variant",
+    [{}, {"vertexai": True, "project": "p", "location": "europe-west4"}],
+)
+def test_google_gemini_maps_the_dimension(variant):
+    v, _ = vectorizer_for(
+        known(
+            "google_gemini", model_name="gemini-embedding-001", dimension=256, **variant
+        )
+    )
+    assert v is not None
+    assert v.options["dimensions"] == 256
+
+
 def test_default_model_has_no_mapping():
     v, notes = vectorizer_for(known("default"))
     assert v is None and any("all-MiniLM-L6-v2" in n for n in notes)
@@ -276,7 +300,13 @@ def test_config_keys_are_the_keys_the_mapping_reads():
         "mistral": {"model"},
         "huggingface": {"model_name"},
         "google_generative_ai": {"model_name", "dimension"},
-        "google_gemini": {"model_name", "vertexai", "project", "location"},
+        "google_gemini": {
+            "model_name",
+            "dimension",
+            "vertexai",
+            "project",
+            "location",
+        },
         "google_vertex": {"model_name", "project_id", "region"},
         "ollama": {"url", "model_name"},
     }

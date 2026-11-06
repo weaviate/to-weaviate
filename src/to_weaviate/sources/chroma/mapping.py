@@ -11,8 +11,10 @@ OPENAI_DEFAULT_BASE = "https://api.openai.com"
 class _Function(NamedTuple):
     module: str
     renames: dict[str, str]  # Chroma config key to Weaviate option name
-    # Keys without which there is no vectorizer: without a model, Weaviate
+    # Keys without which there is no vectorizer. Without the model, Weaviate
     # would use its own default model, not the one that made the vectors.
+    # A Vertex mapping also needs the project: `project` for google_gemini,
+    # `project_id` for google_vertex.
     required: tuple[str, ...] = ()
 
 
@@ -36,7 +38,9 @@ _FUNCTIONS: dict[str, _Function] = {
         ("model_name",),
     ),
     "google_gemini": _Function(
-        "text2vec-google", {"model_name": "model"}, ("model_name",)
+        "text2vec-google",
+        {"model_name": "model", "dimension": "dimensions"},
+        ("model_name",),
     ),
     "google_vertex": _Function(
         "text2vec-google",
@@ -51,7 +55,12 @@ _FUNCTIONS: dict[str, _Function] = {
 # google_gemini with `vertexai` true.
 _GEMINI_VERTEX = _Function(
     "text2vec-google",
-    {"model_name": "model", "project": "project_id", "location": "location"},
+    {
+        "model_name": "model",
+        "dimension": "dimensions",
+        "project": "project_id",
+        "location": "location",
+    },
     ("model_name", "project"),
 )
 
