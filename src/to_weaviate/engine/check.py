@@ -1,3 +1,4 @@
+from collections import Counter
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 
@@ -117,6 +118,42 @@ def _duplicate_source_findings(entries: list[CollectionPlan]) -> list[Finding]:
         for key in dict.fromkeys(collection_key(e.target.name) for e in group):
             out.append(Finding("duplicate_source", key, message))
     return out
+
+
+def _name_findings(entry: CollectionPlan) -> list[Finding]:
+    """Property names that are equal ignoring case, and repeated vector names.
+
+    Weaviate compares property names in lower case.
+    """
+    target = entry.target.name
+    by_lower: dict[str, list[str]] = {}
+    for prop in entry.target.properties:
+        by_lower.setdefault(prop.name.lower(), []).append(prop.name)
+    out = [
+        Finding(
+            "duplicate_property",
+            target,
+            f"properties {', '.join(names)} have the same name ignoring case; "
+            "give each property its own name",
+        )
+        for names in by_lower.values()
+        if len(names) > 1
+    ]
+    out.extend(
+        Finding(
+            "duplicate_vector",
+            target,
+            f"vector name {name} is used {n} times; give each vector its own name",
+        )
+        for name, n in Counter(v.name for v in entry.target.vectors).items()
+        if n > 1
+    )
+    return out
+
+
+def load_findings(plan: Plan) -> list[Finding]:
+    """Errors that refuse the plan in every command that loads it."""
+    return [f for entry in plan.collections for f in _name_findings(entry)]
 
 
 def _vectorizers(plan: Plan) -> Iterator[tuple[CollectionPlan, VectorizerPlan]]:

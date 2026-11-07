@@ -1313,3 +1313,50 @@ def test_an_inspection_that_is_not_utf8_is_an_invalid_plan(tmp_path, cmd):
         "invalid_plan",
         f"{DIR / 'inspect.json'} is not UTF-8 text.",
     )
+
+
+LOADING_COMMANDS = ["check", "copy", "status", "verify"]
+
+
+@pytest.mark.parametrize("cmd", LOADING_COMMANDS)
+def test_property_names_that_differ_only_in_case_are_an_invalid_plan(tmp_path, cmd):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    year = next(p for p in target.properties if p.name == "year")
+    twin = year.model_copy(update={"name": "Year"})
+    edit_target(tmp_path / DIR, properties=[*target.properties, twin])
+    r = invoke(fakes, cmd, "--json")
+    message = (
+        "properties year, Year have the same name ignoring case; give each "
+        "property its own name"
+    )
+    assert plan_errors(r) == [
+        {"code": "duplicate_property", "collection": "Docs", "message": message}
+    ]
+    assert fakes.writer.calls == 0
+
+
+@pytest.mark.parametrize("cmd", LOADING_COMMANDS)
+def test_a_repeated_vector_name_is_an_invalid_plan(tmp_path, cmd):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))), "--vectors", "both")
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    vectors = [v.model_copy(update={"name": "default"}) for v in target.vectors]
+    edit_target(tmp_path / DIR, vectors=vectors)
+    r = invoke(fakes, cmd, "--json")
+    message = "vector name default is used 2 times; give each vector its own name"
+    assert plan_errors(r) == [
+        {"code": "duplicate_vector", "collection": "Docs", "message": message}
+    ]
+    assert fakes.writer.calls == 0
+
+
+@pytest.mark.parametrize("cmd", LOADING_COMMANDS)
+def test_a_key_that_appears_twice_in_one_mapping_is_an_invalid_plan(tmp_path, cmd):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    path = tmp_path / DIR / "plan.yaml"
+    path.write_text(path.read_text().replace("version: 1\n", "version: 1\n" * 2, 1))
+    r = invoke(fakes, cmd, "--json")
+    code, message = error_of(r)[1:3]
+    assert (r.exit_code, code) == (2, "invalid_plan")
+    assert "line 2, column 1" in message
+    assert "found duplicate key 'version', first at line 1" in message

@@ -50,6 +50,7 @@ from to_weaviate.engine.check import (
     Finding,
     collection_key,
     decisions,
+    load_findings,
     module_findings,
     plan_findings,
     provider_keys,
@@ -365,7 +366,8 @@ def _not_utf8(path: Path) -> CliError:
     return CliError("invalid_plan", f"{path} is not UTF-8 text.", UTF8_HINT)
 
 
-def _load_plan(directory: Path) -> Plan:
+def _read_plan(directory: Path) -> Plan:
+    """The plan, parsed and validated, before `load_findings` are applied."""
     path = directory / PLAN_FILE
     if not path.exists():
         raise CliError("usage", f"{path} does not exist.", INSPECT_HINT)
@@ -386,6 +388,15 @@ def _load_plan(directory: Path) -> Plan:
             f"{path} is not a valid plan: collections is empty.",
             EDIT_PLAN_HINT,
         )
+    return plan
+
+
+def _load_plan(directory: Path) -> Plan:
+    """The plan, refused when it has a `load_findings` error."""
+    plan = _read_plan(directory)
+    errors = load_findings(plan)
+    if errors:
+        raise _plan_errors(errors, [])
     return plan
 
 
@@ -657,9 +668,10 @@ def _require_provider_keys(plan: Plan, settings: WeaviateSettings) -> None:
 
 
 def _check(factories: _Factories, directory: Path, json_output: bool) -> None:
-    plan = _load_plan(directory)
+    plan = _read_plan(directory)
     inspected = _load_inspected(directory)
     errors, warnings = plan_findings(plan, inspected, vectorizer_for)
+    errors[:0] = load_findings(plan)
     settings = weaviate_settings(load_env(Path.cwd()))
     _require_provider_keys(plan, settings)
     info(json_output, f"Checking the target at {without_userinfo(settings.url)}")

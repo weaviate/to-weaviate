@@ -6,6 +6,7 @@ from to_weaviate import plan as p
 from to_weaviate.engine.check import (
     Finding,
     decisions,
+    load_findings,
     module_findings,
     plan_findings,
     provider_keys,
@@ -197,3 +198,40 @@ def test_a_url_option_that_keeps_its_userinfo_is_an_error():
     assert warnings == []
     clean = plan_of(entry([embed("text2vec-openai", base_url="https://u:p@h/v1")]))
     assert plan_findings(clean, None, vectorizer_for) == ([], [])
+
+
+ID_PROPERTY = p.PropertyPlan(source_key="#id", name="source_id", type="text")
+
+
+def with_target(e: p.CollectionPlan, **update: Any) -> p.CollectionPlan:
+    return e.model_copy(update={"target": e.target.model_copy(update=update)})
+
+
+def prop(name: str, key: str | None = None) -> p.PropertyPlan:
+    return p.PropertyPlan(source_key=key or name, name=name, type="text")
+
+
+def test_load_findings_refuse_property_names_equal_ignoring_case():
+    properties = [ID_PROPERTY, prop("year"), prop("Year"), prop("title")]
+    properties.append(prop("YEAR", "y2"))
+    plan = plan_of(with_target(entry([keep()]), properties=properties))
+    assert load_findings(plan) == [
+        Finding(
+            "duplicate_property",
+            "Docs",
+            "properties year, Year, YEAR have the same name ignoring case; give "
+            "each property its own name",
+        )
+    ]
+
+
+def test_load_findings_refuse_a_repeated_vector_name():
+    both = entry([keep(), embed("text2vec-weaviate")])
+    plan = plan_of(with_target(both, properties=[ID_PROPERTY]))
+    assert load_findings(plan) == [
+        Finding(
+            "duplicate_vector",
+            "Docs",
+            "vector name default is used 2 times; give each vector its own name",
+        )
+    ]

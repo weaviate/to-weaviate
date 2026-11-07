@@ -1,6 +1,7 @@
 import io
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from to_weaviate.plan import (
@@ -320,6 +321,18 @@ def test_load_refuses_a_typo(tmp_path):
     (tmp_path / "p.yaml").write_text(text)
     with pytest.raises(ValidationError):
         load_plan(tmp_path / "p.yaml")
+
+
+def test_load_refuses_a_key_that_appears_twice_in_one_mapping(tmp_path):
+    save_plan(draft_plan(SRC, [make()], "keep"), tmp_path / "p.yaml")
+    lines = (tmp_path / "p.yaml").read_text().splitlines(keepends=True)
+    at = next(i for i, line in enumerate(lines) if line.strip() == "type: text")
+    lines.insert(at + 1, lines[at].replace("text", "int"))
+    (tmp_path / "p.yaml").write_text("".join(lines))
+    with pytest.raises(yaml.YAMLError) as e:
+        load_plan(tmp_path / "p.yaml")
+    assert e.value.problem == f"found duplicate key 'type', first at line {at + 1}"
+    assert e.value.problem_mark.line == at + 1
 
 
 def test_models_are_exported():
