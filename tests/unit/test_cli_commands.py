@@ -1498,3 +1498,30 @@ def test_a_vectorizer_without_its_required_options_is_an_invalid_plan(cmd):
         {"code": "invalid_vectorizer", "collection": "Docs", "message": message}
     ]
     assert fakes.writer.calls == 0
+
+
+@pytest.mark.parametrize("mode", [[], ["--json"]])
+def test_check_warns_on_a_url_option_sent_without_its_query(mode):
+    url = "https://proxy.example.com/v1?api-version=B6-MADE-UP-TOKEN"
+    fakes = inspected(
+        FakeFactories(FakeSource(cli_records(10))),
+        "--vectors",
+        "embed",
+        "--vectorizer",
+        "text2vec-openai",
+        "--vectorizer-option",
+        f"base_url={url}",
+    )
+    r = invoke(fakes, "check", *mode, OPENAI_API_KEY="openai-key")
+    assert r.exit_code == 0, r.output
+    message = (
+        "option base_url of vector default in Docs holds userinfo, a query or a "
+        "fragment; it is sent without them."
+    )
+    if mode:
+        assert json.loads(r.stdout)["warnings"] == [
+            {"code": "cleaned_option", "collection": "Docs", "message": message}
+        ]
+    else:
+        assert f"warning cleaned_option Docs: {message}" in r.stdout
+    assert "B6-MADE-UP-TOKEN" not in r.output

@@ -16,6 +16,7 @@ from to_weaviate.target.schema import (
     PROPERTY_TYPES,
     USERINFO_TEXT,
     PlanMismatch,
+    cleaned_options,
     collection_kwargs,
     module_names,
 )
@@ -393,6 +394,27 @@ def vectorizer_findings(groups: Mapping[str, list[CollectionPlan]]) -> list[Find
     return out
 
 
+def cleaned_option_findings(
+    groups: Mapping[str, list[CollectionPlan]],
+) -> list[Finding]:
+    """URL options that lose a query or a fragment when sent, as warnings.
+
+    `collection_kwargs` sends the vectors of the first entry of a group.
+    """
+    return [
+        Finding(
+            "cleaned_option",
+            name,
+            f"option {key} of vector {vector.name} in {name} holds userinfo, a "
+            "query or a fragment; it is sent without them.",
+        )
+        for name, group in groups.items()
+        for vector in group[0].target.vectors
+        if vector.vectorizer is not None
+        for key in cleaned_options(vector.vectorizer)
+    ]
+
+
 def userinfo_only(errors: list[Finding]) -> bool:
     """Whether every one of `errors` is a URL option that keeps its userinfo."""
     return bool(errors) and all(
@@ -419,6 +441,7 @@ def plan_findings(
     errors.extend(
         vectorizer_findings({n: g for n, g in groups.items() if n not in unmapped})
     )
+    warnings.extend(cleaned_option_findings(groups))
     for entry in plan.collections:
         errors.extend(_keep_model_findings(entry, vectorizer_for))
         errors.extend(_unmapped_findings(entry, inspected))

@@ -361,3 +361,25 @@ def test_a_hand_written_property_name_with_a_reserved_suffix_is_a_warning():
             "and later refuse to create a property with this suffix",
         )
     ]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://proxy.example.com/v1?api-version=made-up",
+        "https://proxy.example.com/v1#made-up",
+        "https://u:p@proxy.example.com/v1?key=made-up",
+    ],
+)
+def test_a_url_option_sent_without_its_query_or_fragment_gives_a_warning(url):
+    plan = plan_of(entry([embed("text2vec-openai", base_url=url)]))
+    errors, warnings = plan_findings(plan, None, vectorizer_for)
+    assert errors == []
+    assert warnings == [
+        Finding(
+            "cleaned_option",
+            "Docs",
+            "option base_url of vector default in Docs holds userinfo, a query or "
+            "a fragment; it is sent without them.",
+        )
+    ]
