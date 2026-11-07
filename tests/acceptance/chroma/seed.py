@@ -32,6 +32,7 @@ COLLECTIONS = (
     "tenant-a",
     "tenant-b",
     "rejects",
+    "openai-proxy",
 )
 CATEGORIES = ("guide", "reference", "tutorial")
 TAGS = ("red", "green", "blue", "small", "large")
@@ -172,8 +173,56 @@ def rejects(rng: random.Random) -> list[Record]:
     ]
 
 
+# Made-up secrets of the embedding function of openai-proxy. The tool must
+# neither store nor print them.
+PROXY_USER = "b8-proxy-user"
+PROXY_PASSWORD = "made-up-password-b8"
+PROXY_QUERY_TOKEN = "made-up-query-token-b8"
+PROXY_HEADER_TOKEN = "made-up-header-token-b8"
+PROXY_API_BASE = (
+    f"https://{PROXY_USER}:{PROXY_PASSWORD}@proxy.example.invalid/openai/v1"
+    f"?sig={PROXY_QUERY_TOKEN}"
+)
+# The configuration that chromadb 1.5.9 sends for an OpenAIEmbeddingFunction
+# (get_config). With api_type azure the tool maps it to no vectorizer, so no
+# provider key is needed.
+OPENAI_PROXY_FUNCTION = {
+    "type": "known",
+    "name": "openai",
+    "config": {
+        "api_key_env_var": "CHROMA_OPENAI_API_KEY",
+        "model_name": "text-embedding-3-small",
+        "organization_id": None,
+        "api_base": PROXY_API_BASE,
+        "api_type": "azure",
+        "api_version": "2024-02-01",
+        "deployment_id": "b8-deployment",
+        "default_headers": {"X-Proxy-Token": PROXY_HEADER_TOKEN},
+        "dimensions": None,
+    },
+}
+
+
+def openai_proxy(rng: random.Random) -> list[Record]:
+    """10 records of 8 dimensions."""
+    return [
+        Record(
+            id=f"proxy-{i}",
+            embedding=_vector(rng, 8),
+            document=f"Record {i} of the openai-proxy collection.",
+            metadata={"position": i},
+            uri=None,
+        )
+        for i in range(10)
+    ]
+
+
 def _recreate(
-    http: httpx.Client, name: str, space: str | None, records: list[Record]
+    http: httpx.Client,
+    name: str,
+    space: str | None,
+    records: list[Record],
+    embedding_function: dict[str, Any] | None = None,
 ) -> None:
     # Chroma 1.5.9 keeps the array metadata rows of a deleted collection. A
     # record created later on the same server can then show an array key that
@@ -184,6 +233,8 @@ def _recreate(
     body: dict[str, Any] = {"name": name}
     if space is not None:
         body["configuration"] = {"hnsw": {"space": space}}
+    if embedding_function is not None:
+        body.setdefault("configuration", {})["embedding_function"] = embedding_function
     created = http.post("/collections", json=body)
     created.raise_for_status()
     _add(http, created.json()["id"], records, LARGE_ADD_BATCH)
@@ -237,6 +288,9 @@ def seed() -> None:
         _recreate(http, "tenant-a", "cosine", tenant_records(rng, "a", 30))
         _recreate(http, "tenant-b", "cosine", tenant_records(rng, "b", 20))
         _recreate(http, "rejects", "cosine", rejects(rng))
+        _recreate(
+            http, "openai-proxy", "cosine", openai_proxy(rng), OPENAI_PROXY_FUNCTION
+        )
 
 
 def _extra_tiny_l2(start: int, count: int) -> list[Record]:

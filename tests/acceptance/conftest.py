@@ -80,6 +80,7 @@ SUITE_COLLECTIONS = [
     "Tenants",
     "Rejects",
     "Tiny_l2_renamed",
+    "Openai_proxy",
 ]
 
 
