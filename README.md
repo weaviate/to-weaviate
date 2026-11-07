@@ -85,8 +85,14 @@ than one of them has, and no two property names that differ only in case.
 
 Creates the target collections, then copies the records. Progress goes to
 `state.sqlite`, so a second run continues where the first one stopped.
-Each run also copies the records added to the source since the last run.
-Each record that the tool cannot convert or that Weaviate refuses goes to
+Each run also copies the records added to the source since the last run,
+also when records were deleted in between: it finds the last record that
+the run before read and reads the records after it. When that record was
+deleted, the run reads again from an earlier record, or from the start with
+the warning "the source changed since the last run; re-reading from the
+start". A record read again is written again unchanged, so this is safe
+and only slower. The JSON document gives the offset of such a read as
+`reread_from`. Each record that the tool cannot convert or that Weaviate refuses goes to
 `rejects.jsonl` with the reason. When Weaviate refuses every object of a
 batch of more than one record, `copy` retries the batch as it retries a
 network error. When the retries are used up, it stops with

@@ -2195,6 +2195,24 @@ def test_a_record_deleted_during_the_copy_shifts_another_one_past_the_cursor():
     )
 
 
+def test_copy_warns_when_it_reads_the_source_again_from_the_start():
+    source = FakeSource(cli_records(10))
+    fakes = inspected(FakeFactories(source))
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json")
+    assert r.exit_code == 0, r.output
+    assert "reread_from" not in json.loads(r.stdout)["collections"][0]
+    # id-9, the last record read, is deleted; id-10 and id-11 are added.
+    source.records = source.records[:9] + cli_records(12)[10:]
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["collections"][0]["reread_from"] == 0
+    assert (
+        "Warning: docs: the source changed since the last run; re-reading from "
+        "the start"
+    ) in r.stderr.splitlines()
+    assert len(fakes.writer.objects) == 12
+
+
 def _prop(entry: Any, name: str) -> Any:
     return next(p for p in entry.target.properties if p.name == name)
 

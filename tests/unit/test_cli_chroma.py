@@ -160,8 +160,10 @@ def test_a_count_that_fails_after_the_pages_resumes_without_pages(tmp_path):
     before = len(server.calls)
     row = copied(fakes, "--parallelism", "3")
     assert (row["copied"], row["total"], row["done"]) == (2750, 2750, True)
-    offsets = [c.offset for c in server.calls[before:] if c.kind == "get"]
-    assert offsets == [2700, 2750]
+    gets = [c for c in server.calls[before:] if c.kind == "get"]
+    # The id at offset 2699, read without a payload, shows that nothing shifted.
+    assert (gets[0].limit, gets[0].include) == (1, [])
+    assert [c.offset for c in gets] == [2699, 2700, 2750]
     assert len(fakes.writer.writes_per_uuid) == 2750
     assert set(fakes.writer.writes_per_uuid.values()) == {1}
 

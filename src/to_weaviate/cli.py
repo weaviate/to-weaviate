@@ -874,6 +874,15 @@ def _copy_lock(directory: Path) -> Iterator[None]:
         ) from exc
 
 
+def _warning(name: str) -> Callable[[str], None]:
+    """A function that prints a warning about the collection `name` on stderr."""
+
+    def warn(line: str) -> None:
+        print(f"Warning: {name}: {line}", file=sys.stderr, flush=True)
+
+    return warn
+
+
 def _select(entries: list[CollectionPlan], names: list[str]) -> list[CollectionPlan]:
     if not names:
         return entries
@@ -943,6 +952,7 @@ def _copy(
                     info(json_output, f"Added the property {prop} to {name}")
                     added.append({"collection": name, "property": prop})
             events = Events(directory / EVENTS_FILE)
+            rereads: dict[str, int] = {}
             for entry in entries:
                 ref = entry.source.ref
                 state.set_target(ref, targets[ref])
@@ -962,7 +972,10 @@ def _copy(
                     entry,
                     inspected[ref],
                     parallelism,
+                    warn=_warning(entry.source.name),
                 )
+                if result.reread_from is not None:
+                    rereads[ref] = result.reread_from
                 if trained:
                     info(
                         json_output,
@@ -979,6 +992,9 @@ def _copy(
         finally:
             state.close()
     rows = _rows(entries, progress)
+    for row in rows:
+        if row["ref"] in rereads:
+            row["reread_from"] = rereads[row["ref"]]
     document, text = _progress_output(entries, rows)
     document["added_properties"] = added
     rejects = sum(row["rejects"] for row in rows)

@@ -279,6 +279,101 @@ def test_empty_collection_that_grew_gets_a_tail(state, events):
     assert len(writer.objects) == 30
 
 
+SOURCE_CHANGED = "the source changed since the last run; re-reading from the start"
+
+
+def _warnings(tmp_path) -> list[dict]:
+    lines = (tmp_path / "events.jsonl").read_text().splitlines()
+    return [e for e in map(json.loads, lines) if e["level"] == "warning"]
+
+
+def test_a_later_run_reads_the_records_added_after_a_deletion(src, state, events):
+    writer = FakeWriter()
+    copy_collection(src, writer, state, events, ENTRY, C, 2)
+    del src.records[300:400]
+    src.records.extend(make_records(150, start=1000))
+    reads, id_reads = src.read_calls, src.id_reads
+    result = copy_collection(src, writer, state, events, ENTRY, C, 2)
+    assert {to_uuid(r.id) for r in src.records} <= set(writer.objects)
+    # One id at offset 999, two id pages back to id-999 at offset 899, then
+    # the two pages of the tail from offset 900.
+    assert (src.id_reads - id_reads, src.read_calls - reads) == (3, 2)
+    assert set(writer.writes_per_uuid.values()) == {1}
+    assert result.reread_from == 900
+
+
+def test_a_deleted_last_read_record_makes_the_run_read_from_the_start(
+    src, state, events, tmp_path
+):
+    writer = FakeWriter()
+    copy_collection(src, writer, state, events, ENTRY, C, 2)
+    # id-499 and id-999 are the last records of the two partitions.
+    src.records = [r for r in src.records if r.id not in {"id-499", "id-999"}]
+    src.records.extend(make_records(50, start=1000))
+    result = copy_collection(src, writer, state, events, ENTRY, C, 2)
+    assert {to_uuid(r.id) for r in src.records} <= set(writer.objects)
+    # The records read again keep their uuids, so no object is added twice.
+    assert len(writer.objects) == 1050
+    assert result.reread_from == 0 and result.copied == 1048
+    assert [(e["event"], e["message"]) for e in _warnings(tmp_path)] == [
+        ("source_changed", SOURCE_CHANGED)
+    ]
+
+
+def test_a_deleted_last_read_record_falls_back_to_an_earlier_partition(
+    src, state, events, tmp_path
+):
+    writer = FakeWriter()
+    copy_collection(src, writer, state, events, ENTRY, C, 2)
+    src.records = [r for r in src.records if r.id != "id-999"]
+    src.records.extend(make_records(50, start=1000))
+    result = copy_collection(src, writer, state, events, ENTRY, C, 2)
+    assert {to_uuid(r.id) for r in src.records} <= set(writer.objects)
+    # id-499, the last record of the first partition, is still at offset 499.
+    assert result.reread_from == 500 and result.copied == 1049
+    assert _warnings(tmp_path) == []
+
+
+def test_an_unchanged_source_costs_one_id_read(src, state, events):
+    writer = FakeWriter()
+    copy_collection(src, writer, state, events, ENTRY, C, 2)
+    reads, id_reads = src.read_calls, src.id_reads
+    result = copy_collection(src, writer, state, events, ENTRY, C, 2)
+    assert (src.id_reads - id_reads, src.read_calls - reads) == (1, 0)
+    assert result.reread_from is None
+    src.records.extend(make_records(50, start=1000))
+    result = copy_collection(src, writer, state, events, ENTRY, C, 2)
+    assert src.id_reads - id_reads == 2
+    assert state.partitions(C.ref)[-1] == Partition("1000-", "1000", "1050")
+    assert result.reread_from is None
+
+
+def test_a_state_without_last_ids_reads_from_the_start(src, state, events, tmp_path):
+    # Finished partitions of a state written before the last id was stored.
+    state.init_collection(C.ref, src.partitions(C, 2), C.count)
+    for partition in state.partitions(C.ref):
+        state.advance(C.ref, partition.key, None, 500)
+    writer = FakeWriter()
+    result = copy_collection(src, writer, state, events, ENTRY, C, 2)
+    assert len(writer.objects) == 1000 and src.id_reads == 0
+    assert result.reread_from == 0 and result.copied == 1000
+    assert [e["message"] for e in _warnings(tmp_path)] == [SOURCE_CHANGED]
+
+
+def test_a_copy_in_progress_in_an_older_state_resumes_without_a_reread(
+    src, state, events, tmp_path
+):
+    # An older state: the first partition finished, the second stopped at 700.
+    state.init_collection(C.ref, src.partitions(C, 2), C.count)
+    state.advance(C.ref, "0-500", None, 500)
+    state.advance(C.ref, "500-1000", "700", 200)
+    writer = FakeWriter()
+    result = copy_collection(src, writer, state, events, ENTRY, C, 2)
+    assert src.read_calls == 3 and len(writer.objects) == 300
+    assert result == CopyResult(copied=1000, rejects=0)
+    assert _warnings(tmp_path) == []
+
+
 def test_parallelism_is_bounded(state, events):
     src = FakeSource(make_records(1000), read_delay=0.005)
     # Partitions stored by an earlier run with parallelism 8.

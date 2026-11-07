@@ -324,6 +324,14 @@ def test_ids_raise_when_the_server_ignores_the_offset(source, fake_client, inspe
         list(source.ids(inspected))
 
 
+def test_ids_at_reads_ids_without_a_payload(source, fake_client, inspected):
+    fake_client.calls.clear()
+    assert source.ids_at(inspected, 649, 1) == ["id649"]
+    assert source.ids_at(inspected, 650, 1) == []
+    assert fake_client.calls[0] == Call(1, 649, [], None)
+    assert source.page_size == CHROMA_MAX_PAGE
+
+
 def test_count(source, inspected):
     assert source.count(inspected) == 650
 

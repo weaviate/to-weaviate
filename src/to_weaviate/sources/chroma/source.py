@@ -135,6 +135,10 @@ class ChromaSource:
     def tenant(self) -> str:
         return self._tenant
 
+    @property
+    def page_size(self) -> int:
+        return CHROMA_MAX_PAGE
+
     def namespaces(self) -> list[str]:
         return self._client.databases(self._tenant)
 
@@ -302,6 +306,13 @@ class ChromaSource:
             yield from ids
             last = set(ids)
             offset += len(ids)
+
+    def ids_at(
+        self, collection: SourceCollection, offset: int, limit: int
+    ) -> list[str]:
+        response = self._get(collection, limit=limit, offset=offset, include=[])
+        ids: list[str] = response["ids"]
+        return ids
 
     def count(self, collection: SourceCollection) -> int:
         return self._client.count(self._tenant, collection.namespace, collection.ref)

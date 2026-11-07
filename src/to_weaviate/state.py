@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +23,7 @@ CREATE TABLE IF NOT EXISTS partitions (
     cursor TEXT,
     finished INTEGER NOT NULL DEFAULT 0,
     copied INTEGER NOT NULL DEFAULT 0,
+    last_id TEXT,
     PRIMARY KEY (ref, key)
 );
 CREATE TABLE IF NOT EXISTS rejects (
@@ -91,9 +93,10 @@ class State:
 
     Collections and partitions are listed in insertion (rowid) order. A file
     written before the `targets` or the `quantizer_updates` table existed gets
-    the table when it is opened, with no row for any ref. A file that sqlite
-    cannot read raises StateUnreadable when it is opened, and a file that
-    another process keeps locked raises StateInUse.
+    the table when it is opened, with no row for any ref. A file written before
+    the `last_id` column existed gets the column, NULL in every row. A file
+    that sqlite cannot read raises StateUnreadable when it is opened, and a
+    file that another process keeps locked raises StateInUse.
     """
 
     def __init__(self, path: Path) -> None:
@@ -104,6 +107,11 @@ class State:
         try:
             with self._lock, self._db:
                 self._db.executescript(_SCHEMA)
+                columns = {
+                    row[1] for row in self._db.execute("PRAGMA table_info(partitions)")
+                }
+                if "last_id" not in columns:
+                    self._db.execute("ALTER TABLE partitions ADD COLUMN last_id TEXT")
         except sqlite3.DatabaseError as exc:
             self._db.close()
             # Python 3.10 gives no sqlite error code, only its message.
@@ -161,23 +169,58 @@ class State:
         cursor: str | None,
         copied: int,
         stop: str | None = None,
+        last_id: str | None = None,
     ) -> None:
         """Store the cursor of the next page; None finishes the partition.
 
         A `stop` replaces the stored stop. A finished tail stores its end
-        offset this way, in the same commit as its last page.
+        offset this way, in the same commit as its last page. A `last_id`, the
+        source id of the last record of the page, replaces the stored one.
         """
         with self._lock, self._db:
             self._db.execute(
                 "UPDATE partitions SET cursor = ?, finished = ?, "
-                "copied = copied + ?, stop = COALESCE(?, stop) "
+                "copied = copied + ?, stop = COALESCE(?, stop), "
+                "last_id = COALESCE(?, last_id) "
                 "WHERE ref = ? AND key = ?",
-                (cursor, 1 if cursor is None else 0, copied, stop, ref, key),
+                (cursor, 1 if cursor is None else 0, copied, stop, last_id, ref, key),
             )
 
-    def add_partition(self, ref: str, partition: Partition) -> None:
+    def add_partition(
+        self,
+        ref: str,
+        partition: Partition,
+        last_id: str | None = None,
+        superseded: Sequence[str] = (),
+    ) -> None:
+        """Store a new unfinished partition; a stored key changes nothing.
+
+        `last_id` is the source id of the record before its start. The copied
+        count of each partition key in `superseded` becomes 0 in the same
+        commit, because the new partition reads those records again.
+        """
         with self._lock, self._db:
-            self._insert_partitions(ref, [partition])
+            cur = self._db.execute(
+                "INSERT OR IGNORE INTO partitions (ref, key, start, stop, last_id) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (ref, partition.key, partition.start, partition.stop, last_id),
+            )
+            if not cur.rowcount:
+                return
+            self._db.executemany(
+                "UPDATE partitions SET copied = 0 WHERE ref = ? AND key = ?",
+                [(ref, key) for key in superseded],
+            )
+
+    def last_ids(self, ref: str) -> dict[str, str]:
+        """The stored last id of each partition of `ref` that has one, by key."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT key, last_id FROM partitions "
+                "WHERE ref = ? AND last_id IS NOT NULL ORDER BY rowid",
+                (ref,),
+            ).fetchall()
+        return dict(rows)
 
     def raise_total(self, ref: str, total: int) -> None:
         """Store `total` for `ref` when it is above the stored total."""
