@@ -137,6 +137,24 @@ def weaviate_object(name: str) -> Object[Any, Any]:
     return objects[0]
 
 
+def weaviate_delete_object(name: str, uuid: Any) -> None:
+    """Delete the object `uuid` of the target collection `name`."""
+    assert _collection(name).data.delete_by_id(uuid), f"{name} has no {uuid}"
+
+
+def weaviate_insert_object(name: str, obj: Object[Any, Any]) -> None:
+    """Insert `obj`, an object read with its vectors, into `name` again."""
+    properties = {k: v for k, v in obj.properties.items() if v is not None}
+    _collection(name).data.insert(
+        properties=properties, vector=obj.vector, uuid=obj.uuid
+    )
+
+
+def weaviate_update_object(name: str, uuid: Any, properties: dict[str, Any]) -> None:
+    """Set `properties` of the object `uuid` of `name`; other properties stay."""
+    _collection(name).data.update(uuid=uuid, properties=properties)
+
+
 def weaviate_tenants(name: str) -> set[str]:
     """The tenant names of the target collection `name`."""
     return set(_weaviate().collections.use(name).tenants.get())

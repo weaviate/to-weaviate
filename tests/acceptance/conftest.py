@@ -23,11 +23,14 @@ from e2e import (
     weaviate_compressed,
     weaviate_config,
     weaviate_count,
+    weaviate_delete_object,
     weaviate_exists,
+    weaviate_insert_object,
     weaviate_near_text,
     weaviate_near_vector,
     weaviate_object,
     weaviate_tenants,
+    weaviate_update_object,
 )
 
 # The test modules import these names from this module.
@@ -40,11 +43,14 @@ __all__ = [
     "weaviate_compressed",
     "weaviate_config",
     "weaviate_count",
+    "weaviate_delete_object",
     "weaviate_exists",
+    "weaviate_insert_object",
     "weaviate_near_text",
     "weaviate_near_vector",
     "weaviate_object",
     "weaviate_tenants",
+    "weaviate_update_object",
     "write_plan",
 ]
 
