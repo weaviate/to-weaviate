@@ -207,8 +207,11 @@ def test_kwargs_group_unions_properties_in_first_seen_order():
 class FakeTenants:
     def __init__(self) -> None:
         self.created: list[list[str]] = []
+        self.fail: list[Exception] = []
 
     def create(self, tenants: list[Any]) -> None:
+        if self.fail:
+            raise self.fail.pop(0)
         self.created.append([t.name for t in tenants])
 
 
@@ -480,6 +483,20 @@ def test_ensure_collection_exists_adds_tenants():
     existing = FakeCollection(config(tenancy=True))
     result = ensure_collection(FakeClient(existing), [entry(tenant="a")])  # type: ignore[arg-type]
     assert result == "exists" and existing.tenants.created == [["a"]]
+
+
+@pytest.mark.parametrize("status", [400, 422])
+def test_refused_tenants_are_schema_rejected_and_name_the_tenants(status):
+    existing = FakeCollection(config(tenancy=True))
+    body = {"error": [{"message": "'a.b' is not a valid tenant name"}]}
+    existing.tenants.fail = [
+        UnexpectedStatusCodeError("refused", httpx.Response(status, json=body))
+    ]
+    with pytest.raises(SchemaRejected) as info:
+        WeaviateSchema(FakeClient(existing)).ensure([entry(tenant="a.b")])  # type: ignore[arg-type]
+    assert str(info.value) == "'a.b' is not a valid tenant name"
+    assert info.value.action == "create the tenants of My_docs"
+    assert existing.tenants.created == []
 
 
 def test_ensure_collection_mismatch_raises():
