@@ -10,6 +10,7 @@ from weaviate.classes.config import (
     Configure,
     DataType,
     Property,
+    Reconfigure,
     Tokenization,
     VectorDistances,
 )
@@ -85,7 +86,14 @@ class PlanMismatch(Exception):
 
 
 class SchemaRejected(Exception):
-    """The server refused to create a collection; the message is the server's."""
+    """The server refused a schema change; the message is the server's.
+
+    `action` names the change, as in "create the collection".
+    """
+
+    def __init__(self, message: str, action: str = "create the collection") -> None:
+        super().__init__(message)
+        self.action = action
 
 
 class Schema(Protocol):
@@ -96,6 +104,8 @@ class Schema(Protocol):
     def differences(self, group: list[CollectionPlan]) -> list[str] | None: ...
 
     def ensure(self, group: list[CollectionPlan]) -> Literal["created", "exists"]: ...
+
+    def enable_trained_quantizers(self, entry: CollectionPlan) -> None: ...
 
 
 def module_names(module: str) -> frozenset[str]:
@@ -161,16 +171,21 @@ def _property(plan: PropertyPlan) -> Property:
     )
 
 
+def _quantizer_fields(plan: VectorPlan) -> dict[str, Any]:
+    """The planned fields of the quantizer of `plan` that are set."""
+    q = plan.index.quantizer
+    return {
+        f: getattr(q, f) for f in QUANTIZER_FIELDS[q.type] if getattr(q, f) is not None
+    }
+
+
 def _quantizer(plan: VectorPlan) -> Any:
     q = plan.index.quantizer
     if q.type == "default":
         return None
     if q.type == "none":
         return Configure.VectorIndex.Quantizer.none()
-    fields = {
-        f: getattr(q, f) for f in QUANTIZER_FIELDS[q.type] if getattr(q, f) is not None
-    }
-    return getattr(Configure.VectorIndex.Quantizer, q.type)(**fields)
+    return getattr(Configure.VectorIndex.Quantizer, q.type)(**_quantizer_fields(plan))
 
 
 def _is_url(value: Any) -> bool:
@@ -298,6 +313,26 @@ def collection_kwargs(group: list[CollectionPlan]) -> dict[str, Any]:
     return kwargs
 
 
+def quantizer_updates(entry: CollectionPlan) -> list[Any]:
+    """Config updates that enable each planned quantizer that needs training.
+
+    They hold the same quantizer as `collection_kwargs`, so the collection
+    config does not change. Only hnsw takes a quantizer that needs training.
+    """
+    return [
+        Reconfigure.Vectors.update(
+            name=vector.name,
+            vector_index_config=getattr(Reconfigure.VectorIndex, vector.index.type)(
+                quantizer=getattr(
+                    Reconfigure.VectorIndex.Quantizer, vector.index.quantizer.type
+                )(**_quantizer_fields(vector))
+            ),
+        )
+        for vector in entry.target.vectors
+        if vector.index.quantizer.needs_training()
+    ]
+
+
 def _index_quantizers(index: Any) -> list[str]:
     """Quantizer types of an index; a dynamic index has one per part."""
     parts = (
@@ -419,8 +454,13 @@ def _server_message(exc: UnexpectedStatusCodeError) -> str:
 
 
 class WeaviateSchema:
-    def __init__(self, client: weaviate.WeaviateClient) -> None:
+    def __init__(
+        self,
+        client: weaviate.WeaviateClient,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self._client = client
+        self._sleep = sleep
 
     def modules(self) -> set[str]:
         return set(self._client.get_meta().get("modules") or {})
@@ -430,8 +470,28 @@ class WeaviateSchema:
 
     def ensure(self, group: list[CollectionPlan]) -> Literal["created", "exists"]:
         try:
-            return ensure_collection(self._client, group)
+            return ensure_collection(self._client, group, self._sleep)
         except UnexpectedStatusCodeError as exc:
             if exc.status_code in (400, 422):
                 raise SchemaRejected(_server_message(exc)) from exc
+            raise
+
+    def enable_trained_quantizers(self, entry: CollectionPlan) -> None:
+        """Send `quantizer_updates` of `entry`, so that the server trains them."""
+        updates = quantizer_updates(entry)
+        if not updates:
+            return
+        name = entry.target.name
+        config = self._client.collections.get(name).config
+        try:
+            with_retry(
+                lambda: config.update(vector_config=updates),
+                transient,
+                sleep=self._sleep,
+            )
+        except UnexpectedStatusCodeError as exc:
+            if exc.status_code in (400, 422):
+                raise SchemaRejected(
+                    _server_message(exc), f"enable the quantizers of {name}"
+                ) from exc
             raise

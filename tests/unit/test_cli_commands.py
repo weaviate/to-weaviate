@@ -951,6 +951,70 @@ def test_entries_of_one_collection_may_have_other_properties_and_source_keys(
     assert r.exit_code == 0, r.output
 
 
+# (quantizer in plan.yaml, whether copy enables it again after the pages).
+TRAINING = {
+    "sq": ({"type": "sq", "training_limit": 100}, True),
+    "pq": ({"type": "pq", "segments": 2, "training_limit": 100}, True),
+    "rq-centering": ({"type": "rq", "bits": 4, "centering": True}, True),
+    "rq": ({"type": "rq", "bits": 8}, False),
+    "bq": ({"type": "bq"}, False),
+    "none": ({"type": "none"}, False),
+    "default": ({"type": "default"}, False),
+}
+
+
+@pytest.mark.parametrize(("quantizer", "sent"), TRAINING.values(), ids=TRAINING)
+def test_copy_enables_a_quantizer_that_needs_training_after_the_pages(
+    tmp_path, quantizer, sent
+):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    _set_index(tmp_path / DIR / "plan.yaml", {"type": "hnsw", "quantizer": quantizer})
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert fakes.schema.updated == ([("Docs", None)] if sent else [])
+    assert len(fakes.writer.objects) == 10
+
+
+def test_copy_enables_the_quantizer_once_per_tenant_entry(tmp_path):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    _set_index(
+        tmp_path / DIR / "plan.yaml", {"type": "hnsw", "quantizer": {"type": "sq"}}
+    )
+    two_entries(tmp_path / DIR, ("Docs", "a"), ("Docs", "b"))
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert fakes.schema.updated == [("Docs", "a"), ("Docs", "b")]
+
+
+def test_a_refused_quantizer_update_stops_copy_and_resumes_without_pages(tmp_path):
+    refused = SchemaRejected("sq is not supported", "enable the quantizers of Docs")
+    fakes = inspected(
+        FakeFactories(
+            FakeSource(cli_records(10)), schema=FakeSchema(update_error=refused)
+        )
+    )
+    _set_index(
+        tmp_path / DIR / "plan.yaml", {"type": "hnsw", "quantizer": {"type": "sq"}}
+    )
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert d["code"] == "target_rejected_schema"
+    assert d["message"] == (
+        "Weaviate refused to enable the quantizers of Docs: sq is not supported"
+    )
+    status = json.loads(invoke(fakes, "status", "--json").stdout)["collections"][0]
+    assert (status["copied"], status["done"]) == (10, False)
+    reads = fakes.source.read_calls
+    fakes.schema.update_error = None
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert fakes.source.read_calls == reads
+    assert fakes.schema.updated == [("Docs", None)]
+    status = json.loads(invoke(fakes, "status", "--json").stdout)["collections"][0]
+    assert (status["copied"], status["done"]) == (10, True)
+
+
 def test_copy_requires_provider_key():
     fakes = inspected(
         FakeFactories(FakeSource(cli_records(10))),

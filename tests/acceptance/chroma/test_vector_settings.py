@@ -114,11 +114,8 @@ UNSUPPORTED = {
         "quantizer": {"type": "pq", "segments": 5, "training_limit": 100},
     },
 }
-COMPRESSION_REASON = (
-    "B8 finding, not fixed: Weaviate 1.40.4 without ASYNC_INDEXING never "
-    "trains a quantizer that the collection had when it was created, and copy "
-    "creates the collection with it"
-)
+# Quantizers that the server trains on the copied vectors. Without
+# ASYNC_INDEXING it trains them when copy enables them again after the pages.
 TRAINED = {
     "sq": {"type": "sq", "training_limit": 100},
     "pq": {"type": "pq", "segments": 8, "centroids": 16, "training_limit": 100},
@@ -223,7 +220,6 @@ def test_check_refuses_index_settings_that_the_server_does_not_create(
     assert not weaviate_exists("Docs_rq")
 
 
-@pytest.mark.xfail(strict=True, reason=COMPRESSION_REASON)
 @pytest.mark.parametrize("quantizer", TRAINED.values(), ids=TRAINED)
 def test_trained_quantizer_compresses_the_vectors(
     docs_rq_inspection, tmp_path, quantizer

@@ -402,6 +402,8 @@ class FakeSchema:
 
     `existing` maps a target name to the differences its collection has from
     the plan. `ensure` raises `ensure_error` when it is set.
+    `enable_trained_quantizers` records (target name, tenant) and raises
+    `update_error` when it is set.
     """
 
     def __init__(
@@ -409,11 +411,14 @@ class FakeSchema:
         modules: Iterable[str] = ("text2vec-openai", "text2vec-weaviate"),
         existing: dict[str, list[str]] | None = None,
         ensure_error: Exception | None = None,
+        update_error: Exception | None = None,
     ) -> None:
         self.enabled = set(modules)
         self.existing = dict(existing or {})
         self.ensure_error = ensure_error
+        self.update_error = update_error
         self.ensured: list[str] = []
+        self.updated: list[tuple[str, str | None]] = []
 
     def modules(self) -> set[str]:
         return set(self.enabled)
@@ -433,6 +438,11 @@ class FakeSchema:
             self.existing[name] = []
             return "created"
         return "exists"
+
+    def enable_trained_quantizers(self, entry: CollectionPlan) -> None:
+        if self.update_error is not None:
+            raise self.update_error
+        self.updated.append((entry.target.name, entry.target.tenant))
 
 
 class FakeFactories:

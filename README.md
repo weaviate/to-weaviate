@@ -89,6 +89,12 @@ batch of more than one record, `copy` retries the batch as it retries a
 network error. When the retries are used up, it stops with
 `target_unreachable` and stores no reject. The next run starts at that page.
 
+A quantizer that Weaviate trains on the vectors (`sq`, `pq`, and `rq` with
+`centering`) is enabled again after the last page of each plan entry, so
+it compresses the vectors with and without `ASYNC_INDEXING` on the server.
+The entry is done only after that update; a run that stops before it sends
+the update again and copies no page again.
+
 `state.sqlite` also records the target of each source collection: the
 Weaviate host and port, the collection and the tenant. Once records of a
 source collection are copied, `copy` stops with `state_mismatch` when
@@ -244,11 +250,10 @@ suite deletes the Weaviate collections that `SUITE_COLLECTIONS` in
 collection, also when the test Chroma holds collections that the seed does
 not make.
 
-Four tests are marked `xfail(strict=True)`: a dynamic index, and sq, pq or
-centered rq that compress the vectors. They describe two findings that are
-not fixed, and they expect a Weaviate server without `ASYNC_INDEXING`, as
-in CI. Against a server with `ASYNC_INDEXING=true` they can pass, and
-strict mode then reports them as failures.
+One test is marked `xfail(strict=True)`: the copy of a dynamic index. It
+describes a finding that is not fixed and expects a Weaviate server without
+`ASYNC_INDEXING`, as in CI. Against a server with `ASYNC_INDEXING=true` it
+can pass, and strict mode then reports it as a failure.
 
 The `Makefile` starts the servers and sets the variables. `make` alone
 prints the targets. `make acceptance-up` and `make acceptance-down` call

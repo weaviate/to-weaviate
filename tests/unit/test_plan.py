@@ -536,3 +536,20 @@ def test_load_accepts_a_key_that_a_merge_key_brings_in_again(tmp_path):
 
 def test_models_are_exported():
     assert CollectionPlan and TargetPlan
+
+
+@pytest.mark.parametrize(
+    ("quantizer", "needed"),
+    [
+        (QuantizerPlan(type="sq"), True),
+        (QuantizerPlan(type="pq"), True),
+        (QuantizerPlan(type="rq", bits=4, centering=True), True),
+        (QuantizerPlan(type="rq", bits=8), False),
+        (QuantizerPlan(type="rq", bits=4, centering=False), False),
+        (QuantizerPlan(type="bq"), False),
+        (QuantizerPlan(type="none"), False),
+        (QuantizerPlan(), False),
+    ],
+)
+def test_quantizer_needs_training(quantizer, needed):
+    assert quantizer.needs_training() is needed

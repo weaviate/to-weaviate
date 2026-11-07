@@ -64,6 +64,12 @@ IGNORED_FIELDS: dict[str, dict[str, tuple[str, ...]]] = {
     "flat": {"rq": ("training_limit",)},
     "hfresh": {"rq": ("cache", "training_limit")},
 }
+# Quantizer types that Weaviate trains on the vectors of the index; rq with
+# centering is trained too. Without ASYNC_INDEXING, Weaviate 1.40.4 does not
+# train such a quantizer that the collection was created with, and trains it
+# when a config update enables it on an index that holds vectors. With
+# ASYNC_INDEXING that update changes nothing.
+TRAINED_QUANTIZERS = ("sq", "pq")
 
 # The distances that target.schema maps to VectorDistances.
 DISTANCES = tuple(sorted(d.value for d in VectorDistances))
@@ -111,6 +117,12 @@ class QuantizerPlan(_Model):
                     f"{field}={value!r} is not valid for quantizer type {self.type!r}"
                 )
         return self
+
+    def needs_training(self) -> bool:
+        """Whether Weaviate trains this quantizer on the vectors of the index."""
+        return self.type in TRAINED_QUANTIZERS or (
+            self.type == "rq" and bool(self.centering)
+        )
 
 
 class IndexPlan(_Model):

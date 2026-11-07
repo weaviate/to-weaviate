@@ -1,8 +1,11 @@
+import time
+
 import pytest
 from chroma.seed import count
 from conftest import (
     read_plan,
     run,
+    weaviate_compressed,
     weaviate_config,
     weaviate_count,
     weaviate_exists,
@@ -11,6 +14,7 @@ from conftest import (
 )
 
 TARGET = "Tenants"
+COMPRESSION_WAIT = 3.0
 # Source collection to tenant of TARGET.
 TENANTS = {"tenant-a": "a", "tenant-b": "b"}
 
@@ -100,3 +104,24 @@ def test_entries_of_one_collection_must_agree_on_its_settings(
         assert r.exit_code == 2 and r.data["code"] == "invalid_plan", r
         assert [e["code"] for e in r.data["errors"]] == [code], r
     assert not weaviate_exists(TARGET)
+
+
+def test_a_trained_quantizer_compresses_the_vectors_of_every_tenant(seeded, tmp_path):
+    names = [arg for source in TENANTS for arg in ("--collection", source)]
+    r = run(["inspect", "chroma", *names], tmp_path)
+    assert r.exit_code == 0, r
+    plan = read_plan(tmp_path)
+    for entry in plan["collections"]:
+        entry["target"]["name"] = TARGET
+        entry["target"]["tenant"] = TENANTS[entry["source"]["name"]]
+        index = {"type": "hnsw", "quantizer": {"type": "sq"}}
+        entry["target"]["vectors"][0]["index"] = index
+    write_plan(tmp_path, plan)
+    for cmd in (["check"], ["copy"], ["verify"]):
+        r = run(cmd, tmp_path)
+        assert r.exit_code == 0 and r.data["status"] == "success", r
+    # One shard per tenant; copy enabled sq after the pages of each tenant.
+    deadline = time.monotonic() + COMPRESSION_WAIT
+    while weaviate_compressed(TARGET) != [True, True] and time.monotonic() < deadline:
+        time.sleep(0.5)
+    assert weaviate_compressed(TARGET) == [True, True]
