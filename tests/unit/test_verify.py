@@ -257,10 +257,12 @@ def test_float_property_is_compared_with_isclose():
 
 
 # (source int, int that the target returns, same). Weaviate 1.40.4 returns an
-# int above 2**53 rounded to a double.
+# int above 2**53 rounded to a double. copy rejects an int whose double is
+# 2**63, so verify never compares one.
 STORED_INTS = [
     (2**53 + 1, 2**53, True),
-    (2**63 - 1, 2**63 - 1, True),
+    (2**63 - 1024, 2**63 - 1024, True),
+    (-(2**63), -(2**63), True),
     ([2**53 + 1, 3], [2**53, 3], True),
     (2**53 + 1, 2**53 + 4, False),
     (2003, 2004, False),

@@ -132,8 +132,12 @@ so when the counts match it finds a missing record only if the sample holds
 that record.
 
 Weaviate stores an `int` property as a double, so an int above 2**53 in
-magnitude is stored rounded, and `verify` compares the rounded value. To
-keep every digit of such a value, type the property `text` in `plan.yaml`.
+magnitude is stored rounded, and `verify` compares the rounded value. An
+int that rounds to 2**63 or above is a reject with the reason "int <v>
+cannot be stored: Weaviate keeps ints as doubles and refuses this value;
+type the property text", because whether the server takes such a value
+depends on its CPU. To keep every digit of such a value, type the property
+`text` in `plan.yaml`.
 
 - `--sample N`: records to compare per collection, 1 to 10000. Default: 300.
 - `--quick`: skip the comparison of the full id lists.
