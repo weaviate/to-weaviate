@@ -39,6 +39,7 @@ __all__ = [
     "SUITE_COLLECTIONS",
     "KnownFinding",
     "Result",
+    "copy_and_verify",
     "read_plan",
     "run",
     "start",
@@ -133,6 +134,17 @@ def run(args: list[str], workdir: Path, env: dict[str, str] | None = None) -> Re
     """
     cleared = dict.fromkeys(CLEARED_VARIABLES, "")
     return e2e.run(args, workdir, {**cleared, **(env or {})})
+
+
+def copy_and_verify(workdir: Path) -> Result:
+    """Run check, copy and verify in `workdir`; each must succeed.
+
+    Returns the result of verify.
+    """
+    for cmd in (["check"], ["copy"], ["verify"]):
+        r = run(cmd, workdir)
+        assert r.exit_code == 0 and r.data["status"] == "success", r
+    return r
 
 
 def start(

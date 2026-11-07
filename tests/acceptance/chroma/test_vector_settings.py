@@ -7,6 +7,7 @@ import pytest
 from chroma.seed import records
 from conftest import (
     KnownFinding,
+    copy_and_verify,
     read_plan,
     run,
     weaviate_compressed,
@@ -132,17 +133,11 @@ TRAINED = {
 COMPRESSION_WAIT = 3.0
 
 
-def _copy_and_verify(workdir: Path) -> None:
-    for cmd in (["check"], ["copy"], ["verify"]):
-        r = run(cmd, workdir)
-        assert r.exit_code == 0 and r.data["status"] == "success", r
-
-
 def test_chroma_distances_map_to_weaviate_distances(seeded, tmp_path):
     names = [arg for source, _, _ in DISTANCES for arg in ("--collection", source)]
     r = run(["inspect", "chroma", *names], tmp_path)
     assert r.exit_code == 0, r
-    _copy_and_verify(tmp_path)
+    copy_and_verify(tmp_path)
     for source, target, distance in DISTANCES:
         index = weaviate_config(target).vector_config["default"].vector_index_config
         assert index.distance_metric.value == distance, target
@@ -198,7 +193,7 @@ def _docs_rq_index() -> Any:
 def test_quantizer_settings_reach_the_server(docs_rq_inspection, tmp_path, quantizer):
     index = {"type": "hnsw", "quantizer": quantizer}
     _plan_with_index(docs_rq_inspection, tmp_path, index)
-    _copy_and_verify(tmp_path)
+    copy_and_verify(tmp_path)
     found = _docs_rq_index()
     assert found.vector_index_type() == "hnsw"
     _assert_quantizer(found.quantizer, quantizer)
@@ -261,7 +256,7 @@ def test_trained_quantizer_compresses_the_vectors(
 ):
     index = {"type": "hnsw", "quantizer": quantizer}
     _plan_with_index(docs_rq_inspection, tmp_path, index)
-    _copy_and_verify(tmp_path)
+    copy_and_verify(tmp_path)
     deadline = time.monotonic() + COMPRESSION_WAIT
     while weaviate_compressed("Docs_rq") != [True] and time.monotonic() < deadline:
         time.sleep(0.5)

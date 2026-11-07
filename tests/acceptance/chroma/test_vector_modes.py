@@ -2,6 +2,7 @@ import math
 
 from chroma.seed import records
 from conftest import (
+    copy_and_verify,
     run,
     weaviate_by_source_id,
     weaviate_config,
@@ -30,9 +31,7 @@ def _inspect_tiny_l2(workdir, vectors: str) -> None:
         workdir,
     )
     assert r.exit_code == 0, r
-    for cmd in (["check"], ["copy"], ["verify"]):
-        r = run(cmd, workdir)
-        assert r.exit_code == 0 and r.data["status"] == "success", r
+    copy_and_verify(workdir)
 
 
 def test_embed_mode_vectorizes_the_documents_in_weaviate(seeded, tmp_path):

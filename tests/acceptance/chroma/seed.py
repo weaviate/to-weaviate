@@ -50,7 +50,7 @@ class Record:
     embedding: list[float]
     document: str | None
     metadata: dict[str, Any]
-    uri: str
+    uri: str | None
 
 
 def _vector(rng: random.Random, dimension: int) -> list[float]:

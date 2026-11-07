@@ -3,6 +3,7 @@ import time
 import pytest
 from chroma.seed import count
 from conftest import (
+    copy_and_verify,
     read_plan,
     run,
     weaviate_compressed,
@@ -29,9 +30,7 @@ def test_two_collections_copy_into_two_tenants_of_one_collection(seeded, tmp_pat
         entry["target"]["name"] = TARGET
         entry["target"]["tenant"] = TENANTS[entry["source"]["name"]]
     write_plan(tmp_path, plan)
-    for cmd in (["check"], ["copy"], ["verify"]):
-        r = run(cmd, tmp_path)
-        assert r.exit_code == 0 and r.data["status"] == "success", r
+    r = copy_and_verify(tmp_path)
     checks = r.data["checks"]
     assert sorted({c["tenant"] for c in checks}) == ["a", "b"]
     assert all(c["passed"] and c["collection"] == TARGET for c in checks), checks
@@ -117,9 +116,7 @@ def test_a_trained_quantizer_compresses_the_vectors_of_every_tenant(seeded, tmp_
         index = {"type": "hnsw", "quantizer": {"type": "sq"}}
         entry["target"]["vectors"][0]["index"] = index
     write_plan(tmp_path, plan)
-    for cmd in (["check"], ["copy"], ["verify"]):
-        r = run(cmd, tmp_path)
-        assert r.exit_code == 0 and r.data["status"] == "success", r
+    copy_and_verify(tmp_path)
     # One shard per tenant; copy enabled sq after the pages of each tenant.
     deadline = time.monotonic() + COMPRESSION_WAIT
     while weaviate_compressed(TARGET) != [True, True] and time.monotonic() < deadline:

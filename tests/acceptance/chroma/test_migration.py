@@ -8,6 +8,7 @@ from chroma.seed import (
 )
 from conftest import (
     SUITE_COLLECTIONS,
+    copy_and_verify,
     read_plan,
     run,
     weaviate_by_source_id,
@@ -31,9 +32,7 @@ def test_every_seeded_collection_in_one_run(seeded, tmp_path):
         e for e in plan["collections"] if e["source"]["name"] in COLLECTIONS
     ]
     write_plan(tmp_path, plan)
-    for cmd in (["check"], ["copy"], ["verify"]):
-        r = run(cmd, tmp_path)
-        assert r.exit_code == 0 and r.data["status"] == "success", r
+    r = copy_and_verify(tmp_path)
     checks = r.data["checks"]
     assert len(checks) == 3 * len(COLLECTIONS) and all(c["passed"] for c in checks)
     r = run(["status"], tmp_path)
@@ -56,9 +55,7 @@ def test_end_to_end(seeded, tmp_path):
     names = ["--collection", "docs-cosine", "--collection", "tiny.l2"]
     r = run(["inspect", "chroma", *names], tmp_path)
     assert r.exit_code == 0, r
-    for cmd in (["check"], ["copy"], ["verify"]):
-        r = run(cmd, tmp_path)
-        assert r.exit_code == 0 and r.data["status"] == "success", r
+    copy_and_verify(tmp_path)
     assert weaviate_count("Docs_cosine") == 700 and weaviate_count("Tiny_l2") == 10
     # The seed gives tiny.l2 UUID ids, and a source id that is a UUID is kept.
     tiny = weaviate_object("Tiny_l2")
@@ -88,9 +85,7 @@ DOCS_COSINE_TYPES = {
 def test_metadata_shapes_map_to_property_types(seeded, tmp_path):
     r = run(["inspect", "chroma", "--collection", "docs-cosine"], tmp_path)
     assert r.exit_code == 0, r
-    for cmd in (["check"], ["copy"], ["verify"]):
-        r = run(cmd, tmp_path)
-        assert r.exit_code == 0 and r.data["status"] == "success", r
+    r = copy_and_verify(tmp_path)
     records_check = next(c for c in r.data["checks"] if c["name"] == "records")
     assert records_check["detail"].startswith("sampled 300, compared 300,"), r
     properties = weaviate_config("Docs_cosine").properties
@@ -181,8 +176,6 @@ def test_rq_bits_reach_the_server(seeded, tmp_path):
         tmp_path,
     )
     assert r.exit_code == 0, r
-    for cmd in (["check"], ["copy"], ["verify"]):
-        r = run(cmd, tmp_path)
-        assert r.exit_code == 0, r
+    copy_and_verify(tmp_path)
     vector = weaviate_config("Docs_rq").vector_config["default"]
     assert vector.vector_index_config.quantizer.bits == 4
