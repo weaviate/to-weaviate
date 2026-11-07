@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from to_weaviate.naming import reserved_suffix
 from to_weaviate.plan import (
+    DISTANCES,
     CollectionPlan,
     Plan,
     PropertyPlan,
@@ -12,7 +13,6 @@ from to_weaviate.plan import (
 )
 from to_weaviate.sources.base import SourceCollection
 from to_weaviate.target.schema import (
-    DISTANCES,
     PROPERTY_TYPES,
     USERINFO_TEXT,
     PlanMismatch,

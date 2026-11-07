@@ -56,7 +56,6 @@ _DATA_TYPES = {
     "boolean[]": DataType.BOOL_ARRAY,
 }
 PROPERTY_TYPES = tuple(sorted(_DATA_TYPES))
-DISTANCES = tuple(sorted(d.value for d in VectorDistances))
 _QUANTIZER_CLASSES: dict[type, str] = {
     _RQConfig: "rq",
     _PQConfig: "pq",

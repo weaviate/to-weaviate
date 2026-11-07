@@ -4,6 +4,7 @@ from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, model_validator
+from weaviate.classes.config import VectorDistances
 
 from to_weaviate.naming import collection_name, property_name
 from to_weaviate.sources.base import SourceCollection
@@ -35,6 +36,8 @@ QUANTIZER_FIELDS: dict[str, set[str]] = {
     "bq": {"rescore_limit", "cache"},
 }
 
+# The distances that target.schema maps to VectorDistances.
+DISTANCES = tuple(sorted(d.value for d in VectorDistances))
 KEEP_DISTANCES_WITHOUT_INDEX = (None, "cosine")
 MERGE_TAG = "tag:yaml.org,2002:merge"
 
@@ -110,8 +113,10 @@ class VectorPlan(_Model):
 
     @model_validator(mode="after")
     def _distance_needs_named_index(self) -> "VectorPlan":
+        # A distance outside DISTANCES is the invalid_distance finding of check.
         if (
             self.index.type == "default"
+            and self.distance in DISTANCES
             and self.distance not in KEEP_DISTANCES_WITHOUT_INDEX
         ):
             raise ValueError(

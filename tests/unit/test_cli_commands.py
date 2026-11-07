@@ -1290,6 +1290,23 @@ def test_a_distance_without_a_mapping_is_an_invalid_plan(tmp_path, cmd):
     assert fakes.writer.calls == 0
 
 
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_a_distance_without_a_mapping_and_the_default_index_is_an_invalid_plan(
+    tmp_path, cmd
+):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    assert [v.index.type for v in target.vectors] == ["default"]
+    vectors = [v.model_copy(update={"distance": "Cosine"}) for v in target.vectors]
+    edit_target(tmp_path / DIR, vectors=vectors)
+    r = invoke(fakes, cmd, "--json")
+    message = f"vector default: distance Cosine is not one of {DISTANCES}"
+    assert plan_errors(r) == [
+        {"code": "invalid_distance", "collection": "Docs", "message": message}
+    ]
+    assert fakes.writer.calls == 0
+
+
 @pytest.mark.parametrize("cmd", ["check", "copy", "status", "verify"])
 def test_a_plan_that_is_not_utf8_is_an_invalid_plan(tmp_path, cmd):
     fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
