@@ -42,6 +42,9 @@ CREATE TABLE IF NOT EXISTS targets (
     name TEXT NOT NULL,
     tenant TEXT
 );
+CREATE TABLE IF NOT EXISTS quantizer_updates (
+    ref TEXT PRIMARY KEY
+);
 """
 
 
@@ -71,8 +74,8 @@ class State:
     """Copy progress in sqlite. Every method commits before it returns.
 
     Collections and partitions are listed in insertion (rowid) order. A file
-    written before the `targets` table existed gets the table when it is
-    opened, with no target for any ref.
+    written before the `targets` or the `quantizer_updates` table existed gets
+    the table when it is opened, with no row for any ref.
     """
 
     def __init__(self, path: Path) -> None:
@@ -194,13 +197,25 @@ class State:
                 "WHERE p.ref = c.ref), "
                 "(SELECT COUNT(*) FROM rejects r WHERE r.ref = c.ref), "
                 "(SELECT COUNT(*) FROM partitions p "
-                "WHERE p.ref = c.ref AND p.finished = 0) "
+                "WHERE p.ref = c.ref AND p.finished = 0) + "
+                "(SELECT COUNT(*) FROM quantizer_updates q WHERE q.ref = c.ref) "
                 "FROM collections c ORDER BY c.rowid"
             ).fetchall()
         return [
-            CollectionProgress(ref, total, copied, rejects, unfinished == 0)
-            for ref, total, copied, rejects, unfinished in rows
+            CollectionProgress(ref, total, copied, rejects, pending == 0)
+            for ref, total, copied, rejects, pending in rows
         ]
+
+    def expect_quantizer_update(self, ref: str) -> None:
+        """Keep `ref` not done until `quantizers_updated(ref)` is called."""
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT OR IGNORE INTO quantizer_updates (ref) VALUES (?)", (ref,)
+            )
+
+    def quantizers_updated(self, ref: str) -> None:
+        with self._lock, self._db:
+            self._db.execute("DELETE FROM quantizer_updates WHERE ref = ?", (ref,))
 
     def has_progress(self, ref: str) -> bool:
         """True when a record of `ref` was copied or a partition of it finished."""

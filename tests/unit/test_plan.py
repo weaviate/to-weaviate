@@ -270,6 +270,168 @@ def test_quantizer_needs_a_named_index_type():
         IndexPlan(type="default", quantizer=QuantizerPlan(type="rq"))
 
 
+# The quantizer types that Weaviate 1.40.4 creates for each named index type.
+SUPPORTED_QUANTIZERS = {
+    "hnsw": ["default", "none", "rq", "sq", "pq", "bq"],
+    "flat": ["default", "none", "rq", "bq"],
+    "dynamic": ["default", "none", "rq", "bq"],
+    "hfresh": ["default", "rq"],
+}
+ALL_QUANTIZERS = ["default", "none", "rq", "sq", "pq", "bq"]
+
+
+@pytest.mark.parametrize(
+    ("index", "quantizer"),
+    [(i, q) for i, qs in SUPPORTED_QUANTIZERS.items() for q in qs],
+)
+def test_index_accepts_the_quantizer_types_that_it_supports(index, quantizer):
+    plan = IndexPlan(type=index, quantizer=QuantizerPlan(type=quantizer))
+    assert plan.quantizer.type == quantizer
+
+
+@pytest.mark.parametrize(
+    ("index", "quantizer"),
+    [
+        (i, q)
+        for i, qs in SUPPORTED_QUANTIZERS.items()
+        for q in ALL_QUANTIZERS
+        if q not in qs
+    ],
+)
+def test_index_refuses_a_quantizer_type_that_it_does_not_support(index, quantizer):
+    with pytest.raises(ValidationError) as e:
+        IndexPlan(type=index, quantizer=QuantizerPlan(type=quantizer))
+    supported = ", ".join(SUPPORTED_QUANTIZERS[index])
+    assert (
+        f"quantizer type {quantizer!r} is not supported by index type {index!r}; "
+        f"it supports {supported}"
+    ) in str(e.value)
+
+
+# The rq bits that Weaviate 1.40.4 accepts for each named index type.
+SUPPORTED_RQ_BITS = {
+    "hnsw": [1, 4, 8],
+    "flat": [1, 8],
+    "dynamic": [1, 8],
+    "hfresh": [1],
+}
+
+
+@pytest.mark.parametrize(
+    ("index", "bits"),
+    [(i, b) for i, bits in SUPPORTED_RQ_BITS.items() for b in bits],
+)
+def test_index_accepts_the_rq_bits_that_it_supports(index, bits):
+    plan = IndexPlan(type=index, quantizer=QuantizerPlan(type="rq", bits=bits))
+    assert plan.quantizer.bits == bits
+
+
+@pytest.mark.parametrize(
+    ("index", "bits"),
+    [
+        (i, b)
+        for i, bits in SUPPORTED_RQ_BITS.items()
+        for b in (1, 4, 8)
+        if b not in bits
+    ],
+)
+def test_index_refuses_rq_bits_that_it_does_not_support(index, bits):
+    with pytest.raises(ValidationError) as e:
+        IndexPlan(type=index, quantizer=QuantizerPlan(type="rq", bits=bits))
+    supported = ", ".join(map(str, SUPPORTED_RQ_BITS[index]))
+    assert (
+        f"bits={bits} of quantizer type 'rq' is not supported by index type "
+        f"{index!r}; it supports {supported}"
+    ) in str(e.value)
+
+
+def test_rq_centering_with_hnsw_and_4_bits_is_accepted():
+    quantizer = QuantizerPlan(type="rq", bits=4, centering=True)
+    assert IndexPlan(type="hnsw", quantizer=quantizer).quantizer.centering is True
+
+
+# A server without a bits value uses 8 bits with hnsw.
+@pytest.mark.parametrize(
+    ("index", "bits"),
+    [
+        ("hnsw", None),
+        ("hnsw", 1),
+        ("hnsw", 8),
+        ("flat", 8),
+        ("dynamic", 1),
+        ("hfresh", 1),
+    ],
+)
+def test_rq_centering_needs_hnsw_and_4_bits(index, bits):
+    with pytest.raises(ValidationError) as e:
+        IndexPlan(
+            type=index, quantizer=QuantizerPlan(type="rq", bits=bits, centering=True)
+        )
+    assert "centering=True is supported only by index type 'hnsw' with bits=4" in (
+        str(e.value)
+    )
+
+
+@pytest.mark.parametrize("index", ["hnsw", "flat", "dynamic", "hfresh"])
+def test_rq_without_centering_is_accepted_by_every_index(index):
+    quantizer = QuantizerPlan(type="rq", bits=1, centering=False)
+    assert IndexPlan(type=index, quantizer=quantizer).quantizer.centering is False
+
+
+# (index type, quantizer type, field, value). Weaviate 1.40.4 stores the
+# collection without the field and returns no error.
+IGNORED_FIELDS = [
+    ("hnsw", "rq", "cache", True),
+    ("hnsw", "bq", "cache", True),
+    ("hnsw", "bq", "rescore_limit", 30),
+    ("flat", "rq", "training_limit", 100),
+    ("hfresh", "rq", "cache", True),
+    ("hfresh", "rq", "training_limit", 100),
+]
+# A dynamic index applies a field that its hnsw part or its flat part applies.
+APPLIED_FIELDS = [
+    ("hnsw", "rq", "rescore_limit", 40),
+    ("hnsw", "rq", "training_limit", 100),
+    ("hnsw", "sq", "rescore_limit", 25),
+    ("hnsw", "sq", "training_limit", 100),
+    ("hnsw", "pq", "segments", 8),
+    ("hnsw", "pq", "centroids", 16),
+    ("hnsw", "pq", "training_limit", 100),
+    ("flat", "rq", "cache", True),
+    ("flat", "rq", "rescore_limit", 40),
+    ("flat", "bq", "cache", True),
+    ("flat", "bq", "rescore_limit", 50),
+    ("hfresh", "rq", "rescore_limit", 66),
+    ("dynamic", "rq", "cache", True),
+    ("dynamic", "rq", "rescore_limit", 40),
+    ("dynamic", "rq", "training_limit", 100),
+    ("dynamic", "bq", "cache", True),
+    ("dynamic", "bq", "rescore_limit", 50),
+]
+
+
+@pytest.mark.parametrize(("index", "quantizer", "field", "value"), APPLIED_FIELDS)
+def test_index_accepts_a_quantizer_field_that_it_applies(
+    index, quantizer, field, value
+):
+    plan = IndexPlan(
+        type=index, quantizer=QuantizerPlan(type=quantizer, **{field: value})
+    )
+    assert getattr(plan.quantizer, field) == value
+
+
+@pytest.mark.parametrize(("index", "quantizer", "field", "value"), IGNORED_FIELDS)
+def test_index_refuses_a_quantizer_field_that_it_does_not_apply(
+    index, quantizer, field, value
+):
+    with pytest.raises(ValidationError) as e:
+        IndexPlan(type=index, quantizer=QuantizerPlan(type=quantizer, **{field: value}))
+    assert (
+        f"{field}={value!r} of quantizer type {quantizer!r} is not applied by "
+        f"index type {index!r}"
+    ) in str(e.value)
+
+
 def test_index_refuses_an_unknown_option():
     with pytest.raises(ValidationError) as e:
         IndexPlan(type="hnsw", options={"search_probe": 4})
@@ -374,3 +536,20 @@ def test_load_accepts_a_key_that_a_merge_key_brings_in_again(tmp_path):
 
 def test_models_are_exported():
     assert CollectionPlan and TargetPlan
+
+
+@pytest.mark.parametrize(
+    ("quantizer", "needed"),
+    [
+        (QuantizerPlan(type="sq"), True),
+        (QuantizerPlan(type="pq"), True),
+        (QuantizerPlan(type="rq", bits=4, centering=True), True),
+        (QuantizerPlan(type="rq", bits=8), False),
+        (QuantizerPlan(type="rq", bits=4, centering=False), False),
+        (QuantizerPlan(type="bq"), False),
+        (QuantizerPlan(type="none"), False),
+        (QuantizerPlan(), False),
+    ],
+)
+def test_quantizer_needs_training(quantizer, needed):
+    assert quantizer.needs_training() is needed

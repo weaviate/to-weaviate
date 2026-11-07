@@ -286,6 +286,28 @@ def test_state_file_without_targets_opens_and_stores_a_target(tmp_path):
     }
 
 
+def test_a_pending_quantizer_update_keeps_a_finished_collection_not_done(tmp_path):
+    state = make_state(tmp_path)
+    state.init_collection(REF, parts("a"), 1)
+    state.expect_quantizer_update(REF)
+    state.expect_quantizer_update(REF)
+    state.advance(REF, "a", None, 1)
+    assert state.progress() == [CollectionProgress(REF, 1, 1, 0, False)]
+    assert make_state(tmp_path).progress()[0].done is False
+    state.quantizers_updated(REF)
+    assert state.progress() == [CollectionProgress(REF, 1, 1, 0, True)]
+
+
+def test_state_file_without_quantizer_updates_reports_done_from_partitions(
+    tmp_path,
+):
+    path = tmp_path / "state" / "state.sqlite"
+    old_state_file(path, REF, 10, Partition("0-10", "0", "10"), cursor="5", copied=5)
+    state = make_state(tmp_path)
+    state.advance(REF, "0-10", None, 5)
+    assert state.progress() == [CollectionProgress(REF, 10, 10, 0, True)]
+
+
 class OverlapProxy:
     """Reports two threads between a first execute and the commit."""
 

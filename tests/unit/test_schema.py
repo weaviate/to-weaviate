@@ -7,9 +7,16 @@ import pytest
 from fakes import FakeRpcError, raise_grpc_failure
 from weaviate.classes.config import Configure, DataType, VectorDistances
 from weaviate.collections.classes.config import (
+    PQEncoderDistribution,
+    PQEncoderType,
     _BQConfig,
+    _PQConfig,
+    _PQEncoderConfig,
     _RQConfig,
+    _SQConfig,
     _VectorIndexConfigDynamic,
+    _VectorIndexConfigFlat,
+    _VectorIndexConfigHFresh,
     _VectorIndexConfigHNSW,
 )
 from weaviate.exceptions import (
@@ -33,6 +40,7 @@ from to_weaviate.target.schema import (
     collection_kwargs,
     differences,
     ensure_collection,
+    quantizer_updates,
 )
 
 PROPS = [
@@ -181,8 +189,15 @@ class FakeTenants:
 class FakeCollection:
     def __init__(self, cfg: Any = None) -> None:
         self._cfg = cfg
-        self.config = SimpleNamespace(get=lambda: self._cfg)
+        self.updates: list[Any] = []
+        self.update_fail: list[Exception] = []
+        self.config = SimpleNamespace(get=lambda: self._cfg, update=self._update)
         self.tenants = FakeTenants()
+
+    def _update(self, *, vector_config: Any) -> None:
+        if self.update_fail:
+            raise self.update_fail.pop(0)
+        self.updates.append(vector_config)
 
 
 class FakeCollections:
@@ -349,6 +364,28 @@ def test_differences_multi_tenancy():
 def test_differences_none_quantizer_matches_uncompressed_target():
     index = p.IndexPlan(type="hnsw", quantizer=p.QuantizerPlan(type="none"))
     assert differences(FakeClient(FakeCollection(config())), [entry(index=index)]) == []  # type: ignore[arg-type]
+
+
+# Weaviate 1.40.4 created an hfresh collection with rq and 1 bit for a plan
+# with quantizer none. Such a plan is refused now; after the person sets rq or
+# default, the copy resumes against that collection.
+@pytest.mark.parametrize("quantizer", ["rq", "default"])
+def test_differences_hfresh_rq_collection_matches_a_plan_changed_from_none(
+    quantizer,
+):
+    found = _VectorIndexConfigHFresh(
+        multi_vector=None,
+        quantizer=_RQConfig(
+            cache=None, bits=1, rescore_limit=350, centering=False, training_limit=0
+        ),
+        distance_metric=VectorDistances.COSINE,
+        max_posting_size_kb=48,
+        replicas=4,
+        search_probe=256,
+    )
+    index = p.IndexPlan(type="hfresh", quantizer=p.QuantizerPlan(type=quantizer))
+    client = FakeClient(FakeCollection(config(index=found)))
+    assert differences(client, [entry(index=index)]) == []  # type: ignore[arg-type]
 
 
 def test_differences_dynamic_reads_quantizer_from_both_parts():
@@ -846,3 +883,267 @@ def test_connect_cloud_without_api_key(monkeypatch):
     )
     connect_module.connect(s)
     assert seen["auth_credentials"] is None
+
+
+def _trained_entry() -> p.CollectionPlan:
+    """An entry with a vector whose sq needs training and one with plain rq."""
+    plain = entry()
+    vectors = [
+        p.VectorPlan(
+            name="a",
+            index=p.IndexPlan(
+                type="hnsw",
+                quantizer=p.QuantizerPlan(
+                    type="sq", training_limit=100, rescore_limit=20
+                ),
+            ),
+        ),
+        p.VectorPlan(
+            name="b",
+            mode="embed",
+            vectorizer=p.VectorizerPlan(module="text2vec-weaviate"),
+            index=p.IndexPlan(
+                type="hnsw", quantizer=p.QuantizerPlan(type="rq", bits=8)
+            ),
+        ),
+    ]
+    return plain.model_copy(
+        update={"target": plain.target.model_copy(update={"vectors": vectors})}
+    )
+
+
+@pytest.mark.parametrize(
+    ("quantizer", "fields"),
+    [
+        (
+            p.QuantizerPlan(type="sq", training_limit=100, rescore_limit=20),
+            {"enabled": True, "trainingLimit": 100, "rescoreLimit": 20},
+        ),
+        (
+            p.QuantizerPlan(type="pq", training_limit=100, segments=8, centroids=16),
+            {"enabled": True, "trainingLimit": 100, "segments": 8, "centroids": 16},
+        ),
+        (
+            p.QuantizerPlan(type="rq", bits=4, centering=True, training_limit=100),
+            {"enabled": True, "bits": 4, "centering": True, "trainingLimit": 100},
+        ),
+    ],
+)
+def test_quantizer_updates_send_the_planned_quantizer_again(quantizer, fields):
+    index = p.IndexPlan(type="hnsw", quantizer=quantizer)
+    (update,) = quantizer_updates(entry(index=index))
+    assert update.name == "default"
+    sent = update.vectorIndexConfig.quantizer.model_dump(exclude_none=True)
+    assert sent == fields
+
+
+@pytest.mark.parametrize(
+    "quantizer",
+    [
+        p.QuantizerPlan(type="rq", bits=8),
+        p.QuantizerPlan(type="bq"),
+        p.QuantizerPlan(type="none"),
+        p.QuantizerPlan(),
+    ],
+)
+def test_quantizer_updates_skip_a_quantizer_without_training(quantizer):
+    index = p.IndexPlan(type="hnsw", quantizer=quantizer)
+    assert quantizer_updates(entry(index=index)) == []
+
+
+def test_quantizer_updates_name_only_the_vectors_that_need_training():
+    assert [u.name for u in quantizer_updates(_trained_entry())] == ["a"]
+
+
+def test_weaviate_schema_sends_the_quantizer_updates_to_the_collection():
+    collection = FakeCollection()
+    WeaviateSchema(FakeClient(collection)).enable_trained_quantizers(  # type: ignore[arg-type]
+        _trained_entry()
+    )
+    assert [[u.name for u in sent] for sent in collection.updates] == [["a"]]
+
+
+def test_weaviate_schema_sends_no_update_without_a_trained_quantizer():
+    collection = FakeCollection()
+    WeaviateSchema(FakeClient(collection)).enable_trained_quantizers(entry())  # type: ignore[arg-type]
+    assert collection.updates == []
+
+
+@pytest.mark.parametrize("status", [400, 422])
+def test_weaviate_schema_turns_a_refused_update_into_schema_rejected(status):
+    collection = FakeCollection()
+    body = {"error": [{"message": "sq is not supported"}]}
+    collection.update_fail = [
+        UnexpectedStatusCodeError(
+            "Collection configuration may not have been updated.",
+            httpx.Response(status, json=body),
+        )
+    ]
+    with pytest.raises(SchemaRejected) as info:
+        WeaviateSchema(FakeClient(collection)).enable_trained_quantizers(  # type: ignore[arg-type]
+            _trained_entry()
+        )
+    assert str(info.value) == "sq is not supported"
+    assert info.value.action == "enable the quantizers of My_docs"
+
+
+def test_weaviate_schema_retries_a_transient_update_failure():
+    collection = FakeCollection()
+    collection.update_fail = [_status_error(503)]
+    client = FakeClient(collection)
+    WeaviateSchema(client, sleep=lambda _: None).enable_trained_quantizers(  # type: ignore[arg-type]
+        _trained_entry()
+    )
+    assert len(collection.updates) == 1
+
+
+def _rq(**fields: Any) -> _RQConfig:
+    values = {
+        "cache": None,
+        "bits": 4,
+        "rescore_limit": 20,
+        "centering": False,
+        "training_limit": 10000,
+    }
+    return _RQConfig(**{**values, **fields})
+
+
+def _pq(**fields: Any) -> _PQConfig:
+    encoder = _PQEncoderConfig(
+        type_=PQEncoderType.KMEANS, distribution=PQEncoderDistribution.LOG_NORMAL
+    )
+    values = {
+        "internal_bit_compression": False,
+        "segments": 8,
+        "centroids": 16,
+        "training_limit": 100,
+        "encoder": encoder,
+    }
+    return _PQConfig(**{**values, **fields})
+
+
+def _sq(**fields: Any) -> _SQConfig:
+    return _SQConfig(**{"rescore_limit": 25, "training_limit": 100, **fields})
+
+
+# (planned quantizer, quantizer the server reports, expected difference)
+QUANTIZER_FIELD_MISMATCHES = {
+    "rq-centering": (
+        p.QuantizerPlan(type="rq", bits=4, centering=True),
+        _rq(centering=False),
+        "vector default: centering is False, plan has True",
+    ),
+    "rq-rescore-limit": (
+        p.QuantizerPlan(type="rq", bits=4, rescore_limit=40),
+        _rq(),
+        "vector default: rescore_limit is 20, plan has 40",
+    ),
+    "rq-training-limit": (
+        p.QuantizerPlan(type="rq", training_limit=100),
+        _rq(),
+        "vector default: training_limit is 10000, plan has 100",
+    ),
+    "pq-segments": (
+        p.QuantizerPlan(type="pq", segments=4),
+        _pq(),
+        "vector default: segments is 8, plan has 4",
+    ),
+    "pq-centroids": (
+        p.QuantizerPlan(type="pq", centroids=256),
+        _pq(),
+        "vector default: centroids is 16, plan has 256",
+    ),
+    "pq-training-limit": (
+        p.QuantizerPlan(type="pq", training_limit=1000),
+        _pq(),
+        "vector default: training_limit is 100, plan has 1000",
+    ),
+    "sq-rescore-limit": (
+        p.QuantizerPlan(type="sq", rescore_limit=20),
+        _sq(),
+        "vector default: rescore_limit is 25, plan has 20",
+    ),
+    "sq-training-limit": (
+        p.QuantizerPlan(type="sq", training_limit=200),
+        _sq(),
+        "vector default: training_limit is 100, plan has 200",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("planned", "stored", "expected"),
+    QUANTIZER_FIELD_MISMATCHES.values(),
+    ids=QUANTIZER_FIELD_MISMATCHES,
+)
+def test_differences_compare_each_planned_quantizer_field(planned, stored, expected):
+    index = p.IndexPlan(type="hnsw", quantizer=planned)
+    cfg = config(index=hnsw(quantizer=stored))
+    found = differences(FakeClient(FakeCollection(cfg)), [entry(index=index)])  # type: ignore[arg-type]
+    assert found == [expected]
+
+
+@pytest.mark.parametrize(
+    ("planned", "stored"),
+    [
+        (p.QuantizerPlan(type="rq", bits=4), _rq(centering=True, rescore_limit=7)),
+        (p.QuantizerPlan(type="pq"), _pq(segments=4, centroids=256)),
+        (p.QuantizerPlan(type="sq"), _sq(rescore_limit=1, training_limit=9)),
+    ],
+)
+def test_differences_skip_a_quantizer_field_that_the_plan_does_not_set(planned, stored):
+    index = p.IndexPlan(type="hnsw", quantizer=planned)
+    cfg = config(index=hnsw(quantizer=stored))
+    assert differences(FakeClient(FakeCollection(cfg)), [entry(index=index)]) == []  # type: ignore[arg-type]
+
+
+def test_differences_skip_a_field_that_the_index_does_not_store():
+    # A flat index stores rq without centering and without a training limit.
+    stored = _rq(bits=8, centering=None, training_limit=None, rescore_limit=40)
+    flat = _VectorIndexConfigFlat(
+        multi_vector=None,
+        quantizer=stored,
+        distance_metric=VectorDistances.COSINE,
+        vector_cache_max_objects=0,
+    )
+    quantizer = p.QuantizerPlan(type="rq", bits=8, centering=False, rescore_limit=40)
+    index = p.IndexPlan(type="flat", quantizer=quantizer)
+    cfg = config(index=flat)
+    assert differences(FakeClient(FakeCollection(cfg)), [entry(index=index)]) == []  # type: ignore[arg-type]
+
+
+def test_differences_compare_the_hnsw_part_of_a_dynamic_index():
+    flat = SimpleNamespace(quantizer=_rq(bits=8, centering=None, training_limit=None))
+    dyn = _VectorIndexConfigDynamic(
+        distance_metric=VectorDistances.COSINE,
+        hnsw=hnsw(quantizer=_rq(bits=8, training_limit=500)),
+        flat=flat,  # type: ignore[arg-type]
+        threshold=1,
+    )
+    quantizer = p.QuantizerPlan(type="rq", bits=8, training_limit=100)
+    index = p.IndexPlan(type="dynamic", quantizer=quantizer)
+    cfg = config(index=dyn)
+    assert differences(FakeClient(FakeCollection(cfg)), [entry(index=index)]) == [
+        "vector default: training_limit is 500, plan has 100"
+    ]  # type: ignore[arg-type]
+
+
+def test_ensure_refuses_added_centering_before_any_page():
+    # rq 4 bits copied without centering, then centering added to plan.yaml:
+    # the server refuses to change centering, so copy must stop before pages.
+    client = FakeClient(FakeCollection(config(index=hnsw(quantizer=_rq()))))
+    quantizer = p.QuantizerPlan(type="rq", bits=4, centering=True)
+    index = p.IndexPlan(type="hnsw", quantizer=quantizer)
+    with pytest.raises(PlanMismatch, match="centering is False, plan has True"):
+        ensure_collection(client, [entry(index=index)])  # type: ignore[arg-type]
+    assert client.collections.created == []
+
+
+def test_ensure_resumes_into_a_collection_made_from_the_same_plan():
+    stored = _rq(centering=True, rescore_limit=40, training_limit=100)
+    client = FakeClient(FakeCollection(config(index=hnsw(quantizer=stored))))
+    quantizer = p.QuantizerPlan(
+        type="rq", bits=4, centering=True, rescore_limit=40, training_limit=100
+    )
+    index = p.IndexPlan(type="hnsw", quantizer=quantizer)
+    assert ensure_collection(client, [entry(index=index)]) == "exists"  # type: ignore[arg-type]

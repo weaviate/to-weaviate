@@ -58,14 +58,25 @@ vector settings. Review it before you run `check`.
   vectorizer module and its options.
 - `--index`, `--quantizer`, `--quantizer-bits`: the vector index type, the
   quantizer and the bits for `rq` (1, 4 or 8). `default` leaves the choice
-  to the server.
+  to the server. `hnsw` takes every quantizer, `flat` and `dynamic` take
+  `none`, `rq` and `bq`, and `hfresh` takes `rq` only, as Weaviate 1.40.4
+  does. `rq` takes 1, 4 or 8 bits with `hnsw`, 1 or 8 with `flat` and
+  `dynamic`, and 1 with `hfresh`; its `centering` needs `hnsw` and 4 bits.
+  A quantizer field in `plan.yaml` that the index type does not apply is
+  refused too: `cache` of `rq` and `bq`, and `rescore_limit` of `bq`, with
+  `hnsw`; `training_limit` of `rq` with `flat`; `cache` and
+  `training_limit` of `rq` with `hfresh`. `inspect`, `check` and `copy`
+  refuse any other setting. `check` and `copy` also refuse `pq` `segments`
+  that do not divide the dimension of the source vectors.
 - `--force`: replace an existing `plan.yaml`.
 
 ### `check`
 
 Checks `plan.yaml` against the Weaviate server: the plan itself, the
 vectorizer modules, and existing collections with other settings. It
-creates nothing.
+creates nothing. Plan entries that write into one collection, each into its
+own tenant, must have the same vectors and the same settings for each
+property that more than one of them has.
 
 ### `copy`
 
@@ -77,6 +88,12 @@ Each record that the tool cannot convert or that Weaviate refuses goes to
 batch of more than one record, `copy` retries the batch as it retries a
 network error. When the retries are used up, it stops with
 `target_unreachable` and stores no reject. The next run starts at that page.
+
+A quantizer that Weaviate trains on the vectors (`sq`, `pq`, and `rq` with
+`centering`) is enabled again after the last page of each plan entry, so
+it compresses the vectors with and without `ASYNC_INDEXING` on the server.
+The entry is done only after that update; a run that stops before it sends
+the update again and copies no page again.
 
 `state.sqlite` also records the target of each source collection: the
 Weaviate host and port, the collection and the tenant. Once records of a
@@ -225,10 +242,18 @@ The commands it starts get empty values for `CHROMA_DATABASE`,
 `CHROMA_TENANT`, `CHROMA_API_KEY` and `CHROMA_TOKEN_HEADER`, so values from
 your shell do not reach them.
 
-The suite deletes and recreates the Chroma collections `docs-cosine`,
-`tiny.l2` and `docs-rq`. One test adds 10 records to `tiny.l2` and deletes
-them when it ends. Before each test the suite deletes the Weaviate
-collections `Docs_cosine`, `Tiny_l2` and `Docs_rq`.
+The suite deletes and recreates the Chroma collections that `COLLECTIONS`
+in `tests/acceptance/chroma/seed.py` lists. One test adds 10 records to
+`tiny.l2` and deletes them when it ends. Before and after each test the
+suite deletes the Weaviate collections that `SUITE_COLLECTIONS` in
+`tests/acceptance/conftest.py` lists. It writes to no other Weaviate
+collection, also when the test Chroma holds collections that the seed does
+not make.
+
+One test is marked `xfail(strict=True)`: the copy of a dynamic index. It
+describes a finding that is not fixed and expects a Weaviate server without
+`ASYNC_INDEXING`, as in CI. Against a server with `ASYNC_INDEXING=true` it
+can pass, and strict mode then reports it as a failure.
 
 The `Makefile` starts the servers and sets the variables. `make` alone
 prints the targets. `make acceptance-up` and `make acceptance-down` call
