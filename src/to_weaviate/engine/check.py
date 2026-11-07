@@ -3,7 +3,12 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from to_weaviate.naming import reserved_suffix, sidecar_word
+from to_weaviate.naming import (
+    collection_name_problem,
+    property_name_problem,
+    reserved_suffix,
+    sidecar_word,
+)
 from to_weaviate.plan import (
     DISTANCES,
     INDEX_DISTANCES,
@@ -539,6 +544,23 @@ def _value_findings(entry: CollectionPlan) -> list[Finding]:
     return out
 
 
+def _invalid_name_findings(entries: list[CollectionPlan]) -> list[Finding]:
+    """Collection and property names that Weaviate or its client refuses."""
+    out: dict[tuple[str, str], Finding] = {}
+    for entry in entries:
+        name = entry.target.name
+        problem = collection_name_problem(name)
+        if problem is not None:
+            message = f"collection {name}: {problem}"
+            out.setdefault((name, message), Finding("invalid_name", name, message))
+        for prop in entry.target.properties:
+            problem = property_name_problem(prop.name)
+            if problem is not None:
+                message = f"property {prop.name}: {problem}"
+                out.setdefault((name, message), Finding("invalid_name", name, message))
+    return list(out.values())
+
+
 def vectorizer_findings(groups: Mapping[str, list[CollectionPlan]]) -> list[Finding]:
     """Vectorizer settings that the client cannot turn into a collection."""
     out: list[Finding] = []
@@ -613,9 +635,11 @@ def plan_findings(
     errors.extend(_duplicate_source_findings(plan.collections))
     errors.extend(_shared_collection_findings(plan.collections))
     value_errors = [f for e in plan.collections for f in _value_findings(e)]
+    value_errors.extend(_invalid_name_findings(plan.collections))
     errors.extend(value_errors)
     errors.extend(f for e in plan.collections for f in _segment_findings(e))
-    # collection_kwargs cannot map a group that has a value error.
+    # collection_kwargs cannot map a group that has a value error or a name
+    # that the client refuses.
     unmapped = {f.collection for f in value_errors}
     groups = target_groups(plan.collections)
     errors.extend(

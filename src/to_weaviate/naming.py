@@ -28,6 +28,36 @@ _DIGITS = "0123456789"
 
 _INVALID = re.compile(r"[^A-Za-z0-9_]")
 
+# The names that Weaviate 1.40.4 accepts. It stores a collection name with
+# its first letter in upper case and a property name with its first letter
+# in lower case, and compares the stored property name with SERVER_RESERVED.
+# The client refuses the property name vector.
+COLLECTION_NAME_RULE = "^[A-Z][_0-9A-Za-z]{0,254}$"
+PROPERTY_NAME_RULE = "^[_A-Za-z][_0-9A-Za-z]{0,230}$"
+SERVER_RESERVED = ("id", "_id", "_additional")
+CLIENT_RESERVED = ("vector",)
+
+
+def collection_name_problem(name: str) -> str | None:
+    """Why Weaviate refuses the collection name `name`, or None."""
+    stored = name[:1].upper() + name[1:]
+    if re.fullmatch(COLLECTION_NAME_RULE, stored):
+        return None
+    return (
+        f"Weaviate accepts a collection name that matches {COLLECTION_NAME_RULE} "
+        "once its first letter is in upper case"
+    )
+
+
+def property_name_problem(name: str) -> str | None:
+    """Why Weaviate or its client refuses the property name `name`, or None."""
+    if not re.fullmatch(PROPERTY_NAME_RULE, name):
+        return f"Weaviate accepts a property name that matches {PROPERTY_NAME_RULE}"
+    stored = name[:1].lower() + name[1:]
+    if stored in SERVER_RESERVED or name in CLIENT_RESERVED:
+        return f"Weaviate reserves the property name {stored}"
+    return None
+
 
 def reserved_suffix(name: str) -> str | None:
     """The reserved suffix that `name` ends in, or None.
