@@ -120,6 +120,29 @@ def run(args: list[str], workdir: Path, env: dict[str, str] | None = None) -> Re
     return Result(completed.returncode, data, completed.stderr)
 
 
+def run_text(
+    args: list[str], workdir: Path, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run the installed to-weaviate like `run` does, without --json.
+
+    The run fails the test when stdout or stderr holds the value of a secret
+    variable.
+    """
+    merged = _environment(env)
+    completed = subprocess.run(
+        [str(COMMAND), *args, "--dir", str(workdir)],
+        cwd=workdir,
+        env=merged,
+        capture_output=True,
+        text=True,
+        timeout=COMMAND_TIMEOUT,
+        check=False,
+    )
+    if any(s in completed.stdout + completed.stderr for s in secret_values(merged)):
+        pytest.fail(f"to-weaviate {' '.join(args)} printed a secret value")
+    return completed
+
+
 def start(
     args: list[str], workdir: Path, stdout: Path, env: dict[str, str] | None = None
 ) -> subprocess.Popen[bytes]:

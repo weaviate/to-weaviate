@@ -2,14 +2,20 @@
 
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import httpx
 import pytest
 from chroma_server import ChromaServer, ServerFactories
-from fakes import invoke
+from fakes import FakeFactories, cli_env, invoke
+from typer.testing import CliRunner
 
+from to_weaviate import cli
+from to_weaviate.cli import build_app
+from to_weaviate.settings import ChromaSettings
 from to_weaviate.sources.base import Record
+from to_weaviate.sources.chroma.client import ChromaClient
 from to_weaviate.state import State
 
 DIR = Path(".to-weaviate")
@@ -158,3 +164,123 @@ def test_a_count_that_fails_after_the_pages_resumes_without_pages(tmp_path):
     assert offsets == [2700, 2750]
     assert len(fakes.writer.writes_per_uuid) == 2750
     assert set(fakes.writer.writes_per_uuid.values()) == {1}
+
+
+def cli_app(monkeypatch, server: ChromaServer, fakes: FakeFactories) -> Any:
+    """The CLI app with its own Chroma source factory over `server`."""
+
+    def client(settings: ChromaSettings) -> ChromaClient:
+        transport = httpx.MockTransport(server.handler)
+        return ChromaClient(settings, transport=transport, sleep=lambda s: None)
+
+    monkeypatch.setattr(cli, "ChromaClient", client)
+    return build_app(cli._chroma_source, fakes._writer, fakes._reader, fakes._schema)
+
+
+def run_cli(app: Any, *args: str, **env: str | None) -> Any:
+    return CliRunner().invoke(app, list(args), env=cli_env(**env))
+
+
+TENANT_FROM_KEY = "tenant-of-the-key"
+
+
+def test_inspect_reads_the_tenant_from_the_key_only_without_chroma_tenant(
+    monkeypatch,
+):
+    server = ChromaServer(records(0, 10), tenant=TENANT_FROM_KEY)
+    app = cli_app(monkeypatch, server, FakeFactories(None))  # type: ignore[arg-type]
+    r = run_cli(app, "inspect", "chroma", "--json", "--force")
+    assert r.exit_code == 0, r.output
+    identity = [c for c in server.calls if c.kind == "identity"]
+    assert len(identity) == 1 and identity[0].headers["x-chroma-token"] == "chroma-key"
+    paths = [c.raw_path for c in server.calls if c.kind != "identity"]
+    assert paths and all(
+        p.startswith(f"/api/v2/tenants/{TENANT_FROM_KEY}/") for p in paths
+    )
+    server.calls.clear()
+    r = run_cli(
+        app,
+        "inspect",
+        "chroma",
+        "--json",
+        "--force",
+        CHROMA_TENANT=TENANT_FROM_KEY,
+        CHROMA_TOKEN_HEADER="Authorization",
+    )
+    assert r.exit_code == 0, r.output
+    assert [c.kind for c in server.calls if c.kind == "identity"] == []
+    assert {c.headers["authorization"] for c in server.calls} == {"Bearer chroma-key"}
+
+
+def test_a_key_that_the_identity_refuses_exits_3(monkeypatch):
+    server = ChromaServer(records(0, 10))
+    server.faults["identity"] = [httpx.Response(401, json={"message": "chroma-key"})]
+    app = cli_app(monkeypatch, server, FakeFactories(None))  # type: ignore[arg-type]
+    r = run_cli(app, "inspect", "chroma", "--json")
+    assert r.exit_code == 3, r.output
+    d = json.loads(r.stdout)
+    assert d["code"] == "auth_failed" and "CHROMA_API_KEY" in d["hint"]
+    assert "chroma-key" not in r.output
+
+
+def test_tenant_database_and_collection_id_are_percent_encoded_in_paths(tmp_path):
+    server = ChromaServer(
+        records(0, 10), tenant="t x", database="my db/1", collection_id="id+plus"
+    )
+    env = {"CHROMA_TENANT": "t x", "CHROMA_DATABASE": "my db/1"}
+    fakes = ServerFactories(server)
+    for args in (["inspect", "chroma"], ["copy"], ["verify"]):
+        r = invoke(fakes, *args, "--json", **env)
+        assert r.exit_code == 0, (args, r.output)
+    prefix = "/api/v2/tenants/t%20x/databases/my%20db%2F1/collections"
+    assert {c.raw_path for c in server.calls if c.kind != "unknown"} >= {
+        prefix,
+        f"{prefix}/id%2Bplus/count",
+        f"{prefix}/id%2Bplus/get",
+    }
+    assert all(c.kind != "unknown" for c in server.calls), server.calls
+    assert len(fakes.writer.objects) == 10
+    settings = ChromaSettings(
+        url="http://chroma.test",
+        api_key=None,
+        tenant=None,
+        database=None,
+        token_header="x-chroma-token",
+    )
+    client = ChromaClient(settings, transport=httpx.MockTransport(server.handler))
+    assert (
+        client.query("t x", "my db/1", "id+plus", embedding=[1.0, 0.0], n_results=1)
+        == []
+    )
+    assert server.calls[-1].raw_path == f"{prefix}/id%2Bplus/query"
+
+
+def test_a_403_on_the_database_list_names_the_database_settings():
+    server = ChromaServer(records(0, 10))
+    server.faults["databases"] = [httpx.Response(403, json={"message": "forbidden"})]
+    r = invoke(ServerFactories(server), "inspect", "chroma", "--json")
+    assert r.exit_code == 3, r.output
+    d = json.loads(r.stdout)
+    assert d["code"] == "auth_failed"
+    assert d["message"] == "Chroma refused the request: the API key lacks a permission."
+    assert d["hint"] == (
+        "Check CHROMA_API_KEY in the environment or in .env. A key for one "
+        "database cannot list the databases: set CHROMA_DATABASE or use --database."
+    )
+
+
+def test_a_source_collection_that_is_gone_names_inspect_force():
+    server = ChromaServer(records(0, 10))
+    fakes = inspected(server)
+    server.collection_id = "created-again"
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 4, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"]) == (
+        "source_unreachable",
+        "Chroma returned HTTP 404: collection not found",
+    )
+    assert d["hint"] == (
+        "The collection is gone from Chroma, or it was created again with a new "
+        "id. Run to-weaviate inspect chroma --force to inspect it again."
+    )

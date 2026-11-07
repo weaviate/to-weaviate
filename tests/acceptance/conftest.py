@@ -45,6 +45,7 @@ __all__ = [
     "create_target_collection",
     "read_plan",
     "run",
+    "run_text",
     "start",
     "weaviate_by_source_id",
     "weaviate_compressed",
@@ -148,6 +149,14 @@ def run(args: list[str], workdir: Path, env: dict[str, str] | None = None) -> Re
     """
     cleared = dict.fromkeys(CLEARED_VARIABLES, "")
     return e2e.run(args, workdir, {**cleared, **(env or {})})
+
+
+def run_text(
+    args: list[str], workdir: Path, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run the installed to-weaviate as `run` does, without --json."""
+    cleared = dict.fromkeys(CLEARED_VARIABLES, "")
+    return e2e.run_text(args, workdir, {**cleared, **(env or {})})
 
 
 def copy_and_verify(workdir: Path) -> Result:
