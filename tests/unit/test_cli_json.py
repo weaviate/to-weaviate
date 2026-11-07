@@ -529,6 +529,33 @@ def test_refused_url_variable_is_a_usage_error_without_its_value(
             assert sentinel.encode() not in f.read_bytes()
 
 
+NO_HOST_HINT = "Write it as scheme://host, with an optional :port."
+
+
+@pytest.mark.parametrize(
+    ("var", "cmd"),
+    [
+        ("WEAVIATE_URL", ["check"]),
+        ("CHROMA_URL", ["inspect", "chroma", "--force"]),
+    ],
+)
+def test_a_url_variable_without_a_host_is_a_usage_error(var, cmd):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    fakes.source_calls = 0
+    js = invoke(fakes, *cmd, "--json", **{var: "http://"})
+    text = invoke(fakes, *cmd, **{var: "http://"})
+    assert js.exit_code == text.exit_code == 2, js.output
+    d = json.loads(js.stdout)
+    assert (d["code"], d["message"], d["hint"]) == (
+        "usage",
+        f"{var} is not a valid URL.",
+        NO_HOST_HINT,
+    )
+    assert f"Error: {var} is not a valid URL." in text.stderr
+    assert fakes.source_calls == 0 and fakes.schema_calls == 0
+
+
 @pytest.mark.parametrize(
     ("cmd", "var", "error"),
     [

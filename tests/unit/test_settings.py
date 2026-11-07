@@ -1,6 +1,7 @@
 import pytest
 
 from to_weaviate.settings import (
+    NO_HOST_HINT,
     InvalidSetting,
     MissingCredential,
     WeaviateSettings,
@@ -271,6 +272,32 @@ def test_refused_url(var, url):
     assert e.value.hint == "Percent-encode #, ?, / and @ in a password."
     assert e.value.__cause__ is None
     assert e.value.__context__ is None or e.value.__suppress_context__
+
+
+@pytest.mark.parametrize(
+    "url", ["http://", "https://", "http://:8080", "http://user:pw@"]
+)
+@pytest.mark.parametrize(
+    ("var", "grpc"),
+    [
+        ("CHROMA_URL", True),
+        ("WEAVIATE_URL", True),
+        ("WEAVIATE_URL", False),
+        ("WEAVIATE_GRPC_URL", True),
+    ],
+)
+def test_url_without_a_host_is_refused(var, grpc, url):
+    env = {"WEAVIATE_URL": "http://localhost:8099", var: url}
+    if grpc and var != "WEAVIATE_GRPC_URL":
+        env["WEAVIATE_GRPC_URL"] = GRPC
+    with pytest.raises(InvalidSetting) as e:
+        chroma_settings(env) if var == "CHROMA_URL" else weaviate_settings(env)
+    assert str(e.value) == f"{var} is not a valid URL."
+    assert (
+        e.value.hint
+        == NO_HOST_HINT
+        == "Write it as scheme://host, with an optional :port."
+    )
 
 
 @pytest.mark.parametrize(
