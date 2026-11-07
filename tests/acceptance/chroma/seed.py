@@ -48,6 +48,10 @@ COLLECTIONS = (
 )
 # Collections whose names need a change for Weaviate, made in this order.
 RENAMED_COLLECTIONS = ("Mixed-Case", "mixed-case", "1-leading-digit", "class")
+# The large collection. seed makes it, but it is not in COLLECTIONS, so the
+# test that copies every collection does not copy it.
+BULK = "bulk"
+BULK_COUNT = 50_000
 CATEGORIES = ("guide", "reference", "tutorial")
 TAGS = ("red", "green", "blue", "small", "large")
 
@@ -270,6 +274,20 @@ def edge(rng: random.Random) -> list[Record]:
     return records
 
 
+def bulk(rng: random.Random) -> list[Record]:
+    """BULK_COUNT records of 32 dimensions, each with a document."""
+    return [
+        Record(
+            id=f"bulk-{i:05d}",
+            embedding=_vector(rng, 32),
+            document=f"Record {i} of the bulk collection.",
+            metadata={"position": i},
+            uri=None,
+        )
+        for i in range(BULK_COUNT)
+    ]
+
+
 def renamed(rng: random.Random, name: str) -> list[Record]:
     """5 records of 8 dimensions for the collection `name`."""
     return [
@@ -389,7 +407,7 @@ def _collection_id(http: httpx.Client, name: str) -> str:
 
 
 def seed() -> None:
-    """Delete and recreate the COLLECTIONS on the test server."""
+    """Delete and recreate the COLLECTIONS and BULK on the test server."""
     rng = random.Random(0)
     with _test_server() as http:
         _recreate(http, "docs-cosine", "cosine", docs_cosine(rng))
@@ -407,6 +425,7 @@ def seed() -> None:
         _recreate(http, "edge", "cosine", edge(rng))
         for name in RENAMED_COLLECTIONS:
             _recreate(http, name, "cosine", renamed(rng, name))
+        _recreate(http, BULK, "cosine", bulk(rng))
 
 
 def _extra_tiny_l2(start: int, count: int) -> list[Record]:
@@ -481,4 +500,4 @@ if __name__ == "__main__":
         seed()
     except (ValueError, httpx.HTTPError) as exc:
         sys.exit(f"seed.py: {exc}")
-    print(f"Seeded {', '.join(COLLECTIONS)}.")
+    print(f"Seeded {', '.join([*COLLECTIONS, BULK])}.")

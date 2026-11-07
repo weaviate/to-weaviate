@@ -336,7 +336,7 @@ after about 10 s of retries, 2 objects written, a rerun exits 4 again.
 Expected after the U-06 fix: exit 1 with one reject. Skip when the Chroma
 server refuses the add (body size limit); then U-06 stands alone.
 
-*Not implemented: the gRPC limit is 104858000 bytes (client 4.24.1 refuses a larger message with RESOURCE_EXHAUSTED), and Chroma 1.5.9 answers 413 to a 101 MiB record, so no source record reaches the limit. U-06 stands alone.*
+*Not implemented: the gRPC limit is 104858000 bytes (client 4.24.1 refuses a larger message with RESOURCE_EXHAUSTED). Chroma 1.5.9 accepts a record with a 32 MiB document and answers 413 to 40 MiB and to 101 MiB (measured), so no source record reaches the limit. U-06 stands alone.*
 
 **A-06 An inactive tenant refuses writes (optional).** Level A, risk R1,
 20 s. Preconditions: the plan of `acc/multi_tenant` (tenant-a, tenant-b
@@ -356,7 +356,7 @@ compared 300`. Covers more than one page per partition and the scratch
 sqlite above `ID_BATCH`; `resume` (8,000) already covers both at a smaller
 size, so this comes last.
 
-*Not yet implemented: the acceptance budget of this batch is used.*
+*Implemented: `tests/acceptance/chroma/test_source_shapes.py::test_a_large_collection_copies_and_verifies`. Coverage. Measured locally: the test takes about 10 s and the seed of `bulk` about 15 s more; `bulk` is not in `COLLECTIONS`, so the test that copies every collection does not copy it.*
 
 ### R2: secrets
 

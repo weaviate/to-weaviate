@@ -28,6 +28,7 @@ from e2e import (
     weaviate_delete_object,
     weaviate_exists,
     weaviate_insert_object,
+    weaviate_modules,
     weaviate_near_text,
     weaviate_near_vector,
     weaviate_object,
@@ -55,6 +56,7 @@ __all__ = [
     "weaviate_delete_object",
     "weaviate_exists",
     "weaviate_insert_object",
+    "weaviate_modules",
     "weaviate_near_text",
     "weaviate_near_vector",
     "weaviate_object",
@@ -103,6 +105,7 @@ SUITE_COLLECTIONS = [
     "Mixed_case_2",
     "C_1_leading_digit",
     "Class",
+    "Bulk",
 ]
 
 

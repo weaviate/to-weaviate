@@ -1,4 +1,4 @@
-from chroma.seed import ODD_KEYS, RENAMED_COLLECTIONS, records
+from chroma.seed import BULK, BULK_COUNT, ODD_KEYS, RENAMED_COLLECTIONS, records
 from conftest import (
     copy_and_verify,
     read_plan,
@@ -94,3 +94,29 @@ def test_collection_names_that_weaviate_refuses_are_renamed(seeded, tmp_path):
     assert all(c["passed"] for c in r.data["checks"]), r
     for target in targets.values():
         assert weaviate_count(target) == 5, target
+
+
+def test_a_large_collection_copies_and_verifies(seeded, tmp_path):
+    r = run(
+        ["inspect", "chroma", "--collection", BULK, "--sample-pages", "5"], tmp_path
+    )
+    assert r.exit_code == 0, r
+    assert r.data["collections"][0]["count"] == BULK_COUNT, r
+    r = run(["check"], tmp_path)
+    assert r.exit_code == 0, r
+    r = run(["copy", "--parallelism", "8"], tmp_path)
+    assert r.exit_code == 0, r
+    assert weaviate_count("Bulk") == BULK_COUNT
+    r = run(["verify"], tmp_path)
+    assert r.exit_code == 0, r
+    checks = {c["name"]: c["detail"] for c in r.data["checks"]}
+    assert checks["count"] == f"source count {BULK_COUNT}, target count {BULK_COUNT}"
+    assert checks["ids"] == "missing 0, extra 0"
+    assert checks["records"].startswith("sampled 300, compared 300,")
+    row = run(["status"], tmp_path).data["collections"][0]
+    assert (row["total"], row["copied"], row["rejects"], row["done"]) == (
+        BULK_COUNT,
+        BULK_COUNT,
+        0,
+        True,
+    ), row

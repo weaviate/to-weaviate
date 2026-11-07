@@ -1,4 +1,4 @@
-from conftest import run
+from conftest import run, weaviate_modules
 
 # Neither variable reaches the command from the shell.
 NO_OPENAI_KEY = {"OPENAI_APIKEY": "", "OPENAI_API_KEY": ""}
@@ -9,6 +9,10 @@ DISABLED_MODULE = "text2vec-ollama"
 
 
 def test_check_needs_the_provider_key_and_an_enabled_module(seeded, tmp_path):
+    assert DISABLED_MODULE not in weaviate_modules(), (
+        f"the test Weaviate enables {DISABLED_MODULE}; this case needs a module "
+        "that it does not enable (see the modules: input in .github/workflows/ci.yml)"
+    )
     inspect = ["inspect", "chroma", "--collection", "tiny.l2"]
     r = run([*inspect, "--vectorizer", "text2vec-openai"], tmp_path)
     assert r.exit_code == 0, r

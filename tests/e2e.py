@@ -274,6 +274,11 @@ def weaviate_exists(name: str) -> bool:
     return _weaviate().collections.exists(name)
 
 
+def weaviate_modules() -> set[str]:
+    """The names of the modules that the target lists in /v1/meta."""
+    return set(_weaviate().get_meta().get("modules") or {})
+
+
 def weaviate_compressed(name: str) -> list[bool]:
     """Whether each shard of the target collection `name` holds compressed vectors."""
     nodes = _weaviate().cluster.nodes(collection=name, output="verbose")
