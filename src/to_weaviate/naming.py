@@ -1,8 +1,12 @@
 import re
 
+# The server refuses id, _id and _additional, and the client refuses vector.
+# The draft uses document, source_id and uri itself.
 RESERVED_PROPERTIES = frozenset(
-    {"id", "_id", "_additional", "document", "source_id", "uri"}
+    {"id", "_id", "_additional", "vector", "document", "source_id", "uri"}
 )
+# Weaviate 1.40.4 refuses a longer property name.
+MAX_PROPERTY_NAME = 231
 
 # Weaviate refuses to create a property whose name ends in one of these:
 # reservedPropertyNameSuffixes in entities/schema/validation.go, v1.40.4.
@@ -66,6 +70,15 @@ def _unique(base: str, taken: set[str]) -> str:
     return f"{base}_{n}"
 
 
+def _numbered(base: str, taken: set[str]) -> str:
+    """`base_<n>` with the lowest n from 1 not in `taken` ignoring case."""
+    lowered = {name.lower() for name in taken}
+    n = 1
+    while f"{base}_{n}".lower() in lowered:
+        n += 1
+    return f"{base}_{n}"
+
+
 def collection_name(source_name: str, taken: set[str]) -> str:
     """Return a valid collection name not in `taken`. Does not modify `taken`."""
     name = _INVALID.sub("_", source_name)
@@ -83,4 +96,5 @@ def property_name(source_key: str, taken: set[str]) -> str:
     # "_meta" makes "meta" the last word, so the name is not sidecar-shaped.
     if name in RESERVED_PROPERTIES or reserved_suffix(name) or sidecar_word(name):
         name += "_meta"
-    return _unique(name, taken)
+    name = _unique(name, taken)
+    return name if len(name) <= MAX_PROPERTY_NAME else _numbered("key", taken)
