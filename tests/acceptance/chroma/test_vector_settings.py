@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 from chroma.seed import records
 from conftest import (
+    KnownFinding,
     read_plan,
     run,
     weaviate_compressed,
@@ -68,7 +69,9 @@ INDEXES = {
             "options": {"threshold": 1000},
             "quantizer": {"type": "rq", "bits": 8, "rescore_limit": 40},
         },
-        marks=pytest.mark.xfail(strict=True, reason=DYNAMIC_REASON),
+        marks=pytest.mark.xfail(
+            strict=True, reason=DYNAMIC_REASON, raises=KnownFinding
+        ),
     ),
 }
 # Settings that the plan model accepts and that Weaviate 1.40.4 refuses, or
@@ -207,7 +210,18 @@ def test_quantizer_settings_reach_the_server(docs_rq_inspection, tmp_path, quant
 @pytest.mark.parametrize("index", INDEXES.values(), ids=INDEXES)
 def test_index_settings_reach_the_server(docs_rq_inspection, tmp_path, index):
     _plan_with_index(docs_rq_inspection, tmp_path, index)
-    _copy_and_verify(tmp_path)
+    r = run(["check"], tmp_path)
+    assert r.exit_code == 0 and r.data["status"] == "success", r
+    r = run(["copy"], tmp_path)
+    if (
+        r.exit_code == 2
+        and r.data.get("code") == "target_rejected_schema"
+        and "async indexing" in r.data["message"]
+    ):
+        raise KnownFinding(r.data["message"])
+    assert r.exit_code == 0 and r.data["status"] == "success", r
+    r = run(["verify"], tmp_path)
+    assert r.exit_code == 0 and r.data["status"] == "success", r
     found = _docs_rq_index()
     assert found.distance_metric.value == "cosine"
     if index["type"] == "default":

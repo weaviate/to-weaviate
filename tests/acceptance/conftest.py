@@ -37,6 +37,7 @@ from e2e import (
 # The test modules import these names from this module.
 __all__ = [
     "SUITE_COLLECTIONS",
+    "KnownFinding",
     "Result",
     "read_plan",
     "run",
@@ -85,6 +86,13 @@ SUITE_COLLECTIONS = [
     "Openai_proxy",
     "Resume",
 ]
+
+
+class KnownFinding(AssertionError):
+    """A test reached the failure of a finding that is recorded and not fixed.
+
+    A test marked xfail(raises=KnownFinding) fails for any other assertion.
+    """
 
 
 def endpoint_problems() -> list[str]:
