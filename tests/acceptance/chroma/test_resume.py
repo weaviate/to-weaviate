@@ -53,6 +53,15 @@ def test_copy_resumes_after_the_process_is_killed(seeded, tmp_path):
                 + first.read_text(encoding="utf-8")
             )
         assert copied >= total * KILL_AFTER, f"copied {copied} of {total} in time"
+        # A second copy on the directory is refused while the first one runs,
+        # and the first one goes on.
+        second = run(["copy"], tmp_path)
+        assert second.exit_code == 2 and second.data["code"] == "usage", second
+        assert second.data["message"] == f"Another to-weaviate copy uses {tmp_path}."
+        while process.poll() is None and _progress(tmp_path)["copied"] == copied:
+            assert time.monotonic() < deadline, "the first copy made no progress"
+            time.sleep(POLL_SECONDS)
+        assert process.poll() is None, "the first copy ended before it was killed"
         process.send_signal(signal.SIGKILL)
         process.wait()
     finally:

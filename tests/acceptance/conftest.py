@@ -30,6 +30,7 @@ from e2e import (
     weaviate_near_text,
     weaviate_near_vector,
     weaviate_object,
+    weaviate_set_shard_status,
     weaviate_tenants,
     weaviate_update_object,
 )
@@ -53,6 +54,7 @@ __all__ = [
     "weaviate_near_text",
     "weaviate_near_vector",
     "weaviate_object",
+    "weaviate_set_shard_status",
     "weaviate_tenants",
     "weaviate_update_object",
     "write_plan",
@@ -86,6 +88,16 @@ SUITE_COLLECTIONS = [
     "Tiny_l2_renamed",
     "Openai_proxy",
     "Resume",
+    "Empty",
+    "Edge",
+    # The draft names the two mixed-case collections in the order Chroma
+    # lists them.
+    "Mixed_Case",
+    "Mixed_case",
+    "Mixed_Case_2",
+    "Mixed_case_2",
+    "C_1_leading_digit",
+    "Class",
 ]
 
 

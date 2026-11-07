@@ -172,6 +172,11 @@ def weaviate_update_object(name: str, uuid: Any, properties: dict[str, Any]) -> 
     _collection(name).data.update(uuid=uuid, properties=properties)
 
 
+def weaviate_set_shard_status(name: str, status: str) -> None:
+    """Set every shard of the target collection `name` to READY or READONLY."""
+    _weaviate().collections.use(name).config.update_shards(status=status)  # type: ignore[arg-type]
+
+
 def weaviate_tenants(name: str) -> set[str]:
     """The tenant names of the target collection `name`."""
     return set(_weaviate().collections.use(name).tenants.get())
