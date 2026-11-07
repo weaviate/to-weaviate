@@ -86,16 +86,19 @@ than one of them has, and no two property names that differ only in case.
 
 Creates the target collections, then copies the records. Progress goes to
 `state.sqlite`, so a second run continues where the first one stopped.
-Each run also copies the records added to the source since the last run,
-also when records were deleted in between: it finds the last record that
-the run before read, with the record before it, and reads the records
-after it. When one of the two was deleted, or the last one was deleted and
-added again, the run reads again from an earlier record, or from the start
-with the warning "the source changed since the last run; re-reading from
-the start". A record read again is written again unchanged, so this is
-safe and only slower. A run that reads records again gives the offset it
-reads from as `reread_from` in its JSON document; other runs have no
-`reread_from`.
+Each run also copies the records added to the source since the last run:
+it reads the records after the last two that the run before read. When
+deletions moved those two records, the run finds them at their new offsets
+and reads what follows. When one of them is gone, the run reads again from
+an earlier record or from the start, with the warning "the source changed
+since the last run; re-reading from the start"; a record read again is
+written again unchanged, so this is safe and only slower. When the two
+records were deleted and added back with the same ids, the run cannot tell
+them from the originals and can skip the records added in between: run the
+full `verify` after the last copy of a source that changed, and copy into
+a new `--dir` when its ids check fails. A run that reads records again
+gives the offset it reads from as `reread_from` in its JSON document; other
+runs have no `reread_from`.
 
 Each record that the tool cannot convert or that Weaviate refuses goes to
 `rejects.jsonl` with the reason. Rejects are final for this directory. After
