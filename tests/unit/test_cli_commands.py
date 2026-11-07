@@ -1226,6 +1226,8 @@ STATE_HINT = (
     "To resume, set WEAVIATE_URL and the target name back. To copy to the new "
     "target, use another --dir."
 )
+# The hint when the stored target collection or tenant no longer exists.
+GONE_HINT = "To copy to the new target, use another --dir."
 
 
 def retarget(directory: Path, name: str, tenant: str | None = None) -> None:
@@ -1237,14 +1239,14 @@ def retarget(directory: Path, name: str, tenant: str | None = None) -> None:
     save_plan(plan.model_copy(update={"collections": [entry]}), directory / "plan.yaml")
 
 
-def mismatch(r: Result) -> dict[str, Any]:
-    """The error document of a state_mismatch run."""
+def mismatch(r: Result, hint: str = STATE_HINT) -> dict[str, Any]:
+    """The error document of a state_mismatch run with `hint`."""
     assert r.exit_code == 2, r.output
     d = json.loads(r.stdout)
     assert (d["status"], d["code"], d["hint"]) == (
         "error",
         "state_mismatch",
-        STATE_HINT,
+        hint,
     )
     return d
 
@@ -1300,7 +1302,7 @@ def test_copy_refuses_a_target_without_the_collection(partial):
     assert first.exit_code == (5 if partial else 0), first.output
     reads = source.read_calls
     replaced = FakeFactories(source)
-    d = mismatch(invoke(replaced, "copy", "--json"))
+    d = mismatch(invoke(replaced, "copy", "--json"), GONE_HINT)
     assert d["message"] == (
         "The state in .to-weaviate holds a copy of docs to localhost:8099, "
         "collection Docs. That collection does not exist in the target now."
@@ -1316,7 +1318,7 @@ def test_copy_refuses_a_target_without_the_tenant(tmp_path):
     assert invoke(fakes, "copy").exit_code == 0
     replaced = FakeFactories(source)
     replaced.writer.stored[("Docs", "b")] = {}
-    d = mismatch(invoke(replaced, "copy", "--json"))
+    d = mismatch(invoke(replaced, "copy", "--json"), GONE_HINT)
     assert d["message"].endswith(
         "collection Docs, tenant a. That collection or tenant does not exist in "
         "the target now."

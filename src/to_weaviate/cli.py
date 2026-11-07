@@ -172,10 +172,8 @@ SCHEMA_HINT = (
     "Read the server's message and edit plan.yaml. A free Weaviate Cloud "
     "cluster accepts only the index type hfresh."
 )
-STATE_HINT = (
-    "To resume, set WEAVIATE_URL and the target name back. To copy to the new "
-    "target, use another --dir."
-)
+NEW_DIR_HINT = "To copy to the new target, use another --dir."
+STATE_HINT = f"To resume, set WEAVIATE_URL and the target name back. {NEW_DIR_HINT}"
 UNREADABLE_STATE_HINT = "Start again with another --dir, or restore the file."
 STATE_IN_USE_HINT = "Wait for it to end, then run the command again."
 ADD_PROPERTY_HINT = (
@@ -797,11 +795,13 @@ def _target_host(settings: WeaviateSettings) -> str:
     return settings.http.normalized
 
 
-def _state_mismatch(directory: Path, copy: str, now: str) -> CliError:
+def _state_mismatch(
+    directory: Path, copy: str, now: str, hint: str = STATE_HINT
+) -> CliError:
     return CliError(
         "state_mismatch",
         f"The state in {directory} holds a copy of {copy}. {now}",
-        STATE_HINT,
+        hint,
     )
 
 
@@ -843,10 +843,13 @@ def _planned_targets(
             )
         if progress and not reader.exists(entry):
             missing = "collection or tenant" if target.tenant else "collection"
+            # Setting WEAVIATE_URL or the target name back does not bring the
+            # collection back, so the hint names only another --dir.
             raise _state_mismatch(
                 directory,
                 f"{name} to {_target_text(target)}",
                 f"That {missing} does not exist in the target now.",
+                NEW_DIR_HINT,
             )
         planned[ref] = target
     return planned
