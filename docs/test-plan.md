@@ -190,6 +190,8 @@ one read more per tail. Also run with `page_cap=None` to pin the number of
 reads (4 per partition of 1000 at parallelism 1, no extra read for a
 bounded partition). Data: records `id-0000..0999`, 2-dimensional vectors.
 
+*Implemented: `tests/unit/test_cli_chroma.py::test_a_page_shorter_than_the_limit_does_not_end_a_partition`. Found the bug; fixed by ruling R52 (a page with no new row is a ChromaError).*
+
 **U-02 A transport error, a 503, a 429 and a 500 in the middle of a page.**
 Level U, risk R1. Preconditions: the fake Chroma server without a page
 cap, 2700 records, `--parallelism 3` (3 partitions of 900, 3 pages of 300
@@ -203,12 +205,16 @@ finished, partition 2's cursor at its first page; a second `copy` without
 the fault exits 0 and writes the remaining ids once. Coverage test; the
 client-level retry tests cover the delays, this covers the copy path.
 
+*Implemented: `tests/unit/test_cli_chroma.py::test_a_fault_in_the_middle_of_a_page_is_retried`, `::test_a_page_that_fails_every_attempt_stops_copy_and_resumes`. Coverage. After the 500, the other partitions stop before their next page, so whether they finish depends on timing; the test asserts that each cursor follows the pages written.*
+
 **U-03 Chroma fails on the count after the pages.** Level U, risk R1.
 Preconditions: as U-02; fault: 500 on the `/count` request that follows the
 last page. Expected: exit 4, every partition finished, no tail; the next
 `copy` sends no `/get` for the finished partitions, reads the count, adds a
 tail when the source grew (grow the server by 50 records first) and copies
 exactly those 50. Coverage test.
+
+*Implemented: `tests/unit/test_cli_chroma.py::test_a_count_that_fails_after_the_pages_resumes_without_pages`. Coverage.*
 
 **U-04 Weaviate refuses writes with 403 (RBAC without write rights).**
 Level U, risk R1. Two cases. (a) `FakeSchema(ensure_error=
@@ -222,6 +228,8 @@ written, no retry of the 403 (`calls == 2`); then `client.fail = None`,
 `copy` exits 0, 250 objects, every uuid written once. Coverage test;
 pins that a 403 is not retried and that the page is not advanced.
 
+*Implemented: `tests/unit/test_cli_commands.py::test_copy_creates_nothing_when_the_key_may_not_create_the_collection`, `::test_a_403_on_insert_is_not_retried_and_copy_resumes_at_its_page`. Coverage.*
+
 **U-05 Weaviate refuses one object of a batch; vectors of mixed dimension.**
 Level U, risk R1. Preconditions: `FakeInsertClient` extended with a
 `reject` hook that returns `errors={index: SimpleNamespace(message=...)}`
@@ -231,6 +239,8 @@ exits 1 `rejects`, `rejects.jsonl` has one line with `source_id: id-7` and
 the server's message, the other 20 objects are written, `verify` fails the
 count and names `id-7` in the ids check. Coverage test; it also records
 that the tool does not check dimensions itself (the server does).
+
+*Implemented: `tests/unit/test_cli_commands.py::test_an_object_that_weaviate_refuses_is_a_reject_with_its_message`. Coverage.*
 
 **U-06 One object above the gRPC message limit blocks the page.** Level U,
 risk R1 and R5. Preconditions: `FakeInsertClient` whose `insert_many` for a
@@ -245,6 +255,8 @@ object refused with `RESOURCE_EXHAUSTED` becomes a reject with a reason
 that names the size, exit 1. The implementer records which; a change needs
 a ruling because `transient` is shared with the reader.
 
+*Implemented: `tests/unit/test_cli_commands.py::test_an_object_above_the_message_limit_is_a_reject`. Found the bug (exit 4 with the Weaviate hint after six attempts); fixed by ruling R53.*
+
 **U-07 Two source ids with one UUID.** Level U, risk R1. Preconditions:
 `monkeypatch` `to_weaviate.target.writer.to_uuid` and
 `to_weaviate.engine.verify.to_uuid` so that `a` and `b` map to one UUID;
@@ -254,6 +266,8 @@ gap is a deferred Task 11 minor, not a B9 bug): `copy` exits 0 with
 (`source count 3, target count 2`), ids passes (`missing 0, extra 0`),
 records fails naming `a` or `b` with `property source_id differs`.
 
+*Implemented: `tests/unit/test_cli_commands.py::test_two_source_ids_with_one_uuid_fail_verify`. Coverage; pins the current behavior.*
+
 **U-08 A record deleted from the source during the copy.** Level U, risk
 R1. Preconditions: `FakeSource` with a hook that removes record `id-150`
 after the first page is read; 400 records, `page_size` 100, parallelism 1.
@@ -262,12 +276,16 @@ record (`id-200`, shifted into the gap) is never read; `verify` exits 1
 with `missing 1` naming it. The case exists so that a later fix has a
 failing test.
 
+*Implemented: `tests/unit/test_cli_commands.py::test_a_record_deleted_during_the_copy_shifts_another_one_past_the_cursor`. Coverage; pins the documented limit. The record is deleted after the page that holds it is read; then id-200 is missing and id-150 is extra.*
+
 **A-01 A second `copy` process while the first runs.** Level A, risk R1,
 +2 s. Test change to `acc/resume::test_copy_resumes_after_the_process_is_killed`:
 once `state.sqlite` exists and before the kill, run `copy` in the same
 directory. Expected: exit 2 `usage`, message `Another to-weaviate copy
 uses <dir>.`, the first process still running (`poll() is None`) and its
 `copied` higher at the next poll.
+
+*Implemented: change to `tests/acceptance/chroma/test_resume.py::test_copy_resumes_after_the_process_is_killed`. Coverage.*
 
 **A-02 The target refuses writes (READONLY shard) and the copy resumes.**
 Level A, risk R1, 25 s. Preconditions: tiny.l2 copied (10 records);
@@ -280,6 +298,8 @@ message starts `Weaviate refused every object of a batch of 5 in Tiny_l2`
 same code from `transient`'s retry exhaustion), hint is the resume hint;
 `status` shows copied 10, not done; the second `copy` exits 0, 15 objects;
 `verify` exits 0. Run time is the retry budget (about 8 to 15 s).
+
+*Implemented: `tests/acceptance/chroma/test_faults.py::test_a_read_only_shard_stops_copy_and_the_next_copy_resumes`. Coverage; Weaviate 1.40.4 refuses each object with "store is read-only due to: manually set by user".*
 
 **A-03 An empty collection and a collection without embeddings.** Level A,
 risk R1, 10 s. Two cases. (a) `empty`: `inspect` reports count 0 and
@@ -294,6 +314,8 @@ objects, `near_text` with one document returns its record first.
 Suspected (R5, see U-16): the keep-mode draft gives no note that the
 source has no vectors.
 
+*Implemented (a): `tests/acceptance/chroma/test_source_shapes.py::test_an_empty_collection_copies_and_verifies`. Coverage. (b) Not implemented: Chroma 1.5.9 answers 422 to an add without embeddings, so no source holds such records; U-16 covers the tool's side.*
+
 **A-04 Chroma and Weaviate unreachable.** Level A, risk R1 and R4, 15 s.
 Steps: `inspect chroma --collection tiny.l2` with `CHROMA_URL=
 http://localhost:1`; `check` (after a normal inspect) with
@@ -302,6 +324,8 @@ Expected: exit 4 `source_unreachable`, message starts `Chroma could not be
 reached: ConnectError`, hint names `CHROMA_URL`, after the six attempts
 (8 to 15 s); exit 4 `target_unreachable`, hint names `WEAVIATE_URL`, within
 a few seconds; no file other than the inspection in the directory.
+
+*Implemented: `tests/acceptance/chroma/test_faults.py::test_an_unreachable_source_or_target_exits_4`. Coverage.*
 
 **A-05 One record with a document above the gRPC limit (optional).**
 Level A, risk R1, 15 s. Preconditions: a collection `big-doc` (seed) with 3
@@ -312,6 +336,8 @@ after about 10 s of retries, 2 objects written, a rerun exits 4 again.
 Expected after the U-06 fix: exit 1 with one reject. Skip when the Chroma
 server refuses the add (body size limit); then U-06 stands alone.
 
+*Not implemented: the gRPC limit is 104858000 bytes (client 4.24.1 refuses a larger message with RESOURCE_EXHAUSTED), and Chroma 1.5.9 answers 413 to a 101 MiB record, so no source record reaches the limit. U-06 stands alone.*
+
 **A-06 An inactive tenant refuses writes (optional).** Level A, risk R1,
 20 s. Preconditions: the plan of `acc/multi_tenant` (tenant-a, tenant-b
 into `Tenants`); `copy --collection tenant-a`; tenant `b` created
@@ -320,6 +346,8 @@ activate `b`; `copy --collection tenant-b`; `verify`. Expected: exit 4
 `target_unreachable` with the batch message; then exit 0, 20 objects in
 `b`, `verify` exit 0.
 
+*Implemented: `tests/acceptance/chroma/test_faults.py::test_an_inactive_tenant_stops_copy_and_the_next_copy_resumes`. Coverage.*
+
 **A-07 A 50,000-record collection (optional).** Level A, risk R1, 50 s.
 Steps on `bulk`: `inspect --sample-pages 5`, `check`, `copy --parallelism 8`,
 `verify` (full), `status`. Expected: all exit 0, 50,000 objects, the ids
@@ -327,6 +355,8 @@ check walked 50 batches of 1000, the records check `sampled 300,
 compared 300`. Covers more than one page per partition and the scratch
 sqlite above `ID_BATCH`; `resume` (8,000) already covers both at a smaller
 size, so this comes last.
+
+*Not yet implemented: the acceptance budget of this batch is used.*
 
 ### R2: secrets
 
@@ -339,6 +369,8 @@ directory (`plan.yaml`, `inspect.json`, `events.jsonl`, `rejects.jsonl`,
 bytes). Expected: passes at once; it turns every later case into a secret
 test.
 
+*Implemented: `tests/e2e.py::run`, `::run_text` and the fixture `tests/acceptance/conftest.py::_no_secret_in_a_file`. Coverage.*
+
 **A-09 Provider key required, never printed; module not enabled.** Level A,
 risk R2 and R4, 3 s. Steps on tiny.l2: `inspect --vectorizer
 text2vec-openai`; `check` without `OPENAI_API_KEY`; `check` with
@@ -348,6 +380,8 @@ Expected: exit 3 `missing_credential`, message `OPENAI_API_KEY is not set`;
 exit 2 `invalid_plan` with one error `module_not_enabled` whose message
 lists `text2vec-transformers` among the enabled modules, the made-up key in
 no output (A-08); exit 2 `module_not_enabled` for `text2vec-weaviate`.
+
+*Implemented: `tests/acceptance/chroma/test_check.py::test_check_needs_the_provider_key_and_an_enabled_module`. Coverage. Weaviate 1.40.4 enables every API-based module by default, text2vec-openai and text2vec-weaviate among them, so check with the made-up key exits 0 and the module case uses text2vec-ollama.*
 
 ### R3: schema and data fidelity
 
@@ -364,6 +398,8 @@ If it refuses them, `property_name` prefixes `p_` for a `__` start and
 treats reserved names ignoring case, and this test changes to the new
 names.
 
+*Implemented: `tests/unit/test_naming.py::test_drafted_property_names_are_names_the_server_accepts`, `::test_a_reserved_name_near_the_length_limit_falls_back_to_a_numbered_key`, `::test_drafted_collection_names_in_order`. Weaviate 1.40.4 accepts `__` and `iD`. Found the bug: the client refuses the property name `vector`, and the server a name longer than 231 characters (ruling R57).*
+
 **U-10 Allowed hand edits are applied end to end.** Level U, risk R3.
 One parametrized test over the draft of `cli_records(30)`: rename property
 `year` to `publication_year`; `year` from `int` to `text` with tokenization
@@ -377,12 +413,16 @@ holds the property under the new name, type and shape (`2003` as text
 `FakeSchema.ensured` holds the collection once. Disallowed edits are
 covered already (`test_plan`, `cmd`); this case adds none.
 
+*Implemented: `tests/unit/test_cli_commands.py::test_an_allowed_edit_of_the_plan_is_applied_end_to_end`. Coverage.*
+
 **U-11 An all-digit `--vectorizer-option` value becomes an int.** Level U,
 risk R3. `inspect --vectorizer text2vec-openai --vectorizer-option
 model=007 --vectorizer-option dimensions=0256`. Expected today (suspected):
 `plan.yaml` holds `model: 7` and `dimensions: 256`. Expected after a fix:
 a value is an int only when it has no leading zero and the option is not
 `model`. Small; record it if left.
+
+*Implemented: `tests/unit/test_cli_commands.py::test_an_all_digit_vectorizer_option_keeps_its_text`. Found the bug; ruling R57 keeps each value as text in plan.yaml, and the collection is created with it as the type the client declares.*
 
 **A-10 Values at the type limits, unicode, empty and long values.** Level A,
 risk R3, 12 s. The `edge` collection (seed): ids `edge-ключ-1`, `edge-日本-2`,
@@ -414,6 +454,8 @@ double); (3) the server may refuse `__` or `iD` at create, which exits 2
 is a rename rule in `property_name` or a comparison rule in `verify`; the
 implementer records the measured server behavior.
 
+*Implemented: `tests/acceptance/chroma/test_source_shapes.py::test_values_at_the_limits_of_their_type_are_copied`. Found two bugs: the property `vector` stopped check and copy with internal_error, and verify reported an int above 2**53, which the server returns rounded to a double. Measured: 2**63 - 1 and -(2**63) read back unchanged, `""` and `[]` read back as such, Chroma returns -0.0 as 0.0 and drops `tags: []`.*
+
 **A-11 Collection names that need renaming.** Level A, risk R3, 8 s. Steps:
 `inspect --collection Mixed-Case --collection mixed-case --collection
 1-leading-digit --collection class`; `check`; `copy`; `verify`. Expected:
@@ -421,6 +463,8 @@ targets `{Mixed_Case, Mixed_case_2}` (order follows Chroma's listing),
 `C_1_leading_digit`, `Class`; all exit 0; the four collections exist with 5
 objects each. A unicode collection name is not in this case: Chroma 1.5.9
 refuses it at create (section 5).
+
+*Implemented: `tests/acceptance/chroma/test_source_shapes.py::test_collection_names_that_weaviate_refuses_are_renamed`. Coverage.*
 
 **A-12 The target exists with another schema, or with more.** Level A,
 risk R3, 6 s. (a) Create `Tiny_l2` with the admin client with `position`
@@ -431,12 +475,16 @@ from the plan's properties plus a property `note` (text) and the plan's
 vector config; `copy`; `verify`. Expected: exit 0, 10 objects, `verify`
 exit 0, the property `note` still there.
 
+*Implemented: `tests/acceptance/chroma/test_plan_edits.py::test_a_target_with_another_property_type_stops_check_and_copy`, `::test_a_target_with_one_more_property_takes_the_copy`. Coverage.*
+
 **A-13 A hand-edited plan end to end.** Level A, risk R3, 5 s. Edit the
 tiny.l2 draft: `position` renamed `pos`, type `text`, tokenization `field`,
 `range_filters: false`; the `uri` property removed and `#uri` listed under
 `dropped`. Steps: `check`, `copy`, `verify`. Expected: all exit 0; the
 collection has `pos` as text with field tokenization and no `uri`; an
 object holds `pos: "3"`; `verify` compares with the edited plan and passes.
+
+*Implemented: `tests/acceptance/chroma/test_plan_edits.py::test_a_hand_edited_plan_is_copied_as_edited`. Coverage.*
 
 **A-14 Names the server refuses pass `check`.** Level A, risk R3 and R5,
 4 s. Edit the tiny.l2 draft: property `position` renamed `has space`; in a
@@ -447,16 +495,22 @@ after a fix: `check` and `copy` exit 2 `invalid_plan` with a finding
 (`invalid_name`) that quotes the server's rule (`^[_A-Za-z][_0-9A-Za-z]*$`
 for properties, `^[A-Z][_0-9A-Za-z]*$` for the stored collection name).
 
+*Implemented: `tests/acceptance/chroma/test_plan_edits.py::test_a_name_that_weaviate_refuses_is_an_invalid_plan`. Found the bug; check and copy give `invalid_name` (ruling R57).*
+
 **A-15 `--consistency` and `--parallelism` reach the server.** Level A,
 risk R3, 16 s. Parametrized: `copy --consistency ALL` and `QUORUM` on
 tiny.l2 (10 objects); `copy --parallelism 1` and `--parallelism 8` on
 docs-cosine (700 objects, then `verify`). Expected: exit 0 each, the
 counts, `verify` exit 0. Coverage test on a single node.
 
+*Implemented: `tests/acceptance/chroma/test_copy_options.py::test_copy_with_a_consistency_level`, `::test_copy_and_verify_at_the_bounds_of_their_options`. Coverage.*
+
 **A-16 `verify --sample` at its bounds.** Level A, risk R3, 6 s. After a
 copy of docs-cosine: `verify --sample 1` and `--sample 10000`. Expected:
 exit 0; records detail `sampled 1, compared 1, ...` and `sampled 700,
 compared 700, ...`.
+
+*Implemented: `tests/acceptance/chroma/test_copy_options.py::test_copy_and_verify_at_the_bounds_of_their_options`. Coverage.*
 
 ### R4: exit codes and JSON documents
 
@@ -467,6 +521,8 @@ code equals `ERROR_EXIT[code]`, `message` is one line of at most 500
 characters; when `status` is `success`, the exit code is 0; stderr holds
 no JSON object. Expected: passes at once on the current suite.
 
+*Implemented: `tests/e2e.py::run` (`_contract_problems`). Coverage.*
+
 **A-18 Usage errors.** Level A, risk R4, 5 s. `inspect --database nope`;
 `inspect --collection nope`; a second `inspect` without `--force`; `copy
 --collection nope`; `copy --parallelism 9`. Expected: exit 2 `usage` each,
@@ -475,12 +531,16 @@ nope.`, `Chroma has no collection named nope.`, `<dir>/plan.yaml exists.`,
 `--collection nope matches no plan entry.`, `--parallelism 9 is outside 1
 to 8.`; no `inspect.json` written by the first two.
 
+*Implemented: `tests/acceptance/chroma/test_usage.py::test_usage_errors_exit_2_and_name_the_value`. Coverage.*
+
 **A-19 Text mode.** Level A, risk R4, 3 s. A helper `run_text` without
 `--json`. Steps after an inspect of tiny.l2: `status`; `check` with
 `WEAVIATE_API_KEY=wrong`. Expected: `status` exit 0, stdout has a line per
 entry and `Total: 10 records`, stdout is not JSON; `check` exit 3, stdout
 empty, stderr has `Error: Weaviate refused the request: the API key is
 missing or wrong.` and a `Hint:` line naming `WEAVIATE_API_KEY`.
+
+*Implemented: `tests/acceptance/chroma/test_usage.py::test_text_mode_prints_lines_and_the_error_on_stderr`. Coverage. In text mode the progress line goes to stdout, so stdout of the failed check holds that line.*
 
 **U-12 A corrupted state file and a state of a newer schema.** Level U,
 risk R4. (a) `state.sqlite` holding random bytes: `status` and `copy`.
@@ -491,6 +551,8 @@ plan does not call this a bug; the implementer records it for a ruling
 extra nullable column in `partitions`, written by a test: `copy` resumes
 and `status` reads it. Expected: exit 0, the extra column untouched.
 
+*Implemented: `tests/unit/test_cli_commands.py::test_a_corrupted_state_file_is_an_invalid_state`, `::test_a_state_file_of_a_newer_schema_resumes`. Found the bug; ruling R55 gives the code `invalid_state`.*
+
 **U-13 The tenant from the key (`_chroma_source`).** Level U, risk R4.
 `monkeypatch` `to_weaviate.cli.ChromaClient` to pass the fake server's
 transport. Cases: `CHROMA_TENANT` set: no `/auth/identity` request;
@@ -500,11 +562,15 @@ Authorization`: header `Authorization: Bearer <key>`; identity answers
 401: `inspect` exits 3 `auth_failed`, hint names `CHROMA_API_KEY`, the key
 not in the output.
 
+*Implemented: `tests/unit/test_cli_chroma.py::test_inspect_reads_the_tenant_from_the_key_only_without_chroma_tenant`, `::test_a_key_that_the_identity_refuses_exits_3`. Coverage.*
+
 **U-14 Tenant, database and collection ids are percent-encoded in paths.**
 Level U, risk R4. Tenant `t x`, database `my db/1`, collection id with a
 `+`: the fake server records the raw request paths. Expected: `/tenants/
 t%20x/databases/my%20db%2F1/collections/...`, and the listing, count, get
 and query all reach the right handler.
+
+*Implemented: `tests/unit/test_cli_chroma.py::test_tenant_database_and_collection_id_are_percent_encoded_in_paths`. Coverage.*
 
 ### R5: usability
 
@@ -519,6 +585,8 @@ which loses the value. The case pins this and records a ruling request:
 `copy` could add a planned property that the collection lacks (Weaviate
 allows adding properties), or the hint could say so.
 
+*Implemented: `tests/unit/test_cli_commands.py::test_copy_adds_a_planned_property_that_the_collection_lacks`. Found the bug; ruling R54: copy adds the property and check warns `missing_property`. The records rejected by the run before are not read again; a copy in a new directory writes them.*
+
 **U-16 A source without vectors is drafted in keep mode without a note.**
 Level U, risk R5. `FakeSource` records with `vector=None` and no
 `dimension`. Expected today: `inspect` exits 0, the entry has one `keep`
@@ -526,6 +594,8 @@ vector and no note about vectors; `copy` rejects every record with `no
 vector`. Expected after a fix: a note or decision `the source has no
 vectors; use --vectors embed` on the entry. Suspected usability bug; A-03
 is the live twin.
+
+*Implemented: `tests/unit/test_cli_commands.py::test_inspect_notes_and_check_refuses_a_source_without_vectors`. Found the bug; ruling R56: a note in inspect and the error `no_source_vectors` in check and copy.*
 
 **U-17 Hints for two Chroma answers.** Level U, risk R5. (a) 403 on the
 database listing (a database-scoped Chroma Cloud key): today `auth_failed`
@@ -536,6 +606,8 @@ changed): today `source_unreachable` with the hint about `CHROMA_URL`; the
 hint should say `Run to-weaviate inspect chroma --force`. Both pin today's
 text and propose the new one; small, last.
 
+*Implemented: `tests/unit/test_cli_chroma.py::test_a_403_on_the_database_list_names_the_database_settings`, `::test_a_source_collection_that_is_gone_names_inspect_force`. Found the bug; both hints now name the fix (ruling R57).*
+
 ### Cloud
 
 **C-02 A second run against the cloud.** Level C, risk R1. Test change to
@@ -544,11 +616,15 @@ text and propose the new one; small, last.
 each, 2000 objects, `status` done with copied 2000. About 20 s more on
 the release job.
 
+*Implemented: change to `tests/cloud/chroma/test_cloud.py::test_chroma_cloud_to_weaviate_cloud`. Coverage; run against the local servers only.*
+
 **C-03 Inspect the whole cloud database.** Level C, risk R4. `inspect
 chroma` without `--collection` in a second directory (no copy). Expected:
 exit 0, an entry for `to-weaviate-ci` among the entries, `source.tenant`
 equal to `CHROMA_TENANT`. Covers the listing and the identity path against
 Chroma Cloud. Skips with the suite when the variables are missing.
+
+*Implemented: `tests/cloud/chroma/test_cloud.py::test_inspect_of_the_whole_database`, with `--sample-pages 1`. Coverage; run against the local servers only.*
 
 ## 5. What cannot be tested here
 
