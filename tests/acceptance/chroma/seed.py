@@ -42,25 +42,29 @@ def _vector(rng: random.Random, dimension: int) -> list[float]:
 def docs_cosine(rng: random.Random) -> list[Record]:
     """700 records of 8 dimensions.
 
-    `code` is text in 50 records and int in the others. 20 records have no
-    document.
+    `code` is text in 50 records and int in the others. `reviewer` is in 70
+    records only. 20 records have no document.
     """
     records = []
     for i in range(700):
         category = CATEGORIES[i % len(CATEGORIES)]
+        metadata: dict[str, Any] = {
+            "category": category,
+            "year": 2000 + i % 25,
+            "tags": rng.sample(TAGS, k=1 + i % 3),
+            "code": f"C-{i}" if i % 14 == 0 else i,
+            "score": rng.random(),
+            "weights": [rng.random() for _ in range(3)],
+            "published": i % 2 == 0,
+        }
+        if i % 10 == 3:
+            metadata["reviewer"] = f"reviewer-{i % 7}"
         records.append(
             Record(
                 id=f"doc-{i:04d}",
                 embedding=_vector(rng, 8),
                 document=None if i % 35 == 0 else f"Document {i} is a {category}.",
-                metadata={
-                    "category": category,
-                    "year": 2000 + i % 25,
-                    "tags": rng.sample(TAGS, k=1 + i % 3),
-                    "code": f"C-{i}" if i % 14 == 0 else i,
-                    "score": rng.random(),
-                    "weights": [rng.random() for _ in range(3)],
-                },
+                metadata=metadata,
                 uri=f"https://example.com/docs/{i}",
             )
         )

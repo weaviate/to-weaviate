@@ -10,6 +10,7 @@ from conftest import (
     SUITE_COLLECTIONS,
     read_plan,
     run,
+    weaviate_by_source_id,
     weaviate_config,
     weaviate_count,
     weaviate_object,
@@ -66,6 +67,50 @@ def test_end_to_end(seeded, tmp_path):
     assert types["code"].value == "text"
     r = run(["copy"], tmp_path)
     assert r.exit_code == 0 and weaviate_count("Docs_cosine") == 700, r
+
+
+# The property types that the metadata of docs-cosine maps to.
+DOCS_COSINE_TYPES = {
+    "document": "text",
+    "source_id": "text",
+    "uri": "text",
+    "category": "text",
+    "year": "int",
+    "tags": "text[]",
+    "code": "text",
+    "score": "number",
+    "weights": "number[]",
+    "published": "boolean",
+    "reviewer": "text",
+}
+
+
+def test_metadata_shapes_map_to_property_types(seeded, tmp_path):
+    r = run(["inspect", "chroma", "--collection", "docs-cosine"], tmp_path)
+    assert r.exit_code == 0, r
+    for cmd in (["check"], ["copy"], ["verify"]):
+        r = run(cmd, tmp_path)
+        assert r.exit_code == 0 and r.data["status"] == "success", r
+    records_check = next(c for c in r.data["checks"] if c["name"] == "records")
+    assert records_check["detail"].startswith("sampled 300, compared 300,"), r
+    types = {
+        p.name: p.data_type.value for p in weaviate_config("Docs_cosine").properties
+    }
+    assert types == DOCS_COSINE_TYPES
+    # doc-0000 has no document, no reviewer and a text code; doc-0003 has a
+    # reviewer and an int code, which is stored as text.
+    first = weaviate_by_source_id("Docs_cosine", "doc-0000")
+    assert first is not None
+    assert first.properties["document"] is None
+    assert first.properties["reviewer"] is None
+    assert first.properties["code"] == "C-0"
+    assert first.properties["published"] is True
+    third = weaviate_by_source_id("Docs_cosine", "doc-0003")
+    assert third is not None
+    assert third.properties["reviewer"] == "reviewer-3"
+    assert third.properties["code"] == "3"
+    assert third.properties["published"] is False
+    assert third.properties["year"] == 2003
 
 
 # (start, count) of each add to tiny.l2, after its 10 seed records.
