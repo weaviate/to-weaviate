@@ -10,6 +10,7 @@ from weaviate.collections.classes.config import (
     _BQConfig,
     _RQConfig,
     _VectorIndexConfigDynamic,
+    _VectorIndexConfigHFresh,
     _VectorIndexConfigHNSW,
 )
 from weaviate.exceptions import (
@@ -349,6 +350,28 @@ def test_differences_multi_tenancy():
 def test_differences_none_quantizer_matches_uncompressed_target():
     index = p.IndexPlan(type="hnsw", quantizer=p.QuantizerPlan(type="none"))
     assert differences(FakeClient(FakeCollection(config())), [entry(index=index)]) == []  # type: ignore[arg-type]
+
+
+# Weaviate 1.40.4 created an hfresh collection with rq and 1 bit for a plan
+# with quantizer none. Such a plan is refused now; after the person sets rq or
+# default, the copy resumes against that collection.
+@pytest.mark.parametrize("quantizer", ["rq", "default"])
+def test_differences_hfresh_rq_collection_matches_a_plan_changed_from_none(
+    quantizer,
+):
+    found = _VectorIndexConfigHFresh(
+        multi_vector=None,
+        quantizer=_RQConfig(
+            cache=None, bits=1, rescore_limit=350, centering=False, training_limit=0
+        ),
+        distance_metric=VectorDistances.COSINE,
+        max_posting_size_kb=48,
+        replicas=4,
+        search_probe=256,
+    )
+    index = p.IndexPlan(type="hfresh", quantizer=p.QuantizerPlan(type=quantizer))
+    client = FakeClient(FakeCollection(config(index=found)))
+    assert differences(client, [entry(index=index)]) == []  # type: ignore[arg-type]
 
 
 def test_differences_dynamic_reads_quantizer_from_both_parts():
