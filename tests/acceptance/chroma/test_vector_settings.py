@@ -194,6 +194,9 @@ def test_quantizer_settings_reach_the_server(docs_rq_inspection, tmp_path, quant
     index = {"type": "hnsw", "quantizer": quantizer}
     _plan_with_index(docs_rq_inspection, tmp_path, index)
     copy_and_verify(tmp_path)
+    # The collection that copy made matches the plan, so a later run resumes.
+    r = run(["check"], tmp_path)
+    assert r.exit_code == 0, r
     found = _docs_rq_index()
     assert found.vector_index_type() == "hnsw"
     _assert_quantizer(found.quantizer, quantizer)
@@ -219,6 +222,9 @@ def test_index_settings_reach_the_server(docs_rq_inspection, tmp_path, index):
     assert r.exit_code == 0 and r.data["status"] == "success", r
     r = run(["verify"], tmp_path)
     assert r.exit_code == 0 and r.data["status"] == "success", r
+    # The collection that copy made matches the plan, so a later run resumes.
+    r = run(["check"], tmp_path)
+    assert r.exit_code == 0, r
     found = _docs_rq_index()
     assert found.distance_metric.value == "cosine"
     if index["type"] == "default":

@@ -32,6 +32,7 @@ from to_weaviate.plan import (
     QUANTIZER_FIELDS,
     CollectionPlan,
     PropertyPlan,
+    QuantizerPlan,
     VectorizerPlan,
     VectorPlan,
 )
@@ -64,6 +65,18 @@ _QUANTIZER_CLASSES: dict[type, str] = {
     _SQConfig: "sq",
 }
 
+
+# Quantizer fields that `differences` compares with the existing collection.
+# copy's config update after the pages sends them, and the server refuses a
+# change of bits or centering.
+COMPARED_QUANTIZER_FIELDS = (
+    "bits",
+    "centering",
+    "segments",
+    "centroids",
+    "training_limit",
+    "rescore_limit",
+)
 
 # A server reports a Google vectorizer as text2vec-google or as the legacy
 # name text2vec-palm.
@@ -316,8 +329,10 @@ def collection_kwargs(group: list[CollectionPlan]) -> dict[str, Any]:
 def quantizer_updates(entry: CollectionPlan) -> list[Any]:
     """Config updates that enable each planned quantizer that needs training.
 
-    They hold the same quantizer as `collection_kwargs`, so the collection
-    config does not change. Only hnsw takes a quantizer that needs training.
+    They hold the same quantizer as `collection_kwargs`. `differences`
+    compares the fields they send with an existing collection, so the update
+    does not change its config. Only hnsw takes a quantizer that needs
+    training.
     """
     return [
         Reconfigure.Vectors.update(
@@ -373,11 +388,29 @@ def _vector_differences(plan: VectorPlan, found: Any) -> list[str]:
             out.append(
                 f"vector {name}: quantizer type is {'/'.join(types)}, plan has {q.type}"
             )
-        elif q.bits is not None:
+        else:
             parts = [index.hnsw, index.flat] if len(types) == 2 else [index]
-            bits = [getattr(p.quantizer, "bits", None) for p in parts]
-            if any(b != q.bits for b in bits):
-                out.append(f"vector {name}: bits is {bits[0]}, plan has {q.bits}")
+            out.extend(_quantizer_field_differences(name, q, parts))
+    return out
+
+
+def _quantizer_field_differences(
+    name: str, planned: QuantizerPlan, parts: list[Any]
+) -> list[str]:
+    """Planned COMPARED_QUANTIZER_FIELDS that the index parts hold otherwise.
+
+    A field that the plan does not set is not compared, nor a field that a
+    part does not report: that index type does not store it.
+    """
+    out: list[str] = []
+    for field in COMPARED_QUANTIZER_FIELDS:
+        value = getattr(planned, field)
+        if value is None:
+            continue
+        found = [getattr(part.quantizer, field, None) for part in parts]
+        differing = [f for f in found if f is not None and f != value]
+        if differing:
+            out.append(f"vector {name}: {field} is {differing[0]}, plan has {value}")
     return out
 
 
