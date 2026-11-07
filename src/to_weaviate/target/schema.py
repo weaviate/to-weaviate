@@ -281,8 +281,8 @@ def _scalar(text: str, kind: type) -> Any:
 def _declared_options(factory: Any, options: dict[str, Any]) -> dict[str, Any]:
     """`options` with each text value as the bool, int or float the factory declares.
 
-    plan.yaml holds a --vectorizer-option value as typed, and the client
-    refuses a text where it declares a number or a boolean.
+    plan.yaml holds a --vectorizer-option value as the text given, and the
+    client refuses a text where it declares a number or a boolean.
     """
     hints = typing.get_type_hints(factory)
     out: dict[str, Any] = {}
