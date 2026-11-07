@@ -260,18 +260,19 @@ def test_api_key_not_in_repr_or_error():
 
 
 def test_collections_reads_all_pages():
+    rows = [{"id": str(i)} for i in range(1003)]
     seen = []
 
     def handler(request):
         seen.append(request)
         offset = int(request.url.params["offset"])
-        n = 1000 if offset == 0 else 3
-        return httpx.Response(200, json=[{"id": str(offset + i)} for i in range(n)])
+        limit = int(request.url.params["limit"])
+        return httpx.Response(200, json=rows[offset : offset + limit])
 
     client, _ = make(handler)
-    assert len(client.collections("t", "d")) == 1003
-    assert [r.url.params["limit"] for r in seen] == ["1000", "1000"]
-    assert [r.url.params["offset"] for r in seen] == ["0", "1000"]
+    assert client.collections("t", "d") == rows
+    assert [r.url.params["limit"] for r in seen] == ["1000", "1000", "1000"]
+    assert [r.url.params["offset"] for r in seen] == ["0", "1000", "1003"]
     assert seen[0].url.path == "/api/v2/tenants/t/databases/d/collections"
 
 
@@ -299,11 +300,27 @@ def test_collections_advance_by_the_rows_received(total):
     client, _ = make(handler)
     found = client.collections("t", "d")
     assert [row["id"] for row in found] == [str(i) for i in range(total)]
-    assert [r.url.params["offset"] for r in seen][:3] == ["0", "100", "200"]
+    offsets = [str(offset) for offset in range(0, total, 100)] + [str(total)]
+    assert [r.url.params["offset"] for r in seen] == offsets
     assert {r.url.params["limit"] for r in seen} == {"1000"}
 
 
-def test_collections_page_over_the_limit_counts_as_full():
+def test_collections_read_past_a_page_shorter_than_the_one_before():
+    rows = [{"id": str(i)} for i in range(250)]
+    sizes = [100, 50, 100, 100]
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        offset = int(request.url.params["offset"])
+        return httpx.Response(200, json=rows[offset : offset + sizes.pop(0)])
+
+    client, _ = make(handler)
+    assert client.collections("t", "d") == rows
+    assert [r.url.params["offset"] for r in seen] == ["0", "100", "150", "250"]
+
+
+def test_collections_page_over_the_limit_is_read_once():
     rows = [{"id": str(i)} for i in range(2500)]
     seen = []
 
@@ -314,7 +331,26 @@ def test_collections_page_over_the_limit_counts_as_full():
 
     client, _ = make(handler)
     assert client.collections("t", "d") == rows
-    assert [r.url.params["offset"] for r in seen][:3] == ["0", "1200", "2400"]
+    offsets = ["0", "1200", "2400", "2500"]
+    assert [r.url.params["offset"] for r in seen] == offsets
+
+
+def test_collections_that_do_not_advance_raise_chroma_error():
+    rows = [{"id": str(i)} for i in range(3)]
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        if len(seen) > 5:
+            raise AssertionError("the listing did not stop")
+        return httpx.Response(200, json=rows)
+
+    client, sleeps = make(handler)
+    with pytest.raises(ChromaError) as e:
+        client.collections("t", "d")
+    assert e.value.message == "the collection list did not advance at offset 3"
+    assert [r.url.params["offset"] for r in seen] == ["0", "3"]
+    assert sleeps == []
 
 
 REDIRECT_HINT = "Set CHROMA_URL to the address the server redirects to."
