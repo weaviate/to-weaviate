@@ -173,17 +173,26 @@ class ChromaSource:
             sparse_keys=[],
             document_bytes_estimate=0,
         )
+        # A listing can give the dimension as null. The sampled pages then
+        # read embeddings until one record has an embedding.
+        dimension = shell.dimension
+        dimension_from = None if dimension is None else "listing"
         types: dict[str, Counter[str]] = {}
         total_pages = _page_count(count)
         wanted = total_pages if sample_pages is None else sample_pages
         for page in _spaced_pages(total_pages, wanted):
+            include = (
+                ["metadatas"] if dimension is not None else ["metadatas", "embeddings"]
+            )
             response = self._get(
                 shell,
                 limit=CHROMA_MAX_PAGE,
                 offset=page * CHROMA_MAX_PAGE,
-                include=["metadatas"],
+                include=include,
             )
             for record in _records(response):
+                if dimension is None and record.vector:
+                    dimension, dimension_from = len(record.vector), "sample"
                 for key, value in record.metadata.items():
                     types.setdefault(key, Counter())[value_type(value)] += 1
         sparse = set(sparse_keys_of(raw))
@@ -198,12 +207,13 @@ class ChromaSource:
             namespace=shell.namespace,
             name=shell.name,
             count=count,
-            dimension=shell.dimension,
+            dimension=dimension,
             distance=shell.distance,
             embedding=shell.embedding,
             fields=fields,
             sparse_keys=sorted(sparse),
             document_bytes_estimate=self._document_bytes(shell),
+            dimension_from=dimension_from,
         )
 
     def _document_bytes(self, collection: SourceCollection) -> int:

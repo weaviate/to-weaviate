@@ -495,3 +495,24 @@ def test_capabilities():
     assert ChromaSource.capabilities == frozenset(
         {"vectors", "vector_search", "filter"}
     )
+
+
+def test_inspect_takes_a_dimension_that_the_listing_lacks_from_the_sample(
+    collection, fake_client
+):
+    fake_client.collection = {**collection, "dimension": None}
+    fake_client.records = [{**r, "vector": None} for r in make_records(2)] + (
+        make_records(650)[2:]
+    )
+    c = ChromaSource(fake_client, tenant="t").inspect(None, None, None)[0]
+    assert (c.dimension, c.dimension_from) == (2, "sample")
+    # Only the first page reads embeddings: it holds one.
+    assert [call.include for call in fake_client.calls[:3]] == [
+        ["metadatas", "embeddings"],
+        ["metadatas"],
+        ["metadatas"],
+    ]
+
+
+def test_inspect_keeps_the_dimension_of_the_listing(inspected):
+    assert (inspected.dimension, inspected.dimension_from) == (1536, "listing")

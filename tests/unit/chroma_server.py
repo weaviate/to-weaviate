@@ -40,7 +40,8 @@ class ChromaServer:
 
     A /get answer holds at most `page_cap` rows when it is set. Each key of
     `faults` maps to a list; a request that matches takes the first item of
-    the list. `calls` records every request.
+    the list. `calls` records every request. Without `dimension_listed`, the
+    collection listing gives the dimension as null.
     """
 
     records: list[Record]
@@ -50,6 +51,7 @@ class ChromaServer:
     name: str = "docs"
     space: str = "cosine"
     page_cap: int | None = None
+    dimension_listed: bool = True
     faults: dict[FaultKey, list[Fault]] = field(default_factory=dict)
     calls: list[Call] = field(default_factory=list)
 
@@ -58,7 +60,9 @@ class ChromaServer:
         return {
             "id": self.collection_id,
             "name": self.name,
-            "dimension": len(vectors[0]) if vectors else None,
+            "dimension": (
+                len(vectors[0]) if vectors and self.dimension_listed else None
+            ),
             "configuration_json": {"hnsw": {"space": self.space}},
             "metadata": None,
             "tenant": self.tenant,

@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 from to_weaviate import cli
 from to_weaviate.cli import build_app
+from to_weaviate.plan import load_plan
 from to_weaviate.settings import ChromaSettings
 from to_weaviate.sources.base import Record
 from to_weaviate.sources.chroma.client import ChromaClient
@@ -286,3 +287,28 @@ def test_a_source_collection_that_is_gone_names_inspect_force():
         "The collection is gone from Chroma, or it was created again with a new "
         "id. Run to-weaviate inspect chroma --force to inspect it again."
     )
+
+
+def test_a_listing_without_a_dimension_takes_it_from_the_sampled_records(tmp_path):
+    rows = [
+        Record(f"id-{i}", [float(i), *[1.0] * 7], f"doc {i}", None, {"n": i})
+        for i in range(10)
+    ]
+    fakes = inspected(ChromaServer(rows, dimension_listed=False))
+    plan = load_plan(tmp_path / DIR / "plan.yaml")
+    assert plan.collections[0].source.dimension == 8
+    found = json.loads((tmp_path / DIR / "inspect.json").read_text())
+    collection = found["collections"][0]
+    assert (collection["dimension"], collection["dimension_from"]) == (8, "sample")
+    r = invoke(fakes, "check", "--json")
+    assert r.exit_code == 0, r.output
+
+
+def test_an_inspection_written_before_dimension_from_still_loads(tmp_path):
+    fakes = inspected(ChromaServer(records(0, 10)))
+    path = tmp_path / DIR / "inspect.json"
+    found = json.loads(path.read_text())
+    for collection in found["collections"]:
+        del collection["dimension_from"]
+    path.write_text(json.dumps(found))
+    assert copied(fakes)["copied"] == 10

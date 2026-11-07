@@ -22,6 +22,8 @@ class SourceCollection:
     fields: list[FieldStats]
     sparse_keys: list[str]
     document_bytes_estimate: int
+    # "listing" or "sample": where `dimension` came from; None without one.
+    dimension_from: str | None = None
 
 
 @dataclass(frozen=True)
