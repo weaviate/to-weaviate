@@ -516,7 +516,8 @@ def _index_plan(
         raise CliError(
             "usage",
             f"--index {index} --quantizer {quantizer}: {_validation_text(exc)}",
-            "A quantizer needs a named --index; --quantizer-bits takes 1, 4 or 8.",
+            "A quantizer needs a named --index that supports it; "
+            "--quantizer-bits takes 1, 4 or 8.",
         ) from exc
 
 

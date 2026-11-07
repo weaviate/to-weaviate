@@ -270,6 +270,44 @@ def test_quantizer_needs_a_named_index_type():
         IndexPlan(type="default", quantizer=QuantizerPlan(type="rq"))
 
 
+# The quantizer types that Weaviate 1.40.4 creates for each named index type.
+SUPPORTED_QUANTIZERS = {
+    "hnsw": ["default", "none", "rq", "sq", "pq", "bq"],
+    "flat": ["default", "none", "rq", "bq"],
+    "dynamic": ["default", "none", "rq", "bq"],
+    "hfresh": ["default", "rq"],
+}
+ALL_QUANTIZERS = ["default", "none", "rq", "sq", "pq", "bq"]
+
+
+@pytest.mark.parametrize(
+    ("index", "quantizer"),
+    [(i, q) for i, qs in SUPPORTED_QUANTIZERS.items() for q in qs],
+)
+def test_index_accepts_the_quantizer_types_that_it_supports(index, quantizer):
+    plan = IndexPlan(type=index, quantizer=QuantizerPlan(type=quantizer))
+    assert plan.quantizer.type == quantizer
+
+
+@pytest.mark.parametrize(
+    ("index", "quantizer"),
+    [
+        (i, q)
+        for i, qs in SUPPORTED_QUANTIZERS.items()
+        for q in ALL_QUANTIZERS
+        if q not in qs
+    ],
+)
+def test_index_refuses_a_quantizer_type_that_it_does_not_support(index, quantizer):
+    with pytest.raises(ValidationError) as e:
+        IndexPlan(type=index, quantizer=QuantizerPlan(type=quantizer))
+    supported = ", ".join(SUPPORTED_QUANTIZERS[index])
+    assert (
+        f"quantizer type {quantizer!r} is not supported by index type {index!r}; "
+        f"it supports {supported}"
+    ) in str(e.value)
+
+
 def test_index_refuses_an_unknown_option():
     with pytest.raises(ValidationError) as e:
         IndexPlan(type="hnsw", options={"search_probe": 4})

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from fakes import (
     FakeFactories,
     FakeInsertClient,
@@ -322,6 +323,46 @@ def test_inspect_usage_errors(tmp_path, args, named):
     r = invoke(FakeFactories(FakeSource(cli_records(10))), "inspect", "chroma", *args)
     assert r.exit_code == 2 and named in r.output
     assert not (tmp_path / DIR / "plan.yaml").exists()
+
+
+def _set_index(path: Path, index: dict[str, Any]) -> None:
+    """Give every vector of the plan.yaml at `path` the index `index`.
+
+    The file is edited as YAML, so the plan model does not check `index`.
+    """
+    plan = yaml.safe_load(path.read_text(encoding="utf-8"))
+    for entry in plan["collections"]:
+        for vector in entry["target"]["vectors"]:
+            vector["index"] = index
+    path.write_text(yaml.safe_dump(plan, sort_keys=False), encoding="utf-8")
+
+
+def test_inspect_refuses_a_quantizer_that_the_index_does_not_support(tmp_path):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    r = invoke(
+        fakes, "inspect", "chroma", "--index", "flat", "--quantizer", "sq", "--json"
+    )
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert d["code"] == "usage"
+    assert "quantizer type 'sq' is not supported by index type 'flat'" in d["message"]
+    assert not (tmp_path / DIR / "plan.yaml").exists()
+
+
+@pytest.mark.parametrize("command", ["check", "copy"])
+def test_a_quantizer_that_the_index_does_not_support_is_refused(tmp_path, command):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    index = {"type": "hfresh", "quantizer": {"type": "none"}}
+    _set_index(tmp_path / DIR / "plan.yaml", index)
+    r = invoke(fakes, command, "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert d["code"] == "invalid_plan"
+    assert (
+        "quantizer type 'none' is not supported by index type 'hfresh'"
+        in (d["message"])
+    )
+    assert fakes.schema_calls == 0 and fakes.schema.ensured == []
 
 
 def test_inspect_unknown_collection_hint_names_both_database_settings():

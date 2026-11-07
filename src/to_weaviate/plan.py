@@ -36,6 +36,17 @@ QUANTIZER_FIELDS: dict[str, set[str]] = {
     "bq": {"rescore_limit", "cache"},
 }
 
+# The quantizer types that Weaviate 1.40.4 creates for each named index type.
+# It refuses the others, except none with hfresh, which it stores as rq. A
+# dynamic index sends its quantizer to its hnsw part and its flat part, so it
+# takes the types that both parts take.
+INDEX_QUANTIZERS: dict[str, tuple[str, ...]] = {
+    "hnsw": ("default", "none", "rq", "sq", "pq", "bq"),
+    "flat": ("default", "none", "rq", "bq"),
+    "dynamic": ("default", "none", "rq", "bq"),
+    "hfresh": ("default", "rq"),
+}
+
 # The distances that target.schema maps to VectorDistances.
 DISTANCES = tuple(sorted(d.value for d in VectorDistances))
 KEEP_DISTANCES_WITHOUT_INDEX = (None, "cosine")
@@ -96,10 +107,16 @@ class IndexPlan(_Model):
             raise ValueError(
                 f"index option(s) {unknown} are not valid for index type {self.type!r}"
             )
-        if self.quantizer.type != "default" and self.type == "default":
+        quantizer = self.quantizer.type
+        if quantizer != "default" and self.type == "default":
             raise ValueError(
-                f"quantizer type {self.quantizer.type!r} needs a named index "
-                "type, not 'default'"
+                f"quantizer type {quantizer!r} needs a named index type, not 'default'"
+            )
+        supported = INDEX_QUANTIZERS.get(self.type)
+        if supported is not None and quantizer not in supported:
+            raise ValueError(
+                f"quantizer type {quantizer!r} is not supported by index type "
+                f"{self.type!r}; it supports {', '.join(supported)}"
             )
         return self
 

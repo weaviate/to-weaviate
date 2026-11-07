@@ -58,7 +58,9 @@ vector settings. Review it before you run `check`.
   vectorizer module and its options.
 - `--index`, `--quantizer`, `--quantizer-bits`: the vector index type, the
   quantizer and the bits for `rq` (1, 4 or 8). `default` leaves the choice
-  to the server.
+  to the server. `hnsw` takes every quantizer, `flat` and `dynamic` take
+  `none`, `rq` and `bq`, and `hfresh` takes `rq` only, as Weaviate 1.40.4
+  does. `inspect`, `check` and `copy` refuse any other pair.
 - `--force`: replace an existing `plan.yaml`.
 
 ### `check`
