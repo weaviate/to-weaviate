@@ -162,7 +162,7 @@ The exit code is the same with and without `--json`:
 |---|---|---|
 | 0 | success | |
 | 1 | rejected records or a failed verification | `rejects`, `verification_failed` |
-| 2 | usage error, invalid plan, or a state of another target | `usage`, `invalid_plan`, `plan_mismatch`, `target_rejected_schema`, `state_mismatch` |
+| 2 | usage error, invalid plan, a state of another target, or a state file that cannot be read | `usage`, `invalid_plan`, `plan_mismatch`, `target_rejected_schema`, `state_mismatch`, `invalid_state` |
 | 3 | missing credential or authentication failure | `missing_credential`, `auth_failed` |
 | 4 | source or target unreachable | `source_unreachable`, `target_unreachable` |
 | 5 | internal error | `internal_error` |

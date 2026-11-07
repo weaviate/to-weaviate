@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import replace
@@ -2268,3 +2269,51 @@ def test_a_property_name_that_the_client_refuses_is_an_invalid_plan(tmp_path, cm
         ("invalid_name", "property vector: Weaviate reserves the property name vector")
     ]
     assert fakes.writer.calls == 0
+
+
+STATE_HINT_UNREADABLE = "Start again with another --dir, or restore the file."
+
+
+@pytest.mark.parametrize("cmd", ["status", "copy"])
+def test_a_corrupted_state_file_is_an_invalid_state(tmp_path, cmd):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    (tmp_path / DIR / "state.sqlite").write_bytes(bytes(range(256)) * 16)
+    r = invoke(fakes, cmd, "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"], d["hint"]) == (
+        "invalid_state",
+        f"state.sqlite in {DIR} cannot be read.",
+        STATE_HINT_UNREADABLE,
+    )
+    assert fakes.writer.calls == 0
+
+
+def test_a_state_file_of_a_newer_schema_resumes(tmp_path):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(250))))
+    old_state_file(
+        tmp_path / DIR / "state.sqlite",
+        FakeSource.REF,
+        250,
+        Partition("0-250", "0", "250"),
+        "100",
+        100,
+    )
+    db = sqlite3.connect(tmp_path / DIR / "state.sqlite")
+    with db:
+        db.execute("CREATE TABLE later (x TEXT)")
+        db.execute("ALTER TABLE partitions ADD COLUMN later TEXT")
+        db.execute("UPDATE partitions SET later = 'kept'")
+    db.close()
+    # The earlier run created the collection in the target.
+    fakes.writer.stored[("Docs", None)] = {}
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json")
+    assert r.exit_code == 0, r.output
+    row = json.loads(r.stdout)["collections"][0]
+    assert (row["copied"], row["total"], row["done"]) == (250, 250, True)
+    assert len(fakes.writer.objects) == 150
+    r = invoke(fakes, "status", "--json")
+    assert r.exit_code == 0 and json.loads(r.stdout)["collections"][0]["done"]
+    db = sqlite3.connect(tmp_path / DIR / "state.sqlite")
+    assert db.execute("SELECT later FROM partitions").fetchall() == [("kept",)]
+    db.close()

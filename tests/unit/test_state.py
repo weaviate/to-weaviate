@@ -7,7 +7,7 @@ import pytest
 from fakes import old_state_file
 
 from to_weaviate.sources.base import Partition
-from to_weaviate.state import CollectionProgress, State, Target
+from to_weaviate.state import CollectionProgress, State, StateUnreadable, Target
 from to_weaviate.target.writer import Reject
 
 REF = "default/c1"
@@ -388,3 +388,11 @@ def test_overlap_proxy_detects_missing_lock(tmp_path):
     run_workload(state)
     state._db = real
     assert proxy.overlap
+
+
+def test_a_file_that_is_not_a_database_raises_state_unreadable(tmp_path):
+    path = tmp_path / "state.sqlite"
+    path.write_bytes(bytes(range(256)) * 16)
+    with pytest.raises(StateUnreadable) as info:
+        State(path)
+    assert info.value.path == path

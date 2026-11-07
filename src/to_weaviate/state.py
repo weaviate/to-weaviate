@@ -48,6 +48,14 @@ CREATE TABLE IF NOT EXISTS quantizer_updates (
 """
 
 
+class StateUnreadable(Exception):
+    """The file at `path` is not a state that sqlite can read."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(f"{path.name} in {path.parent} cannot be read.")
+        self.path = path
+
+
 @dataclass(frozen=True)
 class CollectionProgress:
     ref: str
@@ -75,7 +83,8 @@ class State:
 
     Collections and partitions are listed in insertion (rowid) order. A file
     written before the `targets` or the `quantizer_updates` table existed gets
-    the table when it is opened, with no row for any ref.
+    the table when it is opened, with no row for any ref. A file that sqlite
+    cannot read raises StateUnreadable when it is opened.
     """
 
     def __init__(self, path: Path) -> None:
@@ -83,8 +92,12 @@ class State:
         self._rejects_path = path.parent / "rejects.jsonl"
         self._lock = threading.Lock()
         self._db = sqlite3.connect(path, check_same_thread=False)
-        with self._lock, self._db:
-            self._db.executescript(_SCHEMA)
+        try:
+            with self._lock, self._db:
+                self._db.executescript(_SCHEMA)
+        except sqlite3.DatabaseError as exc:
+            self._db.close()
+            raise StateUnreadable(path) from exc
 
     def close(self) -> None:
         with self._lock:

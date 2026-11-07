@@ -107,7 +107,7 @@ from to_weaviate.sources.base import FieldStats, Source, SourceCollection
 from to_weaviate.sources.chroma.client import ChromaClient, ChromaError
 from to_weaviate.sources.chroma.mapping import stored_embedding, vectorizer_for
 from to_weaviate.sources.chroma.source import ChromaSource
-from to_weaviate.state import CollectionProgress, State, Target
+from to_weaviate.state import CollectionProgress, State, StateUnreadable, Target
 from to_weaviate.target.connect import connect
 from to_weaviate.target.reader import TargetReader, WeaviateReader
 from to_weaviate.target.schema import (
@@ -169,6 +169,7 @@ STATE_HINT = (
     "To resume, set WEAVIATE_URL and the target name back. To copy to the new "
     "target, use another --dir."
 )
+UNREADABLE_STATE_HINT = "Start again with another --dir, or restore the file."
 BATCH_HINT = "Fix the cause and run to-weaviate copy again. It resumes at this page."
 # A part of a text in single or double quotes; a quote after a backslash is
 # part of it, as in a Python repr.
@@ -232,6 +233,8 @@ def _as_cli_error(exc: Exception) -> CliError:
         )
     if isinstance(exc, InvalidSetting):
         return CliError("usage", str(exc), exc.hint)
+    if isinstance(exc, StateUnreadable):
+        return CliError("invalid_state", str(exc), UNREADABLE_STATE_HINT)
     if isinstance(exc, ChromaError):
         if exc.status in (401, 403):
             return _refused("Chroma", "CHROMA_API_KEY", exc.status == 403)
