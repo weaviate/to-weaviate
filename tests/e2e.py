@@ -179,3 +179,15 @@ def weaviate_config(name: str) -> CollectionConfig:
 def delete_target_collection(name: str) -> None:
     """Delete the target collection `name` and no other. A missing one is no error."""
     _weaviate().collections.delete(name)
+
+
+def delete_target_collections(names: list[str]) -> None:
+    """Delete each of the target collections `names` that exists, and no other.
+
+    The server takes about 0.2 seconds to delete a collection that does not
+    exist, so the existing ones are listed first.
+    """
+    existing = set(_weaviate().collections.list_all(simple=True))
+    for name in names:
+        if name in existing:
+            _weaviate().collections.delete(name)

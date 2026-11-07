@@ -18,7 +18,7 @@ from chroma.seed import seed
 from e2e import (
     Result,
     close_weaviate,
-    delete_target_collection,
+    delete_target_collections,
     weaviate_by_source_id,
     weaviate_compressed,
     weaviate_config,
@@ -145,8 +145,6 @@ def seeded(_test_endpoints: None) -> None:
 
 @pytest.fixture(autouse=True)
 def _delete_suite_collections(_test_endpoints: None) -> Iterator[None]:
-    for name in SUITE_COLLECTIONS:
-        delete_target_collection(name)
+    delete_target_collections(SUITE_COLLECTIONS)
     yield
-    for name in SUITE_COLLECTIONS:
-        delete_target_collection(name)
+    delete_target_collections(SUITE_COLLECTIONS)

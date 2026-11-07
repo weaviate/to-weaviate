@@ -19,6 +19,9 @@ import httpx
 
 DATABASE_PATH = "/api/v2/tenants/default_tenant/databases/default_database"
 ADD_BATCH = 300
+# The records of one add when a collection is made. Chroma 1.5.9 accepts at
+# most 5461 (max_batch_size of /api/v2/pre-flight-checks).
+LARGE_ADD_BATCH = 5000
 TEST_URL = "http://localhost:8001"
 # Every collection that `seed` makes, in the order it makes them.
 COLLECTIONS = (
@@ -164,12 +167,17 @@ def _recreate(
         body["configuration"] = {"hnsw": {"space": space}}
     created = http.post("/collections", json=body)
     created.raise_for_status()
-    _add(http, created.json()["id"], records)
+    _add(http, created.json()["id"], records, LARGE_ADD_BATCH)
 
 
-def _add(http: httpx.Client, collection_id: str, records: list[Record]) -> None:
-    for start in range(0, len(records), ADD_BATCH):
-        batch = records[start : start + ADD_BATCH]
+def _add(
+    http: httpx.Client,
+    collection_id: str,
+    records: list[Record],
+    batch_size: int = ADD_BATCH,
+) -> None:
+    for start in range(0, len(records), batch_size):
+        batch = records[start : start + batch_size]
         added = http.post(
             f"/collections/{collection_id}/add",
             json={
