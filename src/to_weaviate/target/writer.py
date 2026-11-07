@@ -48,6 +48,14 @@ class TargetObject:
     vectors: dict[str, list[float]]  # kept vectors only, keyed by vector name
 
 
+def unmapped_key_text(key: str) -> str:
+    """Why metadata key `key`, which the plan neither maps nor drops, is refused."""
+    return (
+        f"metadata key {key} is not in plan.yaml; add a property for it or list "
+        "it under dropped"
+    )
+
+
 def _source_value(record: Record, key: str) -> Any:
     if key == "#document":
         return record.document
@@ -64,7 +72,7 @@ def to_object(record: Record, entry: CollectionPlan) -> TargetObject | Reject:
     known.update(d.source_key for d in target.dropped)
     for key in record.metadata:
         if key not in known:
-            return Reject(record.id, f"unknown metadata key {key}; run inspect again")
+            return Reject(record.id, unmapped_key_text(key))
     properties: dict[str, Any] = {}
     for prop in target.properties:
         value = _source_value(record, prop.source_key)

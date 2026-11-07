@@ -18,6 +18,7 @@ from to_weaviate.target.schema import (
     collection_kwargs,
     module_names,
 )
+from to_weaviate.target.writer import unmapped_key_text
 
 # Vectorizer module to the Weaviate header that carries its provider key and
 # the environment variable that `weaviate_settings` reads it from.
@@ -313,6 +314,23 @@ def _keep_model_findings(
     return out
 
 
+def _unmapped_findings(
+    entry: CollectionPlan, inspected: Mapping[str, SourceCollection] | None
+) -> list[Finding]:
+    """Inspected metadata keys that the entry neither maps nor drops."""
+    collection = inspected.get(entry.source.ref) if inspected else None
+    if collection is None:
+        return []
+    known = {p.source_key for p in entry.target.properties}
+    known.update(d.source_key for d in entry.target.dropped)
+    keys = [f.key for f in collection.fields] + collection.sparse_keys
+    return [
+        Finding("unmapped_key", entry.target.name, unmapped_key_text(key))
+        for key in keys
+        if key not in known
+    ]
+
+
 def _value_findings(entry: CollectionPlan) -> list[Finding]:
     """Property types and distances that the schema mapping does not have."""
     name = entry.target.name
@@ -378,6 +396,7 @@ def plan_findings(
     )
     for entry in plan.collections:
         errors.extend(_keep_model_findings(entry, vectorizer_for))
+        errors.extend(_unmapped_findings(entry, inspected))
         for prop in entry.target.properties:
             if prop.coerced_from:
                 warnings.append(

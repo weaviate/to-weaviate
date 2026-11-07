@@ -20,7 +20,7 @@ from typer.testing import Result
 
 from to_weaviate.ids import to_uuid
 from to_weaviate.lock import Locked, exclusive_lock
-from to_weaviate.plan import load_plan, save_plan
+from to_weaviate.plan import DroppedKey, load_plan, save_plan
 from to_weaviate.sources.base import Page, Partition, Record, SourceCollection
 from to_weaviate.sources.chroma.client import ChromaError
 from to_weaviate.sources.chroma.source import ChromaSource
@@ -1407,3 +1407,39 @@ def test_copy_of_another_entry_refuses_a_plan_without_an_id_property(tmp_path):
         {"code": "missing_id_property", "collection": "Docs", "message": message}
     ]
     assert fakes.writer.calls == 0 and fakes.source.read_calls == 0
+
+
+UNMAPPED_YEAR = (
+    "metadata key year is not in plan.yaml; add a property for it or list it "
+    "under dropped"
+)
+
+
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_a_key_that_the_plan_neither_maps_nor_drops_is_an_invalid_plan(tmp_path, cmd):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    properties = [p for p in target.properties if p.name != "year"]
+    edit_target(tmp_path / DIR, properties=properties)
+    r = invoke(fakes, cmd, "--json")
+    assert plan_errors(r) == [
+        {"code": "unmapped_key", "collection": "Docs", "message": UNMAPPED_YEAR}
+    ]
+    assert fakes.writer.calls == 0 and fakes.source.read_calls == 0
+
+
+def test_copy_resumes_after_an_unmapped_key_is_listed_under_dropped(tmp_path):
+    source = FakeSource(cli_records(10), page_size=2)
+    fakes = inspected(FakeFactories(source, writer=FakeWriter(fail_on_call=3)))
+    assert invoke(fakes, "copy", "--parallelism", "1").exit_code == 5
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    properties = [p for p in target.properties if p.name != "year"]
+    edit_target(tmp_path / DIR, properties=properties)
+    assert plan_errors(invoke(fakes, "copy", "--json"))[0]["code"] == "unmapped_key"
+    dropped = [*target.dropped, DroppedKey(source_key="year", reason="not needed")]
+    edit_target(tmp_path / DIR, properties=properties, dropped=dropped)
+    assert invoke(fakes, "check").exit_code == 0
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["collections"][0]["copied"] == 10
+    assert len(fakes.writer.objects) == 10

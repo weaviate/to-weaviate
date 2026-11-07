@@ -11,6 +11,7 @@ from to_weaviate.engine.check import (
     plan_findings,
     provider_keys,
 )
+from to_weaviate.sources.base import FieldStats, SourceCollection
 from to_weaviate.sources.chroma.mapping import vectorizer_for
 
 
@@ -280,3 +281,40 @@ def test_load_findings_refuse_a_repeated_vector_name():
 def test_load_findings_need_one_id_property_named_source_id(properties, expected):
     plan = plan_of(with_target(entry([keep()]), properties=properties))
     assert [(f.code, f.message) for f in load_findings(plan)] == expected
+
+
+def inspected_as(fields: list[str], sparse: list[str]) -> dict[str, SourceCollection]:
+    return {
+        "r": SourceCollection(
+            ref="r",
+            namespace="ns",
+            name="docs",
+            count=1,
+            dimension=2,
+            distance="cosine",
+            embedding=None,
+            fields=[FieldStats(key, {"text": 1}) for key in fields],
+            sparse_keys=sparse,
+            document_bytes_estimate=1,
+        )
+    }
+
+
+def test_unmapped_key_names_each_inspected_key_that_is_not_mapped_or_dropped():
+    e = with_target(
+        entry([keep()]),
+        properties=[ID_PROPERTY, prop("title")],
+        dropped=[p.DroppedKey(source_key="skipped", reason="r")],
+    )
+    found = inspected_as(["title", "year", "skipped"], ["sparse"])
+    errors, _ = plan_findings(plan_of(e), found, voyage_mapper)
+    assert [(f.code, f.collection, f.message) for f in errors] == [
+        (
+            "unmapped_key",
+            "Docs",
+            f"metadata key {key} is not in plan.yaml; add a property for it or "
+            "list it under dropped",
+        )
+        for key in ("year", "sparse")
+    ]
+    assert plan_findings(plan_of(e), None, voyage_mapper)[0] == []
