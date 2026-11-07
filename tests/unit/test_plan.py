@@ -1,4 +1,5 @@
 import io
+import re
 
 import pytest
 import yaml
@@ -350,6 +351,25 @@ def test_load_refuses_a_key_that_appears_twice_in_one_mapping(tmp_path):
         load_plan(tmp_path / "p.yaml")
     assert e.value.problem == f"found duplicate key 'type', first at line {at + 1}"
     assert e.value.problem_mark.line == at + 1
+
+
+def test_load_accepts_a_key_that_a_merge_key_brings_in_again(tmp_path):
+    plan = draft_plan(SRC, [make()], "keep")
+    save_plan(plan, tmp_path / "p.yaml")
+    text = (tmp_path / "p.yaml").read_text()
+    uri = re.search(r"( *)- source_key: '#uri'\n(?:\1  .*\n)+", text)
+    assert uri is not None
+    indent = uri.group(1)
+    merged = (
+        f"{indent}- <<: *field\n{indent}  source_key: '#uri'\n{indent}  name: uri\n"
+    )
+    text = text.replace(uri.group(0), merged)
+    text = text.replace(
+        "- source_key: '#id'\n", f"- &field\n{indent}  source_key: '#id'\n"
+    )
+    (tmp_path / "p.yaml").write_text(text)
+    assert "<<: *field" in text and "&field" in text
+    assert load_plan(tmp_path / "p.yaml") == plan
 
 
 def test_models_are_exported():
