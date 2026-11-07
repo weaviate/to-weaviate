@@ -193,6 +193,23 @@ def seeded(_test_endpoints: None) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_secret_in_a_file(tmp_path: Path) -> Iterator[None]:
+    """After the test, no file under its directory holds a secret value.
+
+    The secrets are the values of the secret variables of every command the
+    test ran. state.sqlite is read as bytes like the other files.
+    """
+    e2e.take_secrets()
+    yield
+    secrets = [s.encode("utf-8") for s in e2e.take_secrets()]
+    for path in sorted(p for p in tmp_path.rglob("*") if p.is_file()):
+        data = path.read_bytes()
+        assert not any(
+            s in data for s in secrets
+        ), f"{path.relative_to(tmp_path)} holds a secret value"
+
+
+@pytest.fixture(autouse=True)
 def _delete_suite_collections(_test_endpoints: None) -> Iterator[None]:
     delete_target_collections(SUITE_COLLECTIONS)
     yield

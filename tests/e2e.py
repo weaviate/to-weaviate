@@ -20,13 +20,56 @@ from weaviate.collections import Collection
 from weaviate.collections.classes.config import CollectionConfig
 from weaviate.collections.classes.internal import Object
 
+from to_weaviate.output import ERROR_EXIT, secret_values
 from to_weaviate.settings import weaviate_settings
 from to_weaviate.target.connect import connect
 
 COMMAND = Path(sysconfig.get_path("scripts")) / "to-weaviate"
 COMMAND_TIMEOUT = 600
+MAX_MESSAGE_CHARS = 500
+ERROR_KEYS = {"status", "code", "message", "hint"}
 
 _client: weaviate.WeaviateClient | None = None
+# The secret values of the environments that `run` and `start` gave a command.
+_secrets: set[str] = set()
+
+
+def take_secrets() -> set[str]:
+    """The secret values given to commands since the last call, then forget them."""
+    found = set(_secrets)
+    _secrets.clear()
+    return found
+
+
+def _environment(env: dict[str, str] | None) -> dict[str, str]:
+    merged = {**os.environ, **(env or {})}
+    _secrets.update(secret_values(merged))
+    return merged
+
+
+def _contract_problems(exit_code: int, data: dict[str, Any], stderr: str) -> list[str]:
+    """How the JSON document, the exit code and stderr break the CLI contract."""
+    problems = []
+    if data.get("status") == "error":
+        missing = ERROR_KEYS - set(data)
+        if missing:
+            problems.append(f"the error document has no {', '.join(sorted(missing))}")
+        code = data.get("code")
+        if code not in ERROR_EXIT:
+            problems.append(f"the error code {code!r} is not a known code")
+        elif exit_code != ERROR_EXIT[code]:
+            problems.append(f"exit code {exit_code} for the error code {code}")
+        message = str(data.get("message"))
+        if "\n" in message or len(message) > MAX_MESSAGE_CHARS:
+            problems.append("the message is not one line of at most 500 characters")
+    elif data.get("status") == "success":
+        if exit_code != 0:
+            problems.append(f"exit code {exit_code} for a success document")
+    else:
+        problems.append("the document has no status success or error")
+    if '"status"' in stderr:
+        problems.append("stderr holds a JSON document")
+    return problems
 
 
 @dataclass(frozen=True)
@@ -40,17 +83,24 @@ def run(args: list[str], workdir: Path, env: dict[str, str] | None = None) -> Re
     """Run the installed to-weaviate with `args`, --json and --dir `workdir`.
 
     The working directory is `workdir`, so no `.env` of the repository is read.
-    The environment is os.environ with `env` on top.
+    The environment is os.environ with `env` on top. The run fails the test
+    when stdout or stderr holds the value of a secret variable, or when the
+    document, the exit code and stderr break the CLI contract.
     """
+    merged = _environment(env)
     completed = subprocess.run(
         [str(COMMAND), *args, "--json", "--dir", str(workdir)],
         cwd=workdir,
-        env={**os.environ, **(env or {})},
+        env=merged,
         capture_output=True,
         text=True,
         timeout=COMMAND_TIMEOUT,
         check=False,
     )
+    output = completed.stdout + completed.stderr
+    if any(secret in output for secret in secret_values(merged)):
+        # The value is not printed here either.
+        pytest.fail(f"to-weaviate {' '.join(args)} printed a secret value")
     try:
         data = json.loads(completed.stdout)
     except ValueError:
@@ -60,6 +110,12 @@ def run(args: list[str], workdir: Path, env: dict[str, str] | None = None) -> Re
             f"to-weaviate {' '.join(args)} exited {completed.returncode} without "
             f"one JSON document on stdout.\nstdout:\n{completed.stdout}\n"
             f"stderr:\n{completed.stderr}"
+        )
+    problems = _contract_problems(completed.returncode, data, completed.stderr)
+    if problems:
+        pytest.fail(
+            f"to-weaviate {' '.join(args)}: {'; '.join(problems)}.\n"
+            f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
         )
     return Result(completed.returncode, data, completed.stderr)
 
@@ -75,7 +131,7 @@ def start(
         return subprocess.Popen(
             [str(COMMAND), *args, "--json", "--dir", str(workdir)],
             cwd=workdir,
-            env={**os.environ, **(env or {})},
+            env=_environment(env),
             stdout=handle,
             stderr=subprocess.DEVNULL,
         )
