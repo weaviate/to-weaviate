@@ -297,14 +297,23 @@ class FakeInsertClient:
     """The part of a WeaviateClient that WeaviateWriter uses. Thread-safe.
 
     Call `n` (1-based) of `insert_many` raises `fail(n)` when that returns an
-    error. Otherwise it stores the objects and reports no errors. `stored` has
-    the shape of `FakeWriter.stored`, so a FakeReader can read it.
+    error. `refuse(objects)` is called next and may raise. An object for
+    which `reject(object)` returns a message is not stored and is reported
+    with it, as the server reports a refused object; when every object of a
+    call is refused, the call raises what the client raises. The other
+    objects are stored. `stored` has the shape of `FakeWriter.stored`, so a
+    FakeReader can read it.
     """
 
     def __init__(
-        self, fail: Callable[[int], Exception | None] = lambda n: None
+        self,
+        fail: Callable[[int], Exception | None] = lambda n: None,
+        reject: Callable[[Any], str | None] = lambda obj: None,
+        refuse: Callable[[list[Any]], None] = lambda objects: None,
     ) -> None:
         self.fail = fail
+        self.reject = reject
+        self.refuse = refuse
         self.calls = 0
         self.stored: dict[tuple[str, str | None], dict[str, TargetObject]] = {}
         self.writes_per_uuid: Counter[str] = Counter()
@@ -322,12 +331,19 @@ class FakeInsertClient:
             error = self.fail(self.calls)
             if error is not None:
                 raise error
-            for obj in objects:
+            self.refuse(objects)
+            refused = {i: m for i, o in enumerate(objects) if (m := self.reject(o))}
+            if objects and len(refused) == len(objects):
+                raise all_failed("\n".join(set(refused.values())))
+            for index, obj in enumerate(objects):
+                if index in refused:
+                    continue
                 uuid = str(obj.uuid)
                 vectors = dict(obj.vector or {})
                 stored[uuid] = TargetObject(uuid, dict(obj.properties), vectors)
                 self.writes_per_uuid[uuid] += 1
-        return SimpleNamespace(errors={})
+        errors = {i: SimpleNamespace(message=m) for i, m in refused.items()}
+        return SimpleNamespace(errors=errors)
 
 
 class _InsertCollection:

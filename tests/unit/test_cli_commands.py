@@ -1,9 +1,11 @@
 import json
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 import yaml
 from fakes import (
@@ -16,8 +18,10 @@ from fakes import (
     cli_records,
     invoke,
     old_state_file,
+    raise_grpc_failure,
 )
 from typer.testing import Result
+from weaviate.exceptions import InsufficientPermissionsError, WeaviateBatchError
 
 from to_weaviate.ids import to_uuid
 from to_weaviate.lock import Locked, exclusive_lock
@@ -1997,3 +2001,151 @@ def test_a_yaml_error_does_not_print_an_alias_or_tag_name(
     password = "B6-MADE-UP-PW"
     for part in (password[i : i + 4] for i in range(len(password) - 3)):
         assert part not in r.stdout and part not in r.stderr
+
+
+FORBIDDEN = "Weaviate refused the request: the API key lacks a permission."
+
+
+def test_copy_creates_nothing_when_the_key_may_not_create_the_collection():
+    forbidden = InsufficientPermissionsError(httpx.Response(403))
+    source = FakeSource(cli_records(10))
+    fakes = inspected(FakeFactories(source, schema=FakeSchema(ensure_error=forbidden)))
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 3, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"]) == ("auth_failed", FORBIDDEN)
+    assert "WEAVIATE_API_KEY" in d["hint"]
+    assert fakes.writer.calls == 0
+    row = json.loads(invoke(fakes, "status", "--json").stdout)["collections"][0]
+    assert row["copied"] == 0 and "stored_target" not in row
+
+
+def test_a_403_on_insert_is_not_retried_and_copy_resumes_at_its_page():
+    def fail(n: int) -> Exception | None:
+        return InsufficientPermissionsError(httpx.Response(403)) if n == 2 else None
+
+    fakes, client = refusing(250, fail)
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json")
+    assert r.exit_code == 3, r.output
+    assert json.loads(r.stdout)["message"] == FORBIDDEN
+    assert (client.calls, len(client.writes_per_uuid)) == (2, 100)
+    client.fail = lambda n: None
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json")
+    assert r.exit_code == 0, r.output
+    assert len(client.writes_per_uuid) == 250
+    assert set(client.writes_per_uuid.values()) == {1}
+
+
+LENGTH_MESSAGE = "new node has a vector with length 1. Existing nodes have length 2"
+
+
+def test_an_object_that_weaviate_refuses_is_a_reject_with_its_message(tmp_path):
+    records = cli_records(21)
+    records[7] = replace(records[7], vector=[7.0])
+
+    def reject(obj: Any) -> str | None:
+        return LENGTH_MESSAGE if len(obj.vector["default"]) != 2 else None
+
+    client = FakeInsertClient(reject=reject)
+    writer = WeaviateWriter(client, sleep=lambda s: None)  # type: ignore[arg-type]
+    fakes = inspected(FakeFactories(FakeSource(records), writer=writer, store=client))
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 1 and json.loads(r.stdout)["code"] == "rejects", r.output
+    lines = (tmp_path / DIR / "rejects.jsonl").read_text().splitlines()
+    found = [json.loads(line) for line in lines]
+    assert [(f["source_id"], f["reason"]) for f in found] == [("id-7", LENGTH_MESSAGE)]
+    assert len(client.writes_per_uuid) == 20
+    assert to_uuid("id-7") not in client.writes_per_uuid
+    r = invoke(fakes, "verify", "--json")
+    assert r.exit_code == 1, r.output
+    checks = {c["name"]: c for c in json.loads(r.stdout)["checks"]}
+    assert not checks["count"]["passed"]
+    assert checks["ids"]["detail"] == 'missing 1, extra 0; missing ids ["id-7"]'
+
+
+MIB = 1024 * 1024
+
+
+def test_an_object_above_the_message_limit_is_a_reject(tmp_path):
+    records = cli_records(6)
+    records[2] = replace(records[2], document="x" * (5 * MIB))
+
+    def refuse(objects: list[Any]) -> None:
+        if any(len(o.properties.get("document") or "") > MIB for o in objects):
+            raise_grpc_failure("RESOURCE_EXHAUSTED", WeaviateBatchError, batch=True)
+
+    client = FakeInsertClient(refuse=refuse)
+    writer = WeaviateWriter(client, sleep=lambda s: None)  # type: ignore[arg-type]
+    fakes = inspected(FakeFactories(FakeSource(records), writer=writer, store=client))
+    for _ in range(2):
+        r = invoke(fakes, "copy", "--json")
+        assert r.exit_code == 1, r.output
+        row = json.loads(r.stdout)["collections"][0]
+        assert (row["copied"], row["rejects"]) == (5, 1)
+    reject = json.loads((tmp_path / DIR / "rejects.jsonl").read_text())
+    assert (reject["source_id"], reject["reason"]) == (
+        "id-2",
+        "fake gRPC failure RESOURCE_EXHAUSTED",
+    )
+    assert to_uuid("id-2") not in client.writes_per_uuid
+    assert len(client.writes_per_uuid) == 5
+
+
+def test_two_source_ids_with_one_uuid_fail_verify(monkeypatch):
+    def colliding(source_id: str) -> str:
+        return to_uuid("a" if source_id == "b" else source_id)
+
+    monkeypatch.setattr("to_weaviate.target.writer.to_uuid", colliding)
+    monkeypatch.setattr("to_weaviate.engine.verify.to_uuid", colliding)
+    records = [
+        Record(i, [1.0, float(n)], f"doc {i}", None, {}) for n, i in enumerate("abc")
+    ]
+    fakes = inspected(FakeFactories(FakeSource(records)))
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["collections"][0]["copied"] == 3
+    assert len(fakes.writer.objects) == 2
+    r = invoke(fakes, "verify", "--json")
+    assert r.exit_code == 1, r.output
+    checks = {c["name"]: c for c in json.loads(r.stdout)["checks"]}
+    assert checks["count"]["detail"].startswith("source count 3, target count 2;")
+    # The id check compares uuids, so it does not see the collision.
+    assert (checks["ids"]["passed"], checks["ids"]["detail"]) == (
+        True,
+        "missing 0, extra 0",
+    )
+    assert not checks["records"]["passed"]
+    assert '"a": ' in checks["records"]["detail"]
+    assert "property source_id differs" in checks["records"]["detail"]
+
+
+class DeletingSource(FakeSource):
+    """Deletes record `id-150` once the page that holds it is read."""
+
+    def read(
+        self,
+        collection: SourceCollection,
+        partition: Partition,
+        cursor: str | None,
+        with_vectors: bool,
+    ) -> Page:
+        page = super().read(collection, partition, cursor, with_vectors)
+        if any(r.id == "id-150" for r in page.records):
+            self.records = [r for r in self.records if r.id != "id-150"]
+        return page
+
+
+def test_a_record_deleted_during_the_copy_shifts_another_one_past_the_cursor():
+    # The documented limit of copying by offset (finding F4): the record after
+    # the gap moves into the page that was read already.
+    fakes = inspected(FakeFactories(DeletingSource(cli_records(400))))
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json")
+    assert r.exit_code == 0, r.output
+    assert to_uuid("id-200") not in fakes.writer.objects
+    assert len(fakes.writer.objects) == 399
+    r = invoke(fakes, "verify", "--json")
+    assert r.exit_code == 1, r.output
+    checks = {c["name"]: c for c in json.loads(r.stdout)["checks"]}
+    assert checks["ids"]["detail"] == (
+        'missing 1, extra 1; missing ids ["id-200"]; extra ids ["id-150"]'
+    )
