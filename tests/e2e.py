@@ -137,6 +137,17 @@ def weaviate_object(name: str) -> Object[Any, Any]:
     return objects[0]
 
 
+def weaviate_exists(name: str) -> bool:
+    """Whether the target collection `name` exists."""
+    return _weaviate().collections.exists(name)
+
+
+def weaviate_compressed(name: str) -> list[bool]:
+    """Whether each shard of the target collection `name` holds compressed vectors."""
+    nodes = _weaviate().cluster.nodes(collection=name, output="verbose")
+    return [shard.compressed for node in nodes for shard in node.shards or []]
+
+
 def weaviate_config(name: str) -> CollectionConfig:
     """The configuration of the target collection `name`, read from the server."""
     return _weaviate().collections.use(name).config.get()
