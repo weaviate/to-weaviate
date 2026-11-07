@@ -15,10 +15,12 @@ from to_weaviate import plan as p
 from to_weaviate.sources.base import Record
 from to_weaviate.target.writer import (
     BatchRefused,
+    ProviderRefused,
     Reject,
     TargetObject,
     WeaviateWriter,
     chunks,
+    provider_refusal,
     to_object,
 )
 
@@ -326,6 +328,77 @@ def test_a_single_object_that_a_node_outage_refuses_is_a_refused_batch():
         "Weaviate refused every object of a batch of 1 in My_docs: " + OUTAGE_ERRORS[0]
     )
     assert len(data.calls) == 6
+
+
+PROVIDER_401 = (
+    "connection to: OpenAI API failed with status: 401 request-id: req-1 error: "
+    "Incorrect API key provided: sk-made-***************3456. You can find your "
+    "API key at https://platform.openai.com/account/api-keys."
+)
+
+
+@pytest.mark.parametrize(
+    ("message", "provider", "status"),
+    [
+        (PROVIDER_401, "OpenAI API", 401),
+        (
+            "connection to Cohere API failed with status 403: forbidden",
+            "Cohere API",
+            403,
+        ),
+        ("connection to Google failed with status: 401 error: key", "Google", 401),
+        (
+            "connection to Contextual AI API request failed with status: 401",
+            "Contextual AI API",
+            401,
+        ),
+        (
+            "connection to: https://api-inference.huggingface.co/models/m failed "
+            "with status: 401 error: Authorization header is correct, but the "
+            "token seems invalid",
+            "api-inference.huggingface.co",
+            401,
+        ),
+    ],
+)
+def test_a_provider_refusal_names_the_provider_and_the_status(
+    message, provider, status
+):
+    refused = provider_refusal(message)
+    assert refused is not None
+    assert (refused.provider, refused.status) == (provider, status)
+    assert "sk-made" not in str(refused) and "3456" not in str(refused)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "connection to: OpenAI API failed with status: 400 error: too long",
+        "connection to: OpenAI API failed with status: 429",
+        "invalid integer property 'year'",
+        "unauthorized: invalid api key",
+    ],
+)
+def test_other_errors_are_not_a_provider_refusal(message):
+    assert provider_refusal(message) is None
+
+
+def test_a_provider_that_refuses_the_key_stops_the_batch_without_a_retry():
+    data = FakeData([all_failed(PROVIDER_401)] * 10)
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    with pytest.raises(ProviderRefused) as info:
+        writer.write(ENTRY_EMBED, objects(3))
+    assert (info.value.provider, info.value.status) == ("OpenAI API", 401)
+    assert "sk-made" not in str(info.value)
+    assert len(data.calls) == 1
+
+
+def test_a_provider_that_refuses_the_key_of_a_single_object_stops_the_batch():
+    data = FakeData([all_failed(PROVIDER_401)] * 10)
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    with pytest.raises(ProviderRefused):
+        writer.write(ENTRY_EMBED, objects(1))
+    assert len(data.calls) == 1
 
 
 def test_all_failed_batch_is_retried_and_then_raises():

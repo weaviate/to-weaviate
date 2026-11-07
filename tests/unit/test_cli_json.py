@@ -14,12 +14,14 @@ from fakes import (
     cli_env,
     cli_records,
     invoke,
+    raise_grpc_failure,
 )
 from typer.testing import CliRunner
 from weaviate.exceptions import (
     AuthenticationFailedError,
     InsufficientPermissionsError,
     UnexpectedStatusCodeError,
+    WeaviateBatchError,
     WeaviateConnectionError,
     WeaviateGRPCUnavailableError,
     WeaviateRetryError,
@@ -706,6 +708,16 @@ def test_click_errors_and_version_keep_their_behavior():
     assert r.exit_code == 0 and r.stdout.startswith("to-weaviate ")
 
 
+def batch_error(status: str, message: str | None = None) -> WeaviateBatchError:
+    """What a gRPC batch call raises when it fails with `status`."""
+    try:
+        raise_grpc_failure(
+            status, lambda m: WeaviateBatchError(message or m), batch=True
+        )
+    except WeaviateBatchError as exc:
+        return exc
+
+
 def test_auth_error_does_not_repeat_the_server_text():
     body = {"code": 401, "message": "invalid api key SENTINEL-B"}
     fakes = FakeFactories(FakeSource(cli_records(10)))
@@ -715,6 +727,20 @@ def test_auth_error_does_not_repeat_the_server_text():
     )
     r = invoke(fakes, "check", WEAVIATE_API_KEY="SENTINEL-B")
     assert r.exit_code == 3 and "SENTINEL" not in r.output
+
+
+def test_auth_error_of_a_batch_does_not_repeat_the_server_text():
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    fakes.target_error = batch_error(
+        "UNAUTHENTICATED", "extract auth: unauthorized: invalid api key SENTINEL-B"
+    )
+    r = invoke(fakes, "copy", "--json", WEAVIATE_API_KEY="SENTINEL-B")
+    assert r.exit_code == 3 and "SENTINEL" not in r.output
+    d = json.loads(r.stdout)
+    assert d["message"] == (
+        "Weaviate refused the request: the API key is missing or wrong."
+    )
 
 
 @pytest.mark.parametrize(
@@ -789,6 +815,9 @@ def test_chroma_answer_that_is_not_json_is_source_unreachable(
             "WEAVIATE_API_KEY",
         ),
         (AuthenticationFailedError("no"), "auth_failed", "WEAVIATE_API_KEY"),
+        (batch_error("UNAUTHENTICATED"), "auth_failed", "WEAVIATE_API_KEY"),
+        (batch_error("PERMISSION_DENIED"), "auth_failed", "WEAVIATE_API_KEY"),
+        (batch_error("INTERNAL"), "target_unreachable", "WEAVIATE_URL"),
         (WeaviateStartUpError("down"), "target_unreachable", "WEAVIATE_URL"),
         (WeaviateConnectionError("down"), "target_unreachable", "WEAVIATE_URL"),
         (WeaviateTimeoutError("slow"), "target_unreachable", "WEAVIATE_URL"),

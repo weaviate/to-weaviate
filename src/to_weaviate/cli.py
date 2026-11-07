@@ -99,6 +99,7 @@ from to_weaviate.settings import (
     MissingCredential,
     WeaviateSettings,
     chroma_settings,
+    key_variables,
     load_env,
     weaviate_settings,
     without_userinfo,
@@ -122,8 +123,14 @@ from to_weaviate.target.schema import (
     Schema,
     SchemaRejected,
     WeaviateSchema,
+    nearest_grpc_status,
 )
-from to_weaviate.target.writer import BatchRefused, WeaviateWriter, Writer
+from to_weaviate.target.writer import (
+    BatchRefused,
+    ProviderRefused,
+    WeaviateWriter,
+    Writer,
+)
 
 SourceFactory = Callable[[ChromaSettings], Source]
 WriterFactory = Callable[[WeaviateSettings, str | None], Writer]
@@ -275,6 +282,13 @@ def _as_cli_error(exc: Exception) -> CliError:
         return _refused("Weaviate", "WEAVIATE_API_KEY", True)
     if isinstance(exc, UnexpectedStatusCodeError) and exc.status_code in (401, 403):
         return _refused("Weaviate", "WEAVIATE_API_KEY", exc.status_code == 403)
+    status = nearest_grpc_status(exc) if isinstance(exc, WeaviateBaseError) else None
+    if status in ("UNAUTHENTICATED", "PERMISSION_DENIED"):
+        return _refused("Weaviate", "WEAVIATE_API_KEY", status == "PERMISSION_DENIED")
+    if isinstance(exc, ProviderRefused):
+        variables = key_variables(exc.provider)
+        key = " or ".join(variables) if variables else f"the key of {exc.provider}"
+        return _refused(exc.provider, key, exc.status == 403)
     if isinstance(
         exc,
         WeaviateConnectionError
