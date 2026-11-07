@@ -158,6 +158,30 @@ def test_kwargs_vectorizer_options():
     assert vec(k).vectorizer.vectorizeClassName is False
 
 
+# (options as plan.yaml holds them, as the client gets them). A text option
+# is sent as the type that the factory declares for it.
+SENT_OPTIONS = [
+    ({"model": "007", "dimensions": "0256"}, {"model": "007", "dimensions": 256}),
+    ({"dimensions": 256}, {"dimensions": 256}),
+    ({"type_": "text"}, {"type_": "text"}),
+]
+
+
+@pytest.mark.parametrize(("planned", "sent"), SENT_OPTIONS)
+def test_kwargs_send_a_text_option_as_the_declared_type(planned, sent):
+    v = p.VectorizerPlan(module="text2vec-openai", options=planned)
+    config = vec(collection_kwargs([entry(mode="embed", vectorizer=v)])).vectorizer
+    assert {k: getattr(config, k) for k in sent} == sent
+
+
+def test_kwargs_send_a_text_boolean_option_as_a_boolean():
+    v = p.VectorizerPlan(
+        module="text2vec-huggingface", options={"wait_for_model": "true"}
+    )
+    config = vec(collection_kwargs([entry(mode="embed", vectorizer=v)])).vectorizer
+    assert config.waitForModel is True
+
+
 def test_kwargs_unknown_vectorizer_module():
     v = p.VectorizerPlan(module="text2vec-nope")
     with pytest.raises(PlanMismatch, match="text2vec-nope is not supported"):

@@ -1,8 +1,9 @@
 import inspect
 import re
 import time
+import typing
 from collections.abc import Callable
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, Union
 
 import weaviate
 from pydantic import ValidationError
@@ -252,6 +253,43 @@ def cleaned_options(vectorizer: VectorizerPlan) -> list[str]:
     ]
 
 
+_SCALAR_TYPES = (bool, int, float)
+
+
+def _declared_scalar(hint: Any) -> type | None:
+    """bool, int or float when `hint` is that type, optional or not; else None."""
+    types = [hint]
+    if typing.get_origin(hint) is Union:
+        types = [t for t in typing.get_args(hint) if t is not type(None)]
+    if len(types) == 1 and types[0] in _SCALAR_TYPES:
+        return types[0]  # type: ignore[no-any-return]
+    return None
+
+
+def _scalar(text: str, kind: type) -> Any:
+    """`text` as `kind`, or `text` when it does not read as one."""
+    if kind is bool:
+        return {"true": True, "false": False}.get(text.lower(), text)
+    try:
+        return kind(text)
+    except ValueError:
+        return text
+
+
+def _declared_options(factory: Any, options: dict[str, Any]) -> dict[str, Any]:
+    """`options` with each text value as the bool, int or float the factory declares.
+
+    plan.yaml holds a --vectorizer-option value as typed, and the client
+    refuses a text where it declares a number or a boolean.
+    """
+    hints = typing.get_type_hints(factory)
+    out: dict[str, Any] = {}
+    for key, value in options.items():
+        kind = _declared_scalar(hints.get(key))
+        out[key] = _scalar(value, kind) if isinstance(value, str) and kind else value
+    return out
+
+
 def _vector(plan: VectorPlan, collection: str) -> Any:
     kwargs: dict[str, Any] = {"name": plan.name}
     index = plan.index
@@ -285,6 +323,7 @@ def _vector(plan: VectorPlan, collection: str) -> Any:
     for key in options:
         if key in _RESERVED_OPTIONS or key not in accepted:
             raise PlanMismatch(f"vectorizer option {key} is not accepted by {module}")
+    options = _declared_options(factory, options)
     try:
         return factory(
             **kwargs,

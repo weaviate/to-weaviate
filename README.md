@@ -55,7 +55,8 @@ vector settings. Review it before you run `check`.
 - `--vectors keep|embed|both`: keep the Chroma vectors (default), let a
   Weaviate vectorizer embed the documents, or both.
 - `--vectorizer MODULE`, `--vectorizer-option KEY=VALUE`: the Weaviate
-  vectorizer module and its options.
+  vectorizer module and its options. `plan.yaml` holds each value as text;
+  `copy` sends it as a number or a boolean where the module takes one.
 - `--index`, `--quantizer`, `--quantizer-bits`: the vector index type, the
   quantizer and the bits for `rq` (1, 4 or 8). `default` leaves the choice
   to the server. `hnsw` takes every quantizer, `flat` and `dynamic` take

@@ -265,7 +265,7 @@ def test_inspect_vectorizer_options(tmp_path):
     assert vector.vectorizer.options == {"model": "m"}
 
 
-def test_inspect_vectorizer_option_values_are_typed(tmp_path):
+def test_inspect_vectorizer_option_values_are_strings(tmp_path):
     options = ["dimensions=256", "flag=true", "other=false", "model=3-small"]
     args = [x for o in options for x in ("--vectorizer-option", o)]
     inspected(
@@ -277,11 +277,29 @@ def test_inspect_vectorizer_option_values_are_typed(tmp_path):
     vector = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target.vectors[0]
     assert vector.vectorizer is not None
     assert vector.vectorizer.options == {
-        "dimensions": 256,
-        "flag": True,
-        "other": False,
+        "dimensions": "256",
+        "flag": "true",
+        "other": "false",
         "model": "3-small",
     }
+
+
+def test_an_all_digit_vectorizer_option_keeps_its_text(tmp_path):
+    fakes = inspected(
+        FakeFactories(FakeSource(cli_records(10))),
+        "--vectors",
+        "embed",
+        "--vectorizer",
+        "text2vec-openai",
+        "--vectorizer-option",
+        "model=007",
+        "--vectorizer-option",
+        "dimensions=0256",
+    )
+    text = (tmp_path / DIR / "plan.yaml").read_text()
+    assert "model: '007'" in text and "dimensions: '0256'" in text
+    r = invoke(fakes, "check", "--json", OPENAI_API_KEY="openai-key")
+    assert r.exit_code == 0, r.output
 
 
 def test_inspect_index_and_quantizer_options(tmp_path):

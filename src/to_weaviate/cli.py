@@ -469,15 +469,12 @@ def _load_plan_and_inspection(
     return plan, inspected
 
 
-def _option_value(text: str) -> Any:
-    if text.isascii() and text.isdigit():
-        return int(text)
-    if text in ("true", "false"):
-        return text == "true"
-    return text
-
-
 def _vectorizer_plan(module: str | None, options: list[str]) -> VectorizerPlan | None:
+    """The vectorizer plan of `module`.
+
+    Each option value stays the text given. The collection is created with
+    it as the type that the client declares for the option.
+    """
     parsed: dict[str, Any] = {}
     for option in options:
         key, sep, value = option.partition("=")
@@ -487,7 +484,7 @@ def _vectorizer_plan(module: str | None, options: list[str]) -> VectorizerPlan |
                 f"--vectorizer-option {option} is not KEY=VALUE.",
                 "Write each option as --vectorizer-option KEY=VALUE.",
             )
-        parsed[key] = _option_value(value)
+        parsed[key] = value
     if module is None:
         if parsed:
             raise CliError(
