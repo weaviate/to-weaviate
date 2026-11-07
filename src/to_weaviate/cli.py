@@ -362,6 +362,19 @@ def _handled(json_output: bool) -> Iterator[None]:
         raise typer.Exit(report.exit_code) from None
 
 
+def _yaml_error_text(exc: yaml.YAMLError) -> str:
+    """The position and the problem of `exc`, without the text of the line.
+
+    The text that PyYAML gives for an error quotes the line, which can hold a
+    password.
+    """
+    if isinstance(exc, yaml.MarkedYAMLError) and exc.problem_mark is not None:
+        mark = exc.problem_mark
+        where = f"YAML error at line {mark.line + 1}, column {mark.column + 1}"
+        return f"{where}: {exc.problem}" if exc.problem else where
+    return "the text is not valid YAML"
+
+
 def _not_utf8(path: Path) -> CliError:
     return CliError("invalid_plan", f"{path} is not UTF-8 text.", UTF8_HINT)
 
@@ -375,13 +388,20 @@ def _read_plan(directory: Path) -> Plan:
         plan = load_plan(path)
     except UnicodeDecodeError as exc:
         raise _not_utf8(path) from exc
-    except (ValidationError, yaml.YAMLError) as exc:
-        detail = _validation_text(exc) if isinstance(exc, ValidationError) else str(exc)
+    except ValidationError as exc:
         raise CliError(
             "invalid_plan",
-            f"{path} is not a valid plan: {detail}",
+            f"{path} is not a valid plan: {_validation_text(exc)}",
             EDIT_PLAN_HINT,
         ) from exc
+    except yaml.YAMLError as exc:
+        # Not chained: the YAML error holds the line, and the debug traceback
+        # would print it.
+        raise CliError(
+            "invalid_plan",
+            f"{path} is not a valid plan: {_yaml_error_text(exc)}",
+            EDIT_PLAN_HINT,
+        ) from None
     if not plan.collections:
         raise CliError(
             "invalid_plan",

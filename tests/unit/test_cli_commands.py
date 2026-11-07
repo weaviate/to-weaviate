@@ -1525,3 +1525,29 @@ def test_check_warns_on_a_url_option_sent_without_its_query(mode):
     else:
         assert f"warning cleaned_option Docs: {message}" in r.stdout
     assert "B6-MADE-UP-TOKEN" not in r.output
+
+
+@pytest.mark.parametrize("debug", [None, "1"])
+@pytest.mark.parametrize("mode", [[], ["--json"]])
+@pytest.mark.parametrize("cmd", LOADING_COMMANDS)
+def test_a_yaml_error_names_the_line_and_column_but_not_the_line_text(
+    tmp_path, cmd, mode, debug
+):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    path = tmp_path / DIR / "plan.yaml"
+    password = "B6-MADE-UP-PW"
+    bad = f"notes: https://bob:{password}@proxy.example.com/v1: bad\n"
+    path.write_text(bad + path.read_text())
+    r = invoke(fakes, cmd, *mode, TO_WEAVIATE_DEBUG=debug)
+    assert r.exit_code == 2, r.output
+    message = (
+        f"{DIR / 'plan.yaml'} is not a valid plan: YAML error at line 1, column "
+        f"{bad.index(': bad') + 1}: mapping values are not allowed here"
+    )
+    if mode:
+        d = json.loads(r.stdout)
+        assert (d["code"], d["message"]) == ("invalid_plan", message)
+    else:
+        assert f"Error: {message}" in r.stderr
+    for part in ["bob", *(password[i : i + 4] for i in range(len(password) - 3))]:
+        assert part not in r.stdout and part not in r.stderr
