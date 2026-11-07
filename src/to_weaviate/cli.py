@@ -923,6 +923,10 @@ def _copy(
                 trained = _needs_quantizer_update(entry)
                 if trained:
                     state.expect_quantizer_update(ref)
+                else:
+                    # A row from a run with an earlier plan would keep the
+                    # entry not done.
+                    state.quantizers_updated(ref)
                 info(json_output, f"Copying {entry.source.name} to {entry.target.name}")
                 result = copy_collection(
                     source,

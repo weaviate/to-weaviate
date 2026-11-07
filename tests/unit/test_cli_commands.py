@@ -1060,6 +1060,26 @@ def test_a_refused_quantizer_update_stops_copy_and_resumes_without_pages(tmp_pat
     assert (status["copied"], status["done"]) == (10, True)
 
 
+def test_an_entry_is_done_again_when_its_plan_stops_needing_the_update(tmp_path):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    plan = tmp_path / DIR / "plan.yaml"
+    rq = {"type": "rq", "bits": 4}
+    _set_index(plan, {"type": "hnsw", "quantizer": rq})
+    assert invoke(fakes, "copy", "--json").exit_code == 0
+    # The server refuses to add centering to the existing rq index.
+    fakes.schema.update_error = SchemaRejected(
+        "rq centering is immutable", "enable the quantizers of Docs"
+    )
+    _set_index(plan, {"type": "hnsw", "quantizer": {**rq, "centering": True}})
+    assert invoke(fakes, "copy", "--json").exit_code == 2
+    _set_index(plan, {"type": "hnsw", "quantizer": rq})
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["collections"][0]["done"] is True
+    status = json.loads(invoke(fakes, "status", "--json").stdout)["collections"][0]
+    assert status["done"] is True
+
+
 def test_copy_requires_provider_key():
     fakes = inspected(
         FakeFactories(FakeSource(cli_records(10))),
