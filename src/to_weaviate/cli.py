@@ -58,7 +58,7 @@ from to_weaviate.engine.check import (
     target_groups,
     userinfo_only,
 )
-from to_weaviate.engine.copy import copy_collection
+from to_weaviate.engine.copy import REJECTS_ARE_FINAL, copy_collection
 from to_weaviate.engine.verify import (
     REPORT_MD,
     Check,
@@ -176,6 +176,7 @@ STATE_HINT = (
     "To resume, set WEAVIATE_URL and the target name back. To copy to the new "
     "target, use another --dir."
 )
+GONE_HINT = "To copy it again, use another --dir."
 UNREADABLE_STATE_HINT = "Start again with another --dir, or restore the file."
 STATE_IN_USE_HINT = "Wait for it to end, then run the command again."
 ADD_PROPERTY_HINT = (
@@ -797,11 +798,13 @@ def _target_host(settings: WeaviateSettings) -> str:
     return settings.http.normalized
 
 
-def _state_mismatch(directory: Path, copy: str, now: str) -> CliError:
+def _state_mismatch(
+    directory: Path, copy: str, now: str, hint: str = STATE_HINT
+) -> CliError:
     return CliError(
         "state_mismatch",
         f"The state in {directory} holds a copy of {copy}. {now}",
-        STATE_HINT,
+        hint,
     )
 
 
@@ -843,10 +846,13 @@ def _planned_targets(
             )
         if progress and not reader.exists(entry):
             missing = "collection or tenant" if target.tenant else "collection"
+            # Setting WEAVIATE_URL or the target name back does not bring the
+            # collection back, so the hint names only another --dir.
             raise _state_mismatch(
                 directory,
                 f"{name} to {_target_text(target)}",
                 f"That {missing} does not exist in the target now.",
+                GONE_HINT,
             )
         planned[ref] = target
     return planned
@@ -872,6 +878,15 @@ def _copy_lock(directory: Path) -> Iterator[None]:
             f"Another to-weaviate copy uses {directory}.",
             "Wait for it to end, or use another --dir.",
         ) from exc
+
+
+def _warning(name: str) -> Callable[[str], None]:
+    """A function that prints a warning about the collection `name` on stderr."""
+
+    def warn(line: str) -> None:
+        print(f"Warning: {name}: {line}", file=sys.stderr, flush=True)
+
+    return warn
 
 
 def _select(entries: list[CollectionPlan], names: list[str]) -> list[CollectionPlan]:
@@ -909,8 +924,8 @@ def _copy(
     keys = {collection_key(name) for name in selected}
     errors, warnings = plan_findings(plan, inspected, vectorizer_for)
     errors = [f for f in errors if collection_key(f.collection) in keys]
+    warnings = [w for w in warnings if collection_key(w.collection) in keys]
     if errors:
-        warnings = [w for w in warnings if collection_key(w.collection) in keys]
         raise _plan_errors(errors, warnings)
     env = load_env(Path.cwd())
     source_settings = chroma_settings(env)
@@ -921,6 +936,13 @@ def _copy(
     with _copy_lock(directory):
         source = factories.source(source_settings)
         schema = factories.schema(target_settings)
+        module_errors = [
+            f
+            for f in module_findings(plan, schema.modules())
+            if collection_key(f.collection) in keys
+        ]
+        if module_errors:
+            raise _plan_errors(module_errors, warnings)
         writer = factories.writer(target_settings, consistency)
         reader = factories.reader(target_settings)
         source_names = {c.ref: c.name for c in inspected.values()}
@@ -943,6 +965,7 @@ def _copy(
                     info(json_output, f"Added the property {prop} to {name}")
                     added.append({"collection": name, "property": prop})
             events = Events(directory / EVENTS_FILE)
+            rereads: dict[str, int] = {}
             for entry in entries:
                 ref = entry.source.ref
                 state.set_target(ref, targets[ref])
@@ -962,7 +985,10 @@ def _copy(
                     entry,
                     inspected[ref],
                     parallelism,
+                    warn=_warning(entry.source.name),
                 )
+                if result.reread_from is not None:
+                    rereads[ref] = result.reread_from
                 if trained:
                     info(
                         json_output,
@@ -979,6 +1005,9 @@ def _copy(
         finally:
             state.close()
     rows = _rows(entries, progress)
+    for row in rows:
+        if row["ref"] in rereads:
+            row["reread_from"] = rereads[row["ref"]]
     document, text = _progress_output(entries, rows)
     document["added_properties"] = added
     rejects = sum(row["rejects"] for row in rows)
@@ -986,7 +1015,8 @@ def _copy(
         raise CliError(
             "rejects",
             f"{_plural(rejects, 'record')} rejected.",
-            f"See {directory / REJECTS_FILE} for each record and the reason.",
+            f"See {directory / REJECTS_FILE} for each record and the reason. "
+            f"{REJECTS_ARE_FINAL}",
             fields=document,
             text=text,
         )

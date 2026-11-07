@@ -132,6 +132,13 @@ def test_both_sends_only_the_kept_vector():
     assert isinstance(o, TargetObject) and o.vectors == {"source": [0.1, 0.2]}
 
 
+def test_both_mode_keeps_the_vector_of_a_record_without_a_document():
+    o = to_object(REC_NO_DOC, ENTRY_BOTH)
+    assert isinstance(o, TargetObject) and o.vectors == {"source": [0.1, 0.2]}
+    o = to_object(Record("d", [0.3], "", None, {}), ENTRY_BOTH)
+    assert isinstance(o, TargetObject) and o.vectors == {"source": [0.3]}
+
+
 def test_embed_mode_rejects_missing_document():
     assert to_object(REC_NO_DOC, ENTRY_EMBED) == Reject("doc-2", "no document to embed")
     assert to_object(Record("d", None, "", None, {}), ENTRY_EMBED) == Reject(

@@ -22,6 +22,8 @@ class SourceCollection:
     fields: list[FieldStats]
     sparse_keys: list[str]
     document_bytes_estimate: int
+    # "listing" or "sample": where `dimension` came from; None without one.
+    dimension_from: str | None = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,11 @@ class Source(Protocol):
     @property
     def tenant(self) -> str: ...
 
+    @property
+    def page_size(self) -> int:
+        """The most records that one read returns."""
+        ...
+
     def namespaces(self) -> list[str]:
         """Every namespace of the tenant, in the order the source lists them."""
         ...
@@ -77,6 +84,12 @@ class Source(Protocol):
     ) -> Page: ...
 
     def ids(self, collection: SourceCollection) -> Iterator[str]: ...
+
+    def ids_at(
+        self, collection: SourceCollection, offset: int, limit: int
+    ) -> list[str]:
+        """The ids of up to `limit` records from `offset`, in the order `read` uses."""
+        ...
 
     def count(self, collection: SourceCollection) -> int: ...
 

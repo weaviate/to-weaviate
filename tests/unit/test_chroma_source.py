@@ -324,6 +324,14 @@ def test_ids_raise_when_the_server_ignores_the_offset(source, fake_client, inspe
         list(source.ids(inspected))
 
 
+def test_ids_at_reads_ids_without_a_payload(source, fake_client, inspected):
+    fake_client.calls.clear()
+    assert source.ids_at(inspected, 649, 1) == ["id649"]
+    assert source.ids_at(inspected, 650, 1) == []
+    assert fake_client.calls[0] == Call(1, 649, [], None)
+    assert source.page_size == CHROMA_MAX_PAGE
+
+
 def test_count(source, inspected):
     assert source.count(inspected) == 650
 
@@ -487,3 +495,24 @@ def test_capabilities():
     assert ChromaSource.capabilities == frozenset(
         {"vectors", "vector_search", "filter"}
     )
+
+
+def test_inspect_takes_a_dimension_that_the_listing_lacks_from_the_sample(
+    collection, fake_client
+):
+    fake_client.collection = {**collection, "dimension": None}
+    fake_client.records = [{**r, "vector": None} for r in make_records(2)] + (
+        make_records(650)[2:]
+    )
+    c = ChromaSource(fake_client, tenant="t").inspect(None, None, None)[0]
+    assert (c.dimension, c.dimension_from) == (2, "sample")
+    # Only the first page reads embeddings: it holds one.
+    assert [call.include for call in fake_client.calls[:3]] == [
+        ["metadatas", "embeddings"],
+        ["metadatas"],
+        ["metadatas"],
+    ]
+
+
+def test_inspect_keeps_the_dimension_of_the_listing(inspected):
+    assert (inspected.dimension, inspected.dimension_from) == (1536, "listing")

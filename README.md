@@ -53,7 +53,8 @@ vector settings. Review it before you run `check`.
 - `--database NAME`, `--collection NAME`: limit the inspection. Both repeat.
 - `--sample-pages N`: metadata pages to read per collection. Default: all.
 - `--vectors keep|embed|both`: keep the Chroma vectors (default), let a
-  Weaviate vectorizer embed the documents, or both.
+  Weaviate vectorizer embed the documents, or both. With `both`, a record
+  without a document keeps its source vector and gets no embedded vector.
 - `--vectorizer MODULE`, `--vectorizer-option KEY=VALUE`: the Weaviate
   vectorizer module and its options. `plan.yaml` holds each value as text;
   `copy` sends it as a number or a boolean where the module takes one.
@@ -79,18 +80,34 @@ creates nothing. A planned property that an existing collection lacks is
 the warning `missing_property`: `copy` adds it to the collection. Plan
 entries that write into one collection, each into its own tenant, must
 have the same vectors and the same settings for each property that more
-than one of them has.
+than one of them has, and no two property names that differ only in case.
 
 ### `copy`
 
 Creates the target collections, then copies the records. Progress goes to
 `state.sqlite`, so a second run continues where the first one stopped.
-Each run also copies the records added to the source since the last run.
+Each run also copies the records added to the source since the last run:
+it reads the records after the last two that the run before read. When
+deletions moved those two records, the run finds them at their new offsets
+and reads what follows. When one of them is gone, the run reads again from
+an earlier record or from the start, with the warning "the source changed
+since the last run; re-reading from the start"; a record read again is
+written again unchanged, so this is safe and only slower. When the two
+records were deleted and added back with the same ids, the run cannot tell
+them from the originals and can skip the records added in between: run the
+full `verify` after the last copy of a source that changed, and copy into
+a new `--dir` when its ids check fails. A run that reads records again
+gives the offset it reads from as `reread_from` in its JSON document; other
+runs have no `reread_from`.
+
 Each record that the tool cannot convert or that Weaviate refuses goes to
-`rejects.jsonl` with the reason. When Weaviate refuses every object of a
-batch of more than one record, `copy` retries the batch as it retries a
-network error. When the retries are used up, it stops with
-`target_unreachable` and stores no reject. The next run starts at that page.
+`rejects.jsonl` with the reason. Rejects are final for this directory. After
+fixing the cause, copy `plan.yaml` and `inspect.json` to a new `--dir` and
+run `copy` there; objects already in Weaviate are written again unchanged.
+When Weaviate refuses every object of a batch of more than one record,
+`copy` retries the batch as it retries a network error. When the retries
+are used up, it stops with `target_unreachable` and stores no reject. The
+next run starts at that page.
 
 When the target collection exists without a property that `plan.yaml`
 has, `copy` adds the property before it writes. Its JSON document lists
@@ -127,9 +144,12 @@ and `report.json`.
 
 `copy` reads a live source by position. A record deleted from the source
 during a copy can make `copy` skip other records. Run a full `verify` after
-writes to the source have stopped. `verify --quick` skips the id comparison,
-so when the counts match it finds a missing record only if the sample holds
-that record.
+writes to the source have stopped. When the ids differ, the ids check names
+the fix, as the count check does. `verify --quick` skips the comparison of
+the full id lists. The counts can match when an extra object, such as one
+whose source record was deleted, cancels a missing one; `--quick` then
+finds the missing record only if the sample holds it. Run the full
+`verify` after the last copy of a source that changed.
 
 Weaviate stores an `int` property as a double, so an int above 2**53 in
 magnitude is stored rounded, and `verify` compares the rounded value. An
@@ -146,7 +166,10 @@ depends on its CPU. To keep every digit of such a value, type the property
 
 Shows the copy progress and the recorded target of each collection from
 `state.sqlite`. It needs no credentials. The total of a collection is the
-highest source count that a `copy` read.
+highest source count that a `copy` read. The copied count is the number of
+records that `copy` wrote, also those deleted from the source since, so
+after deletions in the source it can be above the total. Records that a
+run reads again are counted once.
 
 ## Migration directory
 

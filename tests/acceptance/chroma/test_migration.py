@@ -4,6 +4,8 @@ from chroma.seed import (
     count,
     delete_from_tiny_l2,
     extra_tiny_l2_ids,
+    records,
+    restore_tiny_l2,
     tiny_l2_count,
 )
 from conftest import (
@@ -14,6 +16,7 @@ from conftest import (
     weaviate_by_source_id,
     weaviate_config,
     weaviate_count,
+    weaviate_delete_object,
     weaviate_object,
     write_plan,
 )
@@ -147,6 +150,40 @@ def test_each_copy_adds_the_records_that_the_source_gained(seeded, tmp_path):
     finally:
         delete_from_tiny_l2(intended)
         assert tiny_l2_count() == 10
+
+
+def test_a_copy_after_deletions_reads_the_records_added_since(seeded, tmp_path):
+    r = run(["inspect", "chroma", "--collection", "tiny.l2"], tmp_path)
+    assert r.exit_code == 0, r
+    seed_records = records("tiny.l2")
+    deleted = [record.id for record in seed_records[2:5]]
+    try:
+        r = run(["copy"], tmp_path)
+        assert r.exit_code == 0, r
+        delete_from_tiny_l2(deleted)
+        add_to_tiny_l2(10, 5)
+        r = run(["copy"], tmp_path)
+        assert r.exit_code == 0, r
+        # The 7 seed records left come first, and the tail reads the 5 added
+        # from offset 7. No record is read again: 10 + 5 were copied.
+        row = r.data["collections"][0]
+        assert "reread_from" not in row, r
+        assert (row["copied"], row["total"]) == (15, 12), r
+        # copy deletes no object, so the test deletes those of the deleted
+        # records. A tiny.l2 id is a UUID, which the object keeps.
+        for source_id in deleted:
+            weaviate_delete_object("Tiny_l2", source_id)
+        r = run(["verify"], tmp_path)
+        assert r.exit_code == 0 and r.data["status"] == "success", r
+        checks = {c["name"]: c["detail"] for c in r.data["checks"]}
+        assert checks["ids"] == "missing 0, extra 0", r
+        assert checks["count"] == "source count 12, target count 12", r
+    finally:
+        # The other tests expect tiny.l2 as the seed made it, in its order.
+        restore_tiny_l2(seed_records)
+        assert [record.id for record in records("tiny.l2")] == [
+            record.id for record in seed_records
+        ]
 
 
 def test_wrong_or_missing_api_key_exits_3(seeded, tmp_path):

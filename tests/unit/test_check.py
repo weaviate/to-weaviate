@@ -236,6 +236,39 @@ def test_load_findings_refuse_property_names_equal_ignoring_case():
     ]
 
 
+def tenant_entry(tenant: str, *properties: p.PropertyPlan) -> p.CollectionPlan:
+    base = entry([keep()])
+    return base.model_copy(
+        update={
+            "source": base.source.model_copy(update={"ref": tenant}),
+            "target": base.target.model_copy(
+                update={"tenant": tenant, "properties": [ID_PROPERTY, *properties]}
+            ),
+        }
+    )
+
+
+def test_entries_of_one_collection_may_not_name_a_property_in_two_cases():
+    plan = plan_of(tenant_entry("a", prop("title")), tenant_entry("b", prop("tItle")))
+    errors, _ = plan_findings(plan, None, vectorizer_for)
+    assert errors == [
+        Finding(
+            "duplicate_property",
+            "Docs",
+            "properties title in docs -> Docs (tenant a) and tItle in docs -> Docs "
+            "(tenant b) have the same name ignoring case; Weaviate compares "
+            "property names in lower case, so give the property one name in every "
+            "entry of Docs",
+        )
+    ]
+
+
+def test_entries_of_one_collection_may_share_a_property_name():
+    plan = plan_of(tenant_entry("a", prop("title")), tenant_entry("b", prop("title")))
+    errors, _ = plan_findings(plan, None, vectorizer_for)
+    assert errors == []
+
+
 def test_load_findings_refuse_a_repeated_vector_name():
     both = entry([keep(), embed("text2vec-weaviate")])
     plan = plan_of(with_target(both, properties=[ID_PROPERTY]))
