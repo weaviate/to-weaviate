@@ -27,6 +27,7 @@ from e2e import (
     weaviate_near_text,
     weaviate_near_vector,
     weaviate_object,
+    weaviate_tenants,
 )
 
 # The test modules import these names from this module.
@@ -43,6 +44,7 @@ __all__ = [
     "weaviate_near_text",
     "weaviate_near_vector",
     "weaviate_object",
+    "weaviate_tenants",
     "write_plan",
 ]
 
@@ -62,7 +64,15 @@ CLEARED_VARIABLES = (
     "CHROMA_TOKEN_HEADER",
 )
 # The target collections the suite creates. The suite touches no other one.
-SUITE_COLLECTIONS = ["Docs_cosine", "Tiny_l2", "Docs_rq", "Docs_ip"]
+SUITE_COLLECTIONS = [
+    "Docs_cosine",
+    "Tiny_l2",
+    "Docs_rq",
+    "Docs_ip",
+    "Tenant_a",
+    "Tenant_b",
+    "Tenants",
+]
 
 
 def endpoint_problems() -> list[str]:

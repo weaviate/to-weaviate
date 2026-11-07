@@ -21,7 +21,14 @@ DATABASE_PATH = "/api/v2/tenants/default_tenant/databases/default_database"
 ADD_BATCH = 300
 TEST_URL = "http://localhost:8001"
 # Every collection that `seed` makes, in the order it makes them.
-COLLECTIONS = ("docs-cosine", "tiny.l2", "docs-rq", "docs-ip")
+COLLECTIONS = (
+    "docs-cosine",
+    "tiny.l2",
+    "docs-rq",
+    "docs-ip",
+    "tenant-a",
+    "tenant-b",
+)
 CATEGORIES = ("guide", "reference", "tutorial")
 TAGS = ("red", "green", "blue", "small", "large")
 
@@ -121,6 +128,28 @@ def docs_ip(rng: random.Random) -> list[Record]:
     return records
 
 
+def tenant_records(rng: random.Random, tenant: str, count: int) -> list[Record]:
+    """`count` records of 8 dimensions for the tenant collection `tenant-<tenant>`.
+
+    Only the records of tenant b have the key `region`.
+    """
+    records = []
+    for i in range(count):
+        metadata: dict[str, Any] = {"position": i}
+        if tenant == "b":
+            metadata["region"] = ("north", "south")[i % 2]
+        records.append(
+            Record(
+                id=f"{tenant}-{i:02d}",
+                embedding=_vector(rng, 8),
+                document=f"Record {i} of tenant {tenant}.",
+                metadata=metadata,
+                uri=f"https://example.com/{tenant}/{i}",
+            )
+        )
+    return records
+
+
 def _recreate(
     http: httpx.Client, name: str, space: str | None, records: list[Record]
 ) -> None:
@@ -178,6 +207,8 @@ def seed() -> None:
         _recreate(http, "tiny.l2", None, tiny_l2(rng))
         _recreate(http, "docs-rq", "cosine", docs_rq(rng))
         _recreate(http, "docs-ip", "ip", docs_ip(rng))
+        _recreate(http, "tenant-a", "cosine", tenant_records(rng, "a", 30))
+        _recreate(http, "tenant-b", "cosine", tenant_records(rng, "b", 20))
 
 
 def _extra_tiny_l2(start: int, count: int) -> list[Record]:

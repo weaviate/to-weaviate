@@ -137,6 +137,11 @@ def weaviate_object(name: str) -> Object[Any, Any]:
     return objects[0]
 
 
+def weaviate_tenants(name: str) -> set[str]:
+    """The tenant names of the target collection `name`."""
+    return set(_weaviate().collections.use(name).tenants.get())
+
+
 def weaviate_exists(name: str) -> bool:
     """Whether the target collection `name` exists."""
     return _weaviate().collections.exists(name)
