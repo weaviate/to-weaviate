@@ -1178,6 +1178,55 @@ def test_differences_skip_a_field_that_the_index_does_not_store():
     assert differences(FakeClient(FakeCollection(cfg)), [entry(index=index)]) == []  # type: ignore[arg-type]
 
 
+def _flat_with(quantizer: Any) -> _VectorIndexConfigFlat:
+    return _VectorIndexConfigFlat(
+        multi_vector=None,
+        quantizer=quantizer,
+        distance_metric=VectorDistances.COSINE,
+        vector_cache_max_objects=0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("stored", "planned"),
+    [
+        (
+            _BQConfig(cache=False, rescore_limit=-1),
+            p.QuantizerPlan(type="bq", cache=True),
+        ),
+        (
+            _rq(bits=8, cache=False, centering=None, training_limit=None),
+            p.QuantizerPlan(type="rq", bits=8, cache=True),
+        ),
+    ],
+)
+def test_differences_compare_the_quantizer_cache(stored, planned):
+    index = p.IndexPlan(type="flat", quantizer=planned)
+    cfg = config(index=_flat_with(stored))
+    assert differences(FakeClient(FakeCollection(cfg)), [entry(index=index)]) == [  # type: ignore[arg-type]
+        "vector default: cache is False, plan has True"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("stored", "planned"),
+    [
+        (
+            _BQConfig(cache=True, rescore_limit=-1),
+            p.QuantizerPlan(type="bq", cache=True),
+        ),
+        (
+            _rq(bits=8, cache=True, centering=None, training_limit=None),
+            p.QuantizerPlan(type="rq", bits=8, cache=True),
+        ),
+    ],
+)
+def test_differences_accept_an_equal_quantizer_cache(stored, planned):
+    index = p.IndexPlan(type="flat", quantizer=planned)
+    cfg = config(index=_flat_with(stored))
+    assert differences(FakeClient(FakeCollection(cfg)), [entry(index=index)]) == []  # type: ignore[arg-type]
+
+
 def test_differences_compare_the_hnsw_part_of_a_dynamic_index():
     flat = SimpleNamespace(quantizer=_rq(bits=8, centering=None, training_limit=None))
     dyn = _VectorIndexConfigDynamic(
