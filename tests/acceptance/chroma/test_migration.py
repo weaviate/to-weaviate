@@ -93,10 +93,23 @@ def test_metadata_shapes_map_to_property_types(seeded, tmp_path):
         assert r.exit_code == 0 and r.data["status"] == "success", r
     records_check = next(c for c in r.data["checks"] if c["name"] == "records")
     assert records_check["detail"].startswith("sampled 300, compared 300,"), r
-    types = {
-        p.name: p.data_type.value for p in weaviate_config("Docs_cosine").properties
+    properties = weaviate_config("Docs_cosine").properties
+    assert {p.name: p.data_type.value for p in properties} == DOCS_COSINE_TYPES
+    # The index settings of each property are the plan's.
+    planned = {
+        p["name"]: p
+        for p in read_plan(tmp_path)["collections"][0]["target"]["properties"]
     }
-    assert types == DOCS_COSINE_TYPES
+    for found in properties:
+        plan = planned[found.name]
+        tokenization = found.tokenization.value if found.tokenization else None
+        assert (
+            tokenization,
+            found.index_filterable,
+            found.index_range_filters,
+        ) == (plan["tokenization"], plan["filterable"], plan["range_filters"]), found
+        if plan["type"] in ("text", "text[]"):
+            assert found.index_searchable == plan["searchable"], found
     # doc-0000 has no document, no reviewer and a text code; doc-0003 has a
     # reviewer and an int code, which is stored as text.
     first = weaviate_by_source_id("Docs_cosine", "doc-0000")
