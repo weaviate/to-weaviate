@@ -307,3 +307,19 @@ def test_writer_retries_a_transient_grpc_failure():
     writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
     assert writer.write(ENTRY_KEEP, objects(1)) == []
     assert len(data.calls) == 2
+
+
+def test_one_object_that_grpc_refuses_for_its_size_is_a_reject():
+    data = FakeData(["RESOURCE_EXHAUSTED", SimpleNamespace(errors={})])
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    rejects = writer.write(ENTRY_KEEP, objects(1))
+    assert rejects == [Reject("s0", "fake gRPC failure RESOURCE_EXHAUSTED")]
+    assert len(data.calls) == 1
+
+
+def test_a_chunk_of_two_that_grpc_refuses_for_its_size_is_retried():
+    data = FakeData(["RESOURCE_EXHAUSTED"] * 10)
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    with pytest.raises(WeaviateBatchError):
+        writer.write(ENTRY_KEEP, objects(2))
+    assert len(data.calls) == 6

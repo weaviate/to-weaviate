@@ -7,13 +7,13 @@ from typing import Any, Protocol
 import weaviate
 from weaviate.classes.config import ConsistencyLevel
 from weaviate.classes.data import DataObject
-from weaviate.exceptions import WeaviateInsertManyAllFailedError
+from weaviate.exceptions import WeaviateBaseError, WeaviateInsertManyAllFailedError
 
 from to_weaviate.ids import to_uuid
 from to_weaviate.plan import CollectionPlan
 from to_weaviate.retry import with_retry
 from to_weaviate.sources.base import Record
-from to_weaviate.target.schema import transient
+from to_weaviate.target.schema import refused_for_size, transient
 from to_weaviate.types import coerce
 
 MAX_INSERT_BYTES = 4 * 1024 * 1024
@@ -125,6 +125,15 @@ def _refused_or_transient(exc: Exception) -> float | None:
     return transient(exc)
 
 
+def _transient_unless_too_large(exc: Exception) -> float | None:
+    """`transient`, except for a message that gRPC refuses for its size."""
+    return None if refused_for_size(exc) else transient(exc)
+
+
+def _source_id(obj: TargetObject) -> str:
+    return str(obj.properties.get("source_id", obj.uuid))
+
+
 class Writer(Protocol):
     def write(
         self, entry: CollectionPlan, objects: list[TargetObject]
@@ -147,7 +156,8 @@ class WeaviateWriter:
 
         A chunk of more than one object that Weaviate refuses as a whole is
         retried like a transient error. When the retries are used up, this
-        raises BatchRefused. A refused chunk of one object becomes one reject.
+        raises BatchRefused. A refused chunk of one object becomes one reject,
+        and so does a chunk of one object that gRPC refuses for its size.
         """
         collection = self._client.collections.get(entry.target.name)
         if entry.target.tenant:
@@ -164,26 +174,24 @@ class WeaviateWriter:
                 )
                 for o in chunk
             ]
+            single = len(chunk) == 1
             try:
                 result = with_retry(
                     lambda b=batch: collection.data.insert_many(b),  # type: ignore[misc]
-                    _refused_or_transient if len(chunk) > 1 else transient,
+                    _transient_unless_too_large if single else _refused_or_transient,
                     sleep=self._sleep,
                 )
             except WeaviateInsertManyAllFailedError as exc:
-                if len(chunk) > 1:
+                if not single:
                     reason = str(exc).removeprefix(ALL_FAILED_PREFIX)
                     raise BatchRefused(len(chunk), entry.target.name, reason) from exc
-                rejects.extend(
-                    Reject(str(o.properties.get("source_id", o.uuid)), str(exc))
-                    for o in chunk
-                )
+                rejects.append(Reject(_source_id(chunk[0]), str(exc)))
+                continue
+            except WeaviateBaseError as exc:
+                if not (single and refused_for_size(exc)):
+                    raise
+                rejects.append(Reject(_source_id(chunk[0]), exc.message))
                 continue
             for index, error in result.errors.items():
-                obj = chunk[index]
-                rejects.append(
-                    Reject(
-                        str(obj.properties.get("source_id", obj.uuid)), error.message
-                    )
-                )
+                rejects.append(Reject(_source_id(chunk[index]), error.message))
         return rejects

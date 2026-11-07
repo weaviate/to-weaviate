@@ -170,6 +170,20 @@ def transient(exc: Exception) -> float | None:
     return None
 
 
+def refused_for_size(exc: Exception) -> bool:
+    """Whether the nearest gRPC error in the chain of `exc` is RESOURCE_EXHAUSTED.
+
+    gRPC refuses a message above its size limit with this status.
+    """
+    for link in _chain(exc):
+        if isinstance(link, WeaviateRetryError):
+            return False
+        status = _grpc_status(link)
+        if status is not None:
+            return status == "RESOURCE_EXHAUSTED"
+    return False
+
+
 def _property(plan: PropertyPlan) -> Property:
     is_text = plan.type in ("text", "text[]")
     return Property(
