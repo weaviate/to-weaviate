@@ -517,7 +517,8 @@ def _index_plan(
             "usage",
             f"--index {index} --quantizer {quantizer}: {_validation_text(exc)}",
             "A quantizer needs a named --index that supports it; "
-            "--quantizer-bits takes 1, 4 or 8.",
+            "--quantizer-bits takes 1, 4 or 8 with hnsw, 1 or 8 with flat and "
+            "dynamic, and 1 with hfresh.",
         ) from exc
 
 

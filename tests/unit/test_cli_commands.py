@@ -365,6 +365,36 @@ def test_a_quantizer_that_the_index_does_not_support_is_refused(tmp_path, comman
     assert fakes.schema_calls == 0 and fakes.schema.ensured == []
 
 
+def test_inspect_refuses_rq_bits_that_the_index_does_not_support(tmp_path):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    args = ("--index", "hfresh", "--quantizer", "rq", "--quantizer-bits", "8")
+    r = invoke(fakes, "inspect", "chroma", *args, "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert d["code"] == "usage"
+    assert (
+        "bits=8 of quantizer type 'rq' is not supported by index type 'hfresh'"
+        in (d["message"])
+    )
+    assert not (tmp_path / DIR / "plan.yaml").exists()
+
+
+@pytest.mark.parametrize("command", ["check", "copy"])
+def test_rq_centering_that_the_index_does_not_support_is_refused(tmp_path, command):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    quantizer = {"type": "rq", "bits": 8, "centering": True}
+    _set_index(tmp_path / DIR / "plan.yaml", {"type": "hnsw", "quantizer": quantizer})
+    r = invoke(fakes, command, "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert d["code"] == "invalid_plan"
+    assert (
+        "centering=True is supported only by index type 'hnsw' with bits=4"
+        in (d["message"])
+    )
+    assert fakes.schema_calls == 0 and fakes.schema.ensured == []
+
+
 def test_inspect_unknown_collection_hint_names_both_database_settings():
     fakes = FakeFactories(FakeSource(cli_records(10)))
     r = invoke(fakes, "inspect", "chroma", "--collection", "nope", "--json")

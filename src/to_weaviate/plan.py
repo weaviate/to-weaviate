@@ -46,6 +46,16 @@ INDEX_QUANTIZERS: dict[str, tuple[str, ...]] = {
     "dynamic": ("default", "none", "rq", "bq"),
     "hfresh": ("default", "rq"),
 }
+# The rq bits that Weaviate 1.40.4 accepts for each named index type. It
+# accepts rq centering only with hnsw and 4 bits; without bits, hnsw uses 8.
+RQ_BITS: dict[str, tuple[int, ...]] = {
+    "hnsw": (1, 4, 8),
+    "flat": (1, 8),
+    "dynamic": (1, 8),
+    "hfresh": (1,),
+}
+CENTERING_INDEX = "hnsw"
+CENTERING_BITS = 4
 
 # The distances that target.schema maps to VectorDistances.
 DISTANCES = tuple(sorted(d.value for d in VectorDistances))
@@ -118,7 +128,25 @@ class IndexPlan(_Model):
                 f"quantizer type {quantizer!r} is not supported by index type "
                 f"{self.type!r}; it supports {', '.join(supported)}"
             )
+        if quantizer == "rq":
+            self._check_rq()
         return self
+
+    def _check_rq(self) -> None:
+        bits = self.quantizer.bits
+        supported = RQ_BITS[self.type]
+        if bits is not None and bits not in supported:
+            raise ValueError(
+                f"bits={bits} of quantizer type 'rq' is not supported by index "
+                f"type {self.type!r}; it supports {', '.join(map(str, supported))}"
+            )
+        if self.quantizer.centering and (
+            self.type != CENTERING_INDEX or bits != CENTERING_BITS
+        ):
+            raise ValueError(
+                "centering=True is supported only by index type "
+                f"{CENTERING_INDEX!r} with bits={CENTERING_BITS}"
+            )
 
 
 class VectorPlan(_Model):

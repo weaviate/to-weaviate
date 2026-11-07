@@ -60,7 +60,9 @@ vector settings. Review it before you run `check`.
   quantizer and the bits for `rq` (1, 4 or 8). `default` leaves the choice
   to the server. `hnsw` takes every quantizer, `flat` and `dynamic` take
   `none`, `rq` and `bq`, and `hfresh` takes `rq` only, as Weaviate 1.40.4
-  does. `inspect`, `check` and `copy` refuse any other pair.
+  does. `rq` takes 1, 4 or 8 bits with `hnsw`, 1 or 8 with `flat` and
+  `dynamic`, and 1 with `hfresh`; its `centering` needs `hnsw` and 4 bits.
+  `inspect`, `check` and `copy` refuse any other setting.
 - `--force`: replace an existing `plan.yaml`.
 
 ### `check`

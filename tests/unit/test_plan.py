@@ -308,6 +308,76 @@ def test_index_refuses_a_quantizer_type_that_it_does_not_support(index, quantize
     ) in str(e.value)
 
 
+# The rq bits that Weaviate 1.40.4 accepts for each named index type.
+SUPPORTED_RQ_BITS = {
+    "hnsw": [1, 4, 8],
+    "flat": [1, 8],
+    "dynamic": [1, 8],
+    "hfresh": [1],
+}
+
+
+@pytest.mark.parametrize(
+    ("index", "bits"),
+    [(i, b) for i, bits in SUPPORTED_RQ_BITS.items() for b in bits],
+)
+def test_index_accepts_the_rq_bits_that_it_supports(index, bits):
+    plan = IndexPlan(type=index, quantizer=QuantizerPlan(type="rq", bits=bits))
+    assert plan.quantizer.bits == bits
+
+
+@pytest.mark.parametrize(
+    ("index", "bits"),
+    [
+        (i, b)
+        for i, bits in SUPPORTED_RQ_BITS.items()
+        for b in (1, 4, 8)
+        if b not in bits
+    ],
+)
+def test_index_refuses_rq_bits_that_it_does_not_support(index, bits):
+    with pytest.raises(ValidationError) as e:
+        IndexPlan(type=index, quantizer=QuantizerPlan(type="rq", bits=bits))
+    supported = ", ".join(map(str, SUPPORTED_RQ_BITS[index]))
+    assert (
+        f"bits={bits} of quantizer type 'rq' is not supported by index type "
+        f"{index!r}; it supports {supported}"
+    ) in str(e.value)
+
+
+def test_rq_centering_with_hnsw_and_4_bits_is_accepted():
+    quantizer = QuantizerPlan(type="rq", bits=4, centering=True)
+    assert IndexPlan(type="hnsw", quantizer=quantizer).quantizer.centering is True
+
+
+# A server without a bits value uses 8 bits with hnsw.
+@pytest.mark.parametrize(
+    ("index", "bits"),
+    [
+        ("hnsw", None),
+        ("hnsw", 1),
+        ("hnsw", 8),
+        ("flat", 8),
+        ("dynamic", 1),
+        ("hfresh", 1),
+    ],
+)
+def test_rq_centering_needs_hnsw_and_4_bits(index, bits):
+    with pytest.raises(ValidationError) as e:
+        IndexPlan(
+            type=index, quantizer=QuantizerPlan(type="rq", bits=bits, centering=True)
+        )
+    assert "centering=True is supported only by index type 'hnsw' with bits=4" in (
+        str(e.value)
+    )
+
+
+@pytest.mark.parametrize("index", ["hnsw", "flat", "dynamic", "hfresh"])
+def test_rq_without_centering_is_accepted_by_every_index(index):
+    quantizer = QuantizerPlan(type="rq", bits=1, centering=False)
+    assert IndexPlan(type=index, quantizer=quantizer).quantizer.centering is False
+
+
 def test_index_refuses_an_unknown_option():
     with pytest.raises(ValidationError) as e:
         IndexPlan(type="hnsw", options={"search_probe": 4})
