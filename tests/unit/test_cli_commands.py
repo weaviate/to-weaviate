@@ -1477,3 +1477,24 @@ def test_check_warns_on_a_property_name_with_a_reserved_suffix(tmp_path, mode):
         ]
     else:
         assert f"warning reserved_suffix Docs: {message}" in r.stdout
+
+
+# The client warns on every text2vec_aws call.
+@pytest.mark.filterwarnings("ignore:`text2vec_aws` is deprecated:DeprecationWarning")
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_a_vectorizer_without_its_required_options_is_an_invalid_plan(cmd):
+    fakes = inspected(
+        FakeFactories(
+            FakeSource(cli_records(10)), schema=FakeSchema(modules=["text2vec-aws"])
+        ),
+        "--vectors",
+        "embed",
+        "--vectorizer",
+        "text2vec-aws",
+    )
+    r = invoke(fakes, cmd, "--json")
+    message = "vectorizer text2vec-aws needs the options model, region"
+    assert plan_errors(r) == [
+        {"code": "invalid_vectorizer", "collection": "Docs", "message": message}
+    ]
+    assert fakes.writer.calls == 0

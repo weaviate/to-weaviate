@@ -1,4 +1,5 @@
 import inspect
+import re
 import time
 from collections.abc import Callable
 from typing import Any, Literal, Protocol
@@ -42,6 +43,7 @@ GRPC_RETRY_STATUSES = frozenset(
 )
 CHAIN_DEPTH = 5
 USERINFO_TEXT = "holds userinfo that cannot be removed"
+_MISSING_ARGUMENTS = re.compile(r"missing \d+ required .*?arguments?: (.*)")
 
 _DATA_TYPES = {
     "text": DataType.TEXT,
@@ -243,6 +245,22 @@ def _vector(plan: VectorPlan, collection: str) -> Any:
         raise PlanMismatch(
             f"vectorizer option {key} of {module}: {error['msg']}"
         ) from exc
+    except TypeError as exc:
+        raise PlanMismatch(_type_error_text(module, exc)) from exc
+
+
+def _type_error_text(module: str, exc: TypeError) -> str:
+    """The message for a TypeError of a factory; names the missing options.
+
+    Python names the missing arguments of a call as in "missing 2 required
+    keyword-only arguments: 'model' and 'region'".
+    """
+    missing = _MISSING_ARGUMENTS.search(str(exc))
+    names = re.findall(r"'([^']+)'", missing.group(1)) if missing else []
+    if not names:
+        return f"vectorizer {module} refused its options: {exc}"
+    noun = "option" if len(names) == 1 else "options"
+    return f"vectorizer {module} needs the {noun} {', '.join(names)}"
 
 
 def _properties(group: list[CollectionPlan]) -> list[PropertyPlan]:

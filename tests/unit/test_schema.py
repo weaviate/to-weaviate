@@ -726,6 +726,35 @@ def test_kwargs_refuses_a_vectorizer_option_key(key):
         collection_kwargs([entry(mode="embed", vectorizer=v)])
 
 
+# The client warns on every text2vec_aws call.
+@pytest.mark.filterwarnings("ignore:`text2vec_aws` is deprecated:DeprecationWarning")
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({}, "vectorizer text2vec-aws needs the options model, region"),
+        ({"model": "m"}, "vectorizer text2vec-aws needs the option region"),
+    ],
+)
+def test_kwargs_name_the_missing_options_of_a_vectorizer(options, message):
+    v = p.VectorizerPlan(module="text2vec-aws", options=options)
+    with pytest.raises(PlanMismatch) as e:
+        collection_kwargs([entry(mode="embed", vectorizer=v)])
+    assert str(e.value) == message
+
+
+def test_kwargs_report_another_type_error_of_a_vectorizer_factory(monkeypatch):
+    def factory(**kwargs: Any) -> Any:
+        raise TypeError("unsupported operand")
+
+    monkeypatch.setattr(Configure.Vectors, "text2vec_openai", factory)
+    v = p.VectorizerPlan(module="text2vec-openai")
+    with pytest.raises(PlanMismatch) as e:
+        collection_kwargs([entry(mode="embed", vectorizer=v)])
+    assert str(e.value) == (
+        "vectorizer text2vec-openai refused its options: unsupported operand"
+    )
+
+
 def test_kwargs_refuses_a_vectorizer_option_value():
     v = p.VectorizerPlan(module="text2vec-openai", options={"dimensions": "many"})
     with pytest.raises(PlanMismatch, match="dimensions"):
