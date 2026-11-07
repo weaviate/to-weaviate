@@ -254,6 +254,11 @@ def weaviate_config(name: str) -> CollectionConfig:
     return _weaviate().collections.use(name).config.get()
 
 
+def create_target_collection(kwargs: dict[str, Any]) -> None:
+    """Create a target collection with the arguments of `collections.create`."""
+    _weaviate().collections.create(**kwargs)
+
+
 def delete_target_collection(name: str) -> None:
     """Delete the target collection `name` and no other. A missing one is no error."""
     _weaviate().collections.delete(name)

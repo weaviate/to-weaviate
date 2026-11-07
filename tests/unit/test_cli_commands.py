@@ -2167,3 +2167,104 @@ def test_a_record_deleted_during_the_copy_shifts_another_one_past_the_cursor():
     assert checks["ids"]["detail"] == (
         'missing 1, extra 1; missing ids ["id-200"]; extra ids ["id-150"]'
     )
+
+
+def _prop(entry: Any, name: str) -> Any:
+    return next(p for p in entry.target.properties if p.name == name)
+
+
+def _rename_year(plan: Any) -> None:
+    _prop(plan.collections[0], "year").name = "publication_year"
+
+
+def _year_as_text(plan: Any) -> None:
+    year = _prop(plan.collections[0], "year")
+    year.type, year.tokenization, year.range_filters = "text", "field", False
+
+
+def _year_as_list(plan: Any) -> None:
+    _prop(plan.collections[0], "year").type = "int[]"
+
+
+def _document_flags(plan: Any) -> None:
+    document = _prop(plan.collections[0], "document")
+    document.searchable, document.filterable = False, True
+
+
+def _drop_uri(plan: Any) -> None:
+    target = plan.collections[0].target
+    target.properties = [p for p in target.properties if p.source_key != "#uri"]
+    target.dropped.append(DroppedKey(source_key="#uri", reason="not needed"))
+
+
+def _hnsw_l2(plan: Any) -> None:
+    vector = plan.collections[0].target.vectors[0]
+    vector.distance = "l2-squared"
+    vector.index = IndexPlan(type="hnsw", options={"ef": 32})
+
+
+def _edit_notes(plan: Any) -> None:
+    plan.collections[0].notes = ["checked by hand"]
+
+
+def _second_entry_first(plan: Any) -> None:
+    first = plan.collections[0]
+    target = first.target.model_copy(update={"name": "Docs2"})
+    source = first.source.model_copy(update={"ref": "other"})
+    plan.collections = [
+        first.model_copy(update={"source": source, "target": target}),
+        first,
+    ]
+
+
+# (edit of the draft, stored name of the year property, stored value of 2003)
+HAND_EDITS = {
+    "rename": (_rename_year, "publication_year", 2003),
+    "int-to-text": (_year_as_text, "year", "2003"),
+    "int-to-list": (_year_as_list, "year", [2003]),
+    "document-flags": (_document_flags, "year", 2003),
+    "drop-uri": (_drop_uri, "year", 2003),
+    "hnsw-l2": (_hnsw_l2, "year", 2003),
+    "notes": (_edit_notes, "year", 2003),
+    "reordered": (_second_entry_first, "year", 2003),
+}
+
+
+@pytest.mark.parametrize(("edit", "name", "value"), HAND_EDITS.values(), ids=HAND_EDITS)
+def test_an_allowed_edit_of_the_plan_is_applied_end_to_end(tmp_path, edit, name, value):
+    records = [replace(r, uri=f"https://example.com/{r.id}") for r in cli_records(30)]
+    fakes = inspected(FakeFactories(FakeSource(records)))
+    path = tmp_path / DIR / "plan.yaml"
+    plan = load_plan(path)
+    edit(plan)
+    save_plan(plan, path)
+    found = json.loads((tmp_path / DIR / "inspect.json").read_text())
+    found["collections"].append({**found["collections"][0], "ref": "other"})
+    (tmp_path / DIR / "inspect.json").write_text(json.dumps(found))
+    for command in ("check", "copy", "verify"):
+        r = invoke(fakes, command, "--json")
+        assert r.exit_code == 0, (command, r.output)
+    targets = [e.target.name for e in plan.collections]
+    assert sorted(fakes.schema.ensured) == sorted(targets)
+    for target in targets:
+        stored = fakes.writer.stored[(target, None)][to_uuid("id-3")].properties
+        assert stored[name] == value
+        dropped = edit is _drop_uri
+        assert ("uri" in stored) is not dropped
+        assert stored["source_id"] == "id-3"
+
+
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_a_property_name_that_the_client_refuses_is_an_invalid_plan(tmp_path, cmd):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    path = tmp_path / DIR / "plan.yaml"
+    plan = load_plan(path)
+    _prop(plan.collections[0], "year").name = "vector"
+    save_plan(plan, path)
+    r = invoke(fakes, cmd, "--json")
+    assert r.exit_code == 2, r.output
+    errors = json.loads(r.stdout)["errors"]
+    assert [(e["code"], e["message"]) for e in errors] == [
+        ("invalid_name", "property vector: Weaviate reserves the property name vector")
+    ]
+    assert fakes.writer.calls == 0

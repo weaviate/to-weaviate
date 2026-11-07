@@ -19,6 +19,7 @@ from chroma.seed import seed
 from e2e import (
     Result,
     close_weaviate,
+    create_target_collection,
     delete_target_collections,
     weaviate_by_source_id,
     weaviate_compressed,
@@ -41,6 +42,7 @@ __all__ = [
     "KnownFinding",
     "Result",
     "copy_and_verify",
+    "create_target_collection",
     "read_plan",
     "run",
     "start",
