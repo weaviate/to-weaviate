@@ -1,6 +1,7 @@
 from collections import Counter
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from to_weaviate.naming import reserved_suffix, sidecar_word
 from to_weaviate.plan import (
@@ -103,15 +104,62 @@ def _duplicate_findings(entries: list[CollectionPlan]) -> list[Finding]:
     return out
 
 
-def _index_settings(prop: PropertyPlan) -> tuple[object, ...]:
-    """The settings of `prop` that the collection stores."""
-    return (
-        prop.type,
-        prop.tokenization,
-        prop.searchable,
-        prop.filterable,
-        prop.range_filters,
-    )
+# The settings of a property that the collection stores, in message order.
+PROPERTY_SETTINGS = (
+    "type",
+    "tokenization",
+    "searchable",
+    "filterable",
+    "range_filters",
+)
+# Vector fields whose values can hold a URL or a credential, so a message
+# names them without their values.
+UNQUOTED_VECTOR_FIELDS = ("vectorizer",)
+
+
+def _first_difference(
+    first: dict[str, Any], other: dict[str, Any], prefix: str = ""
+) -> tuple[str, Any, Any] | None:
+    """The first field, in field order, whose values differ, with both values.
+
+    Nested mappings are compared field by field; the path joins names by dots.
+    """
+    for key in dict.fromkeys([*first, *other]):
+        a, b = first.get(key), other.get(key)
+        if a == b:
+            continue
+        if isinstance(a, dict) and isinstance(b, dict):
+            found = _first_difference(a, b, f"{prefix}{key}.")
+            if found is not None:
+                return found
+        return f"{prefix}{key}", a, b
+    return None
+
+
+def _vector_difference(first: CollectionPlan, entry: CollectionPlan) -> str:
+    """The first vector setting in which `entry` differs from `first`."""
+    names = [v.name for v in first.target.vectors]
+    others = [v.name for v in entry.target.vectors]
+    if names != others:
+        return (
+            f"vectors {', '.join(names)} in {_describe(first)}, "
+            f"{', '.join(others)} in {_describe(entry)}"
+        )
+    for a, b in zip(first.target.vectors, entry.target.vectors, strict=True):
+        found = _first_difference(a.model_dump(mode="json"), b.model_dump(mode="json"))
+        if found is None:
+            continue
+        field, value_a, value_b = found
+        if field.split(".")[0] in UNQUOTED_VECTOR_FIELDS:
+            return (
+                f"vector {a.name}: {field} differs between {_describe(first)} "
+                f"and {_describe(entry)}"
+            )
+        return (
+            f"vector {a.name}: {field} {value_a} in {_describe(first)}, "
+            f"{value_b} in {_describe(entry)}"
+        )
+    return f"the vectors of {_describe(first)} and {_describe(entry)} differ"
 
 
 def _shared_collection_findings(entries: list[CollectionPlan]) -> list[Finding]:
@@ -133,23 +181,31 @@ def _shared_collection_findings(entries: list[CollectionPlan]) -> list[Finding]:
                     Finding(
                         "conflicting_vectors",
                         key,
-                        f"entries {_describe(first)} and {_describe(entry)} give "
-                        f"collection {key} different vectors; copy creates it with "
-                        "the vectors of the first entry, so give every entry of "
-                        f"{key} the same vectors",
+                        f"{_vector_difference(first, entry)}; copy creates "
+                        f"collection {key} with the vectors of the first entry, "
+                        f"so give every entry of {key} the same vectors",
                     )
                 )
         owners: dict[str, tuple[CollectionPlan, PropertyPlan]] = {}
         for entry in group:
             for prop in entry.target.properties:
                 owner, planned = owners.setdefault(prop.name, (entry, prop))
-                if _index_settings(prop) != _index_settings(planned):
+                field = next(
+                    (
+                        f
+                        for f in PROPERTY_SETTINGS
+                        if getattr(prop, f) != getattr(planned, f)
+                    ),
+                    None,
+                )
+                if field is not None:
                     out.append(
                         Finding(
                             "conflicting_property",
                             key,
-                            f"property {prop.name} has other settings in "
-                            f"{_describe(entry)} than in {_describe(owner)}; give "
+                            f"property {prop.name}: {field} "
+                            f"{getattr(planned, field)} in {_describe(owner)}, "
+                            f"{getattr(prop, field)} in {_describe(entry)}; give "
                             "it the same type and index settings in every entry "
                             f"of {key}",
                         )
