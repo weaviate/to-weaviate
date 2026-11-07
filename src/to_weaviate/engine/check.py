@@ -2,7 +2,7 @@ from collections import Counter
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 
-from to_weaviate.naming import reserved_suffix
+from to_weaviate.naming import reserved_suffix, sidecar_word
 from to_weaviate.plan import (
     DISTANCES,
     CollectionPlan,
@@ -455,6 +455,17 @@ def plan_findings(
                         f"property {prop.name} ends in {suffix}; Weaviate 1.35.20, "
                         "1.36.15, 1.37.5 and later refuse to create a property "
                         "with this suffix",
+                    )
+                )
+            word = sidecar_word(prop.name)
+            if suffix is None and word is not None:
+                warnings.append(
+                    Finding(
+                        "reserved_suffix",
+                        entry.target.name,
+                        f"property {prop.name} has the shape of a migration "
+                        f"directory name (__ and the word {word}); Weaviate 1.39.3 "
+                        "and later refuse to create a property with this shape",
                     )
                 )
             if prop.coerced_from:

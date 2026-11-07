@@ -1,6 +1,11 @@
 import pytest
 
-from to_weaviate.naming import collection_name, property_name
+from to_weaviate.naming import (
+    collection_name,
+    property_name,
+    reserved_suffix,
+    sidecar_word,
+)
 
 COLLECTIONS = [
     ("my-docs", set(), "My_docs"),
@@ -32,6 +37,31 @@ PROPERTIES = [
     ("x_propertyLength", set(), "x_propertyLength_meta"),
     ("x_nullState", set(), "x_nullState_meta"),
     ("max_temp", {"max_temp_meta"}, "max_temp_meta_2"),
+    ("geo__map", set(), "geo__map_meta"),
+    ("doc__backup", set(), "doc__backup_meta"),
+    ("x__reindex_3", set(), "x__reindex_3_meta"),
+    ("a__b_ingest", set(), "a__b_ingest_meta"),
+    ("geo__map", {"geo__map_meta"}, "geo__map_meta_2"),
+    ("geo_map", set(), "geo_map"),
+    ("mapping__x", set(), "mapping__x"),
+    ("__map_x", set(), "__map_x"),
+]
+
+# (name, the role word that makes it sidecar-shaped)
+SIDECAR_NAMES = [
+    ("geo__map", "map"),
+    ("doc__backup", "backup"),
+    ("x__reindex_3", "reindex"),
+    ("a__b_ingest", "ingest"),
+    ("x___map", "map"),
+    ("title__enable_filterable_ingest_3", "ingest"),
+    ("geo_map", None),
+    ("mapping__x", None),
+    ("__map_x", None),
+    ("x__map_", None),
+    ("x__map_3a", None),
+    ("geo__map_meta", None),
+    ("x__reindex_3_meta_2", None),
 ]
 
 
@@ -47,3 +77,16 @@ def test_property_name(source, taken, expected):
     snapshot = set(taken)
     assert property_name(source, taken) == expected
     assert taken == snapshot
+
+
+@pytest.mark.parametrize(("name", "word"), SIDECAR_NAMES)
+def test_sidecar_word_follows_the_server_rule(name, word):
+    assert sidecar_word(name) == word
+
+
+@pytest.mark.parametrize(
+    "key", ["geo__map", "doc__backup", "x__reindex_3", "a__b_ingest"]
+)
+def test_a_drafted_name_is_neither_sidecar_shaped_nor_reserved(key):
+    name = property_name(key, set())
+    assert sidecar_word(name) is None and reserved_suffix(name) is None

@@ -394,3 +394,28 @@ def test_a_url_option_sent_in_another_form_gives_a_warning(url):
             "a fragment; it is sent without them.",
         )
     ]
+
+
+@pytest.mark.parametrize(
+    ("name", "word"),
+    [
+        ("geo__map", "map"),
+        ("doc__backup", "backup"),
+        ("x__reindex_3", "reindex"),
+        ("a__b_ingest", "ingest"),
+    ],
+)
+def test_a_hand_written_sidecar_shaped_property_name_is_a_warning(name, word):
+    properties = [ID_PROPERTY, prop(name), prop("geo_map"), prop("mapping__x")]
+    plan = plan_of(with_target(entry([keep()]), properties=properties))
+    errors, warnings = plan_findings(plan, None, voyage_mapper)
+    assert errors == []
+    assert warnings == [
+        Finding(
+            "reserved_suffix",
+            "Docs",
+            f"property {name} has the shape of a migration directory name (__ and "
+            f"the word {word}); Weaviate 1.39.3 and later refuse to create a "
+            "property with this shape",
+        )
+    ]
