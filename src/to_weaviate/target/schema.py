@@ -157,24 +157,31 @@ def _chain(exc: BaseException) -> list[BaseException]:
     return found
 
 
+def _nearest_grpc_status(exc: Exception) -> str | None:
+    """The status name of the nearest gRPC error in the chain of `exc`, or None.
+
+    The client raises its own error inside the except block of the gRPC
+    error, so the gRPC error is in the chain. Only the nearest gRPC error
+    decides: the client's retry makes each attempt inside the except block of
+    the one before, so a deeper link can be an earlier attempt. After its own
+    retries of UNAVAILABLE, the client raises WeaviateRetryError, or a query
+    error inside the except block of one; that link counts as UNAVAILABLE.
+    """
+    for link in _chain(exc):
+        if isinstance(link, WeaviateRetryError):
+            return "UNAVAILABLE"
+        status = _grpc_status(link)
+        if status is not None:
+            return status
+    return None
+
+
 def transient(exc: Exception) -> float | None:
     if isinstance(exc, WeaviateConnectionError | WeaviateTimeoutError):
         return 0.0
     if isinstance(exc, UnexpectedStatusCodeError) and exc.status_code in RETRY_STATUSES:
         return 0.0
-    # The client raises its own error inside the except block of the gRPC
-    # error, so the gRPC error is in the chain. Only the nearest gRPC error
-    # decides: the client's retry makes each attempt inside the except block of
-    # the one before, so a deeper link can be an earlier attempt. After its own
-    # retries of UNAVAILABLE, the client raises WeaviateRetryError, or a query
-    # error inside the except block of one.
-    for link in _chain(exc):
-        if isinstance(link, WeaviateRetryError):
-            return 0.0
-        status = _grpc_status(link)
-        if status is not None:
-            return 0.0 if status in GRPC_RETRY_STATUSES else None
-    return None
+    return 0.0 if _nearest_grpc_status(exc) in GRPC_RETRY_STATUSES else None
 
 
 def refused_for_size(exc: Exception) -> bool:
@@ -182,13 +189,7 @@ def refused_for_size(exc: Exception) -> bool:
 
     gRPC refuses a message above its size limit with this status.
     """
-    for link in _chain(exc):
-        if isinstance(link, WeaviateRetryError):
-            return False
-        status = _grpc_status(link)
-        if status is not None:
-            return status == "RESOURCE_EXHAUSTED"
-    return False
+    return _nearest_grpc_status(exc) == "RESOURCE_EXHAUSTED"
 
 
 def _property(plan: PropertyPlan) -> Property:

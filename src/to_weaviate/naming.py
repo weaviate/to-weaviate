@@ -1,13 +1,19 @@
 import re
 
-# The server refuses id, _id and _additional, and the client refuses vector.
+# The names that Weaviate 1.40.4 accepts. It stores a collection name with
+# its first letter in upper case and a property name with its first letter
+# in lower case, and compares the stored property name with SERVER_RESERVED.
+# The client refuses the property name vector.
+MAX_COLLECTION_NAME = 255
+MAX_PROPERTY_NAME = 231
+COLLECTION_NAME_RULE = f"^[A-Z][_0-9A-Za-z]{{0,{MAX_COLLECTION_NAME - 1}}}$"
+PROPERTY_NAME_RULE = f"^[_A-Za-z][_0-9A-Za-z]{{0,{MAX_PROPERTY_NAME - 1}}}$"
+SERVER_RESERVED = ("id", "_id", "_additional")
+CLIENT_RESERVED = ("vector",)
 # The draft uses document, source_id and uri itself.
 RESERVED_PROPERTIES = frozenset(
-    {"id", "_id", "_additional", "vector", "document", "source_id", "uri"}
+    {*SERVER_RESERVED, *CLIENT_RESERVED, "document", "source_id", "uri"}
 )
-# Weaviate 1.40.4 refuses a longer property name or collection name.
-MAX_PROPERTY_NAME = 231
-MAX_COLLECTION_NAME = 255
 
 # Weaviate refuses to create a property whose name ends in one of these:
 # reservedPropertyNameSuffixes in entities/schema/validation.go, v1.40.4.
@@ -28,15 +34,6 @@ SIDECAR_ROLE_WORDS = ("reindex", "ingest", "backup", "map")
 _DIGITS = "0123456789"
 
 _INVALID = re.compile(r"[^A-Za-z0-9_]")
-
-# The names that Weaviate 1.40.4 accepts. It stores a collection name with
-# its first letter in upper case and a property name with its first letter
-# in lower case, and compares the stored property name with SERVER_RESERVED.
-# The client refuses the property name vector.
-COLLECTION_NAME_RULE = "^[A-Z][_0-9A-Za-z]{0,254}$"
-PROPERTY_NAME_RULE = "^[_A-Za-z][_0-9A-Za-z]{0,230}$"
-SERVER_RESERVED = ("id", "_id", "_additional")
-CLIENT_RESERVED = ("vector",)
 
 
 def collection_name_problem(name: str) -> str | None:

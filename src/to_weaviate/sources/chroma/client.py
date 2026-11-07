@@ -176,14 +176,20 @@ class ChromaClient:
             f"/collections/{_seg(collection_id)}"
         )
 
-    def _collection_request(self, method: str, path: str, **kwargs: Any) -> Any:
-        """`_request` on a collection path. A 404 means the collection id is gone."""
+    def _hinted_request(
+        self, status: int, hint: str, method: str, path: str, **kwargs: Any
+    ) -> Any:
+        """`_request`, whose ChromaError of HTTP `status` carries `hint`."""
         try:
             return self._request(method, path, **kwargs)
         except ChromaError as exc:
-            if exc.status != 404:
+            if exc.status != status:
                 raise
-            raise ChromaError(404, exc.message, hint=COLLECTION_GONE_HINT) from exc
+            raise ChromaError(status, exc.message, hint=hint) from exc
+
+    def _collection_request(self, method: str, path: str, **kwargs: Any) -> Any:
+        """`_request` on a collection path. A 404 means the collection id is gone."""
+        return self._hinted_request(404, COLLECTION_GONE_HINT, method, path, **kwargs)
 
     def identity(self) -> dict[str, Any]:
         result: dict[str, Any] = self._request("GET", "/api/v2/auth/identity")
@@ -191,12 +197,7 @@ class ChromaClient:
 
     def databases(self, tenant: str) -> list[str]:
         path = f"/api/v2/tenants/{_seg(tenant)}/databases"
-        try:
-            rows = self._request("GET", path)
-        except ChromaError as exc:
-            if exc.status != 403:
-                raise
-            raise ChromaError(403, exc.message, hint=DATABASES_FORBIDDEN_HINT) from exc
+        rows = self._hinted_request(403, DATABASES_FORBIDDEN_HINT, "GET", path)
         return [row["name"] for row in rows]
 
     def collections(self, tenant: str, database: str) -> list[dict[str, Any]]:
