@@ -625,6 +625,35 @@ def test_copy_stops_when_the_target_refuses_the_schema():
     assert source.read_calls == 0
 
 
+def test_copy_refuses_a_module_that_the_target_lacks_before_it_creates_anything(
+    tmp_path,
+):
+    source = FakeSource(cli_records(10))
+    fakes = inspected(
+        FakeFactories(source, schema=FakeSchema(modules=["text2vec-weaviate"])),
+        "--vectors",
+        "embed",
+        "--vectorizer",
+        "text2vec-openai",
+    )
+    r = invoke(fakes, "copy", "--json", OPENAI_API_KEY="openai-key")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["hint"]) == (
+        "invalid_plan",
+        "Edit plan.yaml, or run to-weaviate inspect chroma --force to draft it again.",
+    )
+    assert [(e["code"], e["message"]) for e in d["errors"]] == [
+        (
+            "module_not_enabled",
+            "module text2vec-openai is not enabled on the target; enabled "
+            "modules: text2vec-weaviate",
+        )
+    ]
+    assert fakes.schema.ensured == [] and source.read_calls == 0
+    assert not (tmp_path / DIR / "state.sqlite").exists()
+
+
 def test_hint_of_a_refused_schema_tells_to_edit_the_plan():
     refused = SchemaRejected("'_additional' is a reserved property name")
     fakes = inspected(

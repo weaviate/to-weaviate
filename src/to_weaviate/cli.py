@@ -918,8 +918,8 @@ def _copy(
     keys = {collection_key(name) for name in selected}
     errors, warnings = plan_findings(plan, inspected, vectorizer_for)
     errors = [f for f in errors if collection_key(f.collection) in keys]
+    warnings = [w for w in warnings if collection_key(w.collection) in keys]
     if errors:
-        warnings = [w for w in warnings if collection_key(w.collection) in keys]
         raise _plan_errors(errors, warnings)
     env = load_env(Path.cwd())
     source_settings = chroma_settings(env)
@@ -930,6 +930,13 @@ def _copy(
     with _copy_lock(directory):
         source = factories.source(source_settings)
         schema = factories.schema(target_settings)
+        module_errors = [
+            f
+            for f in module_findings(plan, schema.modules())
+            if collection_key(f.collection) in keys
+        ]
+        if module_errors:
+            raise _plan_errors(module_errors, warnings)
         writer = factories.writer(target_settings, consistency)
         reader = factories.reader(target_settings)
         source_names = {c.ref: c.name for c in inspected.values()}
