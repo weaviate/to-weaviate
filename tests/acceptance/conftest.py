@@ -136,11 +136,14 @@ def run(args: list[str], workdir: Path, env: dict[str, str] | None = None) -> Re
 
 
 def start(
-    args: list[str], workdir: Path, env: dict[str, str] | None = None
+    args: list[str], workdir: Path, stdout: Path, env: dict[str, str] | None = None
 ) -> subprocess.Popen[bytes]:
-    """Start the installed to-weaviate as `run` does, without waiting for it."""
+    """Start the installed to-weaviate as `run` does, without waiting for it.
+
+    Its stdout goes to the file `stdout`.
+    """
     cleared = dict.fromkeys(CLEARED_VARIABLES, "")
-    return e2e.start(args, workdir, {**cleared, **(env or {})})
+    return e2e.start(args, workdir, stdout, {**cleared, **(env or {})})
 
 
 @pytest.fixture(scope="session", autouse=True)

@@ -65,19 +65,20 @@ def run(args: list[str], workdir: Path, env: dict[str, str] | None = None) -> Re
 
 
 def start(
-    args: list[str], workdir: Path, env: dict[str, str] | None = None
+    args: list[str], workdir: Path, stdout: Path, env: dict[str, str] | None = None
 ) -> subprocess.Popen[bytes]:
     """Start the installed to-weaviate like `run` does, without waiting for it.
 
-    Its stdout and stderr are discarded.
+    Its stdout goes to the file `stdout`; its stderr is discarded.
     """
-    return subprocess.Popen(
-        [str(COMMAND), *args, "--json", "--dir", str(workdir)],
-        cwd=workdir,
-        env={**os.environ, **(env or {})},
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    with stdout.open("wb") as handle:
+        return subprocess.Popen(
+            [str(COMMAND), *args, "--json", "--dir", str(workdir)],
+            cwd=workdir,
+            env={**os.environ, **(env or {})},
+            stdout=handle,
+            stderr=subprocess.DEVNULL,
+        )
 
 
 def _weaviate() -> weaviate.WeaviateClient:

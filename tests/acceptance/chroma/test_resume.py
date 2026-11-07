@@ -30,7 +30,8 @@ def test_copy_resumes_after_the_process_is_killed(seeded, tmp_path):
     assert r.exit_code == 0, r
     total = count("resume")
 
-    process = start(["copy"], tmp_path)
+    first = tmp_path / "first-copy.json"
+    process = start(["copy"], tmp_path, first)
     try:
         deadline = time.monotonic() + KILL_DEADLINE_SECONDS
         copied = 0
@@ -40,11 +41,16 @@ def test_copy_resumes_after_the_process_is_killed(seeded, tmp_path):
                 if copied >= total * KILL_AFTER:
                     break
             time.sleep(POLL_SECONDS)
-        if process.poll() is not None:
+        if process.returncode == 0:
             pytest.fail(
-                f"copy exited {process.returncode} after copying {copied} of "
-                f"{total} records, before it could be killed; raise "
-                "RESUME_COUNT in tests/acceptance/chroma/seed.py"
+                f"copy finished after copying {copied} of {total} records, "
+                "before it could be killed; raise RESUME_COUNT in "
+                "tests/acceptance/chroma/seed.py"
+            )
+        if process.returncode is not None:
+            pytest.fail(
+                f"copy exited {process.returncode} before it could be killed:\n"
+                + first.read_text(encoding="utf-8")
             )
         assert copied >= total * KILL_AFTER, f"copied {copied} of {total} in time"
         process.send_signal(signal.SIGKILL)
