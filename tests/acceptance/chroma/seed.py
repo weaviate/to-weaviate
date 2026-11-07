@@ -31,6 +31,7 @@ COLLECTIONS = (
     "docs-ip",
     "tenant-a",
     "tenant-b",
+    "rejects",
 )
 CATEGORIES = ("guide", "reference", "tutorial")
 TAGS = ("red", "green", "blue", "small", "large")
@@ -153,6 +154,24 @@ def tenant_records(rng: random.Random, tenant: str, count: int) -> list[Record]:
     return records
 
 
+def rejects(rng: random.Random) -> list[Record]:
+    """301 records of 4 dimensions; the int key `rank` holds 300.5 in rej-300.
+
+    rej-300 is the first record of the second page, so an inspection of the
+    first page only sees int values. rej-005 has no document.
+    """
+    return [
+        Record(
+            id=f"rej-{i:03d}",
+            embedding=_vector(rng, 4),
+            document=None if i == 5 else f"Record {i} of the rejects collection.",
+            metadata={"rank": 300.5 if i == 300 else i},
+            uri=f"https://example.com/rejects/{i}",
+        )
+        for i in range(301)
+    ]
+
+
 def _recreate(
     http: httpx.Client, name: str, space: str | None, records: list[Record]
 ) -> None:
@@ -217,6 +236,7 @@ def seed() -> None:
         _recreate(http, "docs-ip", "ip", docs_ip(rng))
         _recreate(http, "tenant-a", "cosine", tenant_records(rng, "a", 30))
         _recreate(http, "tenant-b", "cosine", tenant_records(rng, "b", 20))
+        _recreate(http, "rejects", "cosine", rejects(rng))
 
 
 def _extra_tiny_l2(start: int, count: int) -> list[Record]:
