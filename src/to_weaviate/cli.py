@@ -239,7 +239,7 @@ def _as_cli_error(exc: Exception) -> CliError:
             return CliError(
                 "source_unreachable", f"Chroma could not be reached: {exc}", CHROMA_HINT
             )
-        return CliError("source_unreachable", str(exc), CHROMA_HINT)
+        return CliError("source_unreachable", str(exc), exc.hint or CHROMA_HINT)
     if isinstance(exc, httpx.TransportError):
         # ChromaClient wraps its own transport errors in ChromaError, so a raw
         # one comes from the Weaviate client.

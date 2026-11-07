@@ -13,13 +13,25 @@ CHROMA_MAX_PAGE = 300
 COLLECTIONS_PAGE = 1000
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 MAX_MESSAGE_CHARS = 500
+MAX_CONTENT_TYPE_CHARS = 100
+REDIRECT_HINT = "Set CHROMA_URL to the address the server redirects to."
+NOT_JSON_HINT = (
+    "Check that CHROMA_URL points at the Chroma API and not at a proxy or a web page."
+)
 
 
 class ChromaError(Exception):
-    """A Chroma request failed. `status` is None for a network failure."""
+    """A Chroma request failed. `status` is None for a network failure.
+
+    `hint` is None when the caller's general hint applies.
+    """
 
     def __init__(
-        self, status: int | None, message: str, retry_after: float | None = None
+        self,
+        status: int | None,
+        message: str,
+        retry_after: float | None = None,
+        hint: str | None = None,
     ) -> None:
         super().__init__(
             message if status is None else f"Chroma returned HTTP {status}: {message}"
@@ -27,6 +39,7 @@ class ChromaError(Exception):
         self.status = status
         self.message = message
         self.retry_after = retry_after
+        self.hint = hint
 
 
 def _message(response: httpx.Response, secrets: list[str]) -> str:
@@ -45,6 +58,28 @@ def _message(response: httpx.Response, secrets: list[str]) -> str:
         if isinstance(found, str) and found:
             text = found
     return redact(text, secrets)[:MAX_MESSAGE_CHARS]
+
+
+def _redirect_message(response: httpx.Response, secrets: list[str]) -> str:
+    """The scheme, host and port that `response` redirects to.
+
+    The userinfo, path, query and fragment of the `Location` are left out.
+    httpx raises RemoteProtocolError for a `Location` that is not a valid
+    URL before the response gets here.
+    """
+    location = response.headers.get("Location")
+    if not location:
+        return "a redirect without a Location header"
+    url = response.request.url.join(location)
+    return redact(f"a redirect to {url.scheme}://{url.netloc.decode()}", secrets)
+
+
+def _not_json_message(response: httpx.Response, secrets: list[str]) -> str:
+    content_type = response.headers.get("Content-Type")
+    if content_type is None:
+        return "the answer is not JSON (no Content-Type)"
+    shown = redact(content_type, secrets)[:MAX_CONTENT_TYPE_CHARS]
+    return f"the answer is not JSON (Content-Type: {shown})"
 
 
 def _retry_after(response: httpx.Response) -> float | None:
@@ -79,11 +114,14 @@ class ChromaClient:
             if settings.token_header.lower() == "authorization":
                 value = f"Bearer {value}"
             headers[settings.token_header] = value
+        # On a redirect to another host, httpx drops only an Authorization
+        # header, so a followed redirect would send another key header there.
         self._http = httpx.Client(
             base_url=settings.url.rstrip("/"),
             headers=headers,
             timeout=60,
             transport=transport,
+            follow_redirects=False,
         )
         self._sleep = sleep
         self._secrets = [
@@ -104,7 +142,20 @@ class ChromaClient:
                     _message(response, self._secrets),
                     _retry_after(response),
                 )
-            return response.json()
+            if response.status_code >= 300:
+                raise ChromaError(
+                    response.status_code,
+                    _redirect_message(response, self._secrets),
+                    hint=REDIRECT_HINT,
+                )
+            try:
+                return response.json()
+            except ValueError:
+                raise ChromaError(
+                    response.status_code,
+                    _not_json_message(response, self._secrets),
+                    hint=NOT_JSON_HINT,
+                ) from None
 
         try:
             return with_retry(call, _transient, sleep=self._sleep)

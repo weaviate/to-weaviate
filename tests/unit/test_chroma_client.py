@@ -275,6 +275,81 @@ def test_collections_reads_all_pages():
     assert seen[0].url.path == "/api/v2/tenants/t/databases/d/collections"
 
 
+REDIRECT_HINT = "Set CHROMA_URL to the address the server redirects to."
+NOT_JSON_HINT = (
+    "Check that CHROMA_URL points at the Chroma API and not at a proxy or a web page."
+)
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "message"),
+    [
+        (
+            301,
+            {"Location": "https://user:MADE-UP@Chroma.Example:8443/v2?token=T#frag"},
+            "a redirect to https://chroma.example:8443",
+        ),
+        (302, {"Location": "/login?next=%2F"}, "a redirect to http://chroma.test"),
+        (300, {}, "a redirect without a Location header"),
+    ],
+)
+def test_redirect_raises_chroma_error_without_following_it(status, headers, message):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(status, headers=headers)
+
+    client, sleeps = make(handler)
+    with pytest.raises(ChromaError) as e:
+        client.identity()
+    assert e.value.status == status
+    assert str(e.value) == f"Chroma returned HTTP {status}: {message}"
+    assert e.value.hint == REDIRECT_HINT
+    assert len(calls) == 1 and sleeps == []
+
+
+def test_answer_that_is_not_json_raises_chroma_error():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, html="<html><body>Sign in</body></html>")
+
+    client, sleeps = make(handler)
+    with pytest.raises(ChromaError) as e:
+        client.identity()
+    assert e.value.status == 200
+    assert str(e.value) == (
+        "Chroma returned HTTP 200: the answer is not JSON "
+        "(Content-Type: text/html; charset=utf-8)"
+    )
+    assert e.value.hint == NOT_JSON_HINT
+    assert len(calls) == 1 and sleeps == []
+
+
+def test_answer_that_is_not_json_names_a_missing_content_type():
+    client, _ = make(lambda r: httpx.Response(204))
+    with pytest.raises(ChromaError) as e:
+        client.identity()
+    assert e.value.message == "the answer is not JSON (no Content-Type)"
+
+
+def test_content_type_of_an_answer_that_is_not_json_is_redacted_then_cut():
+    # A cut before the redaction would keep the first 15 characters of the key.
+    content_type = "text/html; x=" + "a" * 72 + CUT_KEY + "b" * 100
+    client, _ = make(
+        lambda r: httpx.Response(200, headers={"Content-Type": content_type}),
+        api_key=CUT_KEY,
+    )
+    with pytest.raises(ChromaError) as e:
+        client.identity()
+    shown = "text/html; x=" + "a" * 72 + "***" + "b" * 12
+    assert e.value.message == f"the answer is not JSON (Content-Type: {shown})"
+    slices = [CUT_KEY[i : i + 8] for i in range(len(CUT_KEY) - 7)]
+    assert not [s for s in slices if s in str(e.value)]
+
+
 def test_close_closes_the_http_client():
     client, _ = make(lambda request: httpx.Response(200, json=1))
     client.close()

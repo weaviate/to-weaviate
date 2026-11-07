@@ -11,9 +11,11 @@ from fakes import (
     FakeSchema,
     FakeSource,
     FakeWriter,
+    cli_env,
     cli_records,
     invoke,
 )
+from typer.testing import CliRunner
 from weaviate.exceptions import (
     AuthenticationFailedError,
     InsufficientPermissionsError,
@@ -25,10 +27,11 @@ from weaviate.exceptions import (
     WeaviateTimeoutError,
 )
 
+from to_weaviate import cli
 from to_weaviate.cli import app
 from to_weaviate.output import ERROR_EXIT, CliError
 from to_weaviate.plan import load_plan, save_plan
-from to_weaviate.sources.chroma.client import ChromaError
+from to_weaviate.sources.chroma.client import ChromaClient, ChromaError
 from to_weaviate.target.schema import collection_kwargs
 from to_weaviate.target.writer import WeaviateWriter
 
@@ -706,6 +709,38 @@ def test_source_errors_map_to_codes(error, code, named):
     assert r.exit_code == ERROR_EXIT[code]
     d = json.loads(r.stdout)
     assert (d["status"], d["code"]) == ("error", code) and named in d["hint"]
+
+
+@pytest.mark.parametrize(
+    ("response", "named", "hint"),
+    [
+        (
+            httpx.Response(301, headers={"Location": "https://chroma.example/v2"}),
+            "HTTP 301: a redirect to https://chroma.example",
+            "Set CHROMA_URL to the address the server redirects to.",
+        ),
+        (
+            httpx.Response(200, html="<html><body>Sign in</body></html>"),
+            "HTTP 200: the answer is not JSON (Content-Type: text/html",
+            "Check that CHROMA_URL points at the Chroma API and not at a proxy or "
+            "a web page.",
+        ),
+    ],
+    ids=["redirect", "html"],
+)
+def test_chroma_answer_that_is_not_json_is_source_unreachable(
+    monkeypatch, response, named, hint
+):
+    def client(settings):
+        transport = httpx.MockTransport(lambda request: response)
+        return ChromaClient(settings, transport=transport)
+
+    monkeypatch.setattr(cli, "ChromaClient", client)
+    r = CliRunner().invoke(app, ["inspect", "chroma", "--json"], env=cli_env())
+    assert r.exit_code == 4, r.output
+    d = json.loads(r.stdout)
+    assert (d["status"], d["code"], d["hint"]) == ("error", "source_unreachable", hint)
+    assert named in d["message"]
 
 
 @pytest.mark.parametrize(
