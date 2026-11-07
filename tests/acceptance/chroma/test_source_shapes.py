@@ -1,4 +1,13 @@
-from chroma.seed import BULK, BULK_COUNT, ODD_KEYS, RENAMED_COLLECTIONS, records
+import json
+
+from chroma.seed import (
+    BULK,
+    BULK_COUNT,
+    EDGE,
+    ODD_KEYS,
+    RENAMED_COLLECTIONS,
+    records,
+)
 from conftest import (
     copy_and_verify,
     read_plan,
@@ -40,10 +49,17 @@ DRAFTED_NAMES = {
 }
 # Weaviate 1.40.4 returns an int above 2**53 rounded to a double.
 STORED_INTS = {2**53 + 1: 2**53}
+# copy rejects an int whose double is 2**63: the server's check of it depends
+# on its CPU.
+REFUSED_INT = 2**63 - 1
+INT_REJECT = (
+    f"int_edge: int {REFUSED_INT} cannot be stored: Weaviate keeps ints as "
+    "doubles and refuses this value; type the property text"
+)
 
 
 def test_values_at_the_limits_of_their_type_are_copied(seeded, tmp_path):
-    r = run(["inspect", "chroma", "--collection", "edge"], tmp_path)
+    r = run(["inspect", "chroma", "--collection", EDGE], tmp_path)
     assert r.exit_code == 0, r
     properties = read_plan(tmp_path)["collections"][0]["target"]["properties"]
     names = {p["source_key"]: p["name"] for p in properties}
@@ -52,13 +68,31 @@ def test_values_at_the_limits_of_their_type_are_copied(seeded, tmp_path):
     assert r.exit_code == 0, r
     warnings = sorted((w["code"], w["message"].split()[1]) for w in r.data["warnings"])
     assert warnings == [("coerced_keys", "flag"), ("coerced_keys", "num")], r
+    source = records(EDGE, limit=40)
+    refused = {r.id for r in source if r.metadata["int_edge"] == REFUSED_INT}
+    assert len(refused) == 8
     r = run(["copy"], tmp_path)
-    assert r.exit_code == 0, r
-    assert r.data["collections"][0]["rejects"] == 0, r
+    assert r.exit_code == 1 and r.data["code"] == "rejects", r
+    row = r.data["collections"][0]
+    assert (row["copied"], row["rejects"]) == (32, 8), r
+    lines = (tmp_path / "rejects.jsonl").read_text(encoding="utf-8").splitlines()
+    found = [json.loads(line) for line in lines]
+    assert {f["source_id"] for f in found} == refused
+    assert {f["reason"] for f in found} == {INT_REJECT}
     r = run(["verify", "--sample", "10000"], tmp_path)
-    assert r.exit_code == 0, r
-    for record in records("edge", limit=40):
+    assert r.exit_code == 1 and r.data["code"] == "verification_failed", r
+    checks = {c["name"]: c for c in r.data["checks"]}
+    assert checks["count"]["detail"].startswith("source count 40, target count 32;")
+    ids = checks["ids"]["detail"]
+    assert ids.startswith("missing 8, extra 0; missing ids "), ids
+    assert set(json.loads(ids.partition("missing ids ")[2])) == refused
+    assert checks["records"]["passed"], checks["records"]
+    assert "rejects skipped 8, differing 0" in checks["records"]["detail"]
+    for record in source:
         found = weaviate_by_source_id("Edge", record.id)
+        if record.id in refused:
+            assert found is None, record.id
+            continue
         assert found is not None, record.id
         stored = found.properties
         meta = record.metadata

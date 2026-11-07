@@ -28,7 +28,8 @@ LARGE_ADD_BATCH = 5000
 RESUME_COUNT = 8000
 TOPICS = ("rivers", "mountains", "cities", "forests", "deserts", "oceans")
 TEST_URL = "http://localhost:8001"
-# Every collection that `seed` makes, in the order it makes them.
+# The collections that `seed` makes and that copy without a reject, in the
+# order it makes them. It also makes EDGE and BULK.
 COLLECTIONS = (
     "docs-cosine",
     "tiny.l2",
@@ -40,7 +41,6 @@ COLLECTIONS = (
     "openai-proxy",
     "resume",
     "empty",
-    "edge",
     "Mixed-Case",
     "mixed-case",
     "1-leading-digit",
@@ -48,6 +48,9 @@ COLLECTIONS = (
 )
 # Collections whose names need a change for Weaviate, made in this order.
 RENAMED_COLLECTIONS = ("Mixed-Case", "mixed-case", "1-leading-digit", "class")
+# Values at the limits of their type. Its records with the int 2**63 - 1 are
+# rejects by design, so it is not in COLLECTIONS.
+EDGE = "edge"
 # The large collection. seed makes it, but it is not in COLLECTIONS, so the
 # test that copies every collection does not copy it.
 BULK = "bulk"
@@ -207,7 +210,8 @@ def resume(rng: random.Random) -> list[Record]:
 
 
 # Values at the limits of their type. Chroma returns -0.0 as 0.0. Weaviate
-# 1.40.4 returns an int above 2**53 rounded to a double.
+# 1.40.4 returns an int above 2**53 rounded to a double. copy rejects
+# 2**63 - 1, whose double is 2**63.
 INT_EDGES = (0, -1, 2**53 + 1, 2**63 - 1, -(2**63))
 FLOAT_EDGES = (1e308, -1e308, -0.0, 5e-324, 0.1)
 FLAGS = (True, False, "true", "false")
@@ -407,7 +411,7 @@ def _collection_id(http: httpx.Client, name: str) -> str:
 
 
 def seed() -> None:
-    """Delete and recreate the COLLECTIONS and BULK on the test server."""
+    """Delete and recreate the COLLECTIONS, EDGE and BULK on the test server."""
     rng = random.Random(0)
     with _test_server() as http:
         _recreate(http, "docs-cosine", "cosine", docs_cosine(rng))
@@ -422,7 +426,7 @@ def seed() -> None:
         )
         _recreate(http, "resume", "cosine", resume(rng))
         _recreate(http, "empty", "cosine", [])
-        _recreate(http, "edge", "cosine", edge(rng))
+        _recreate(http, EDGE, "cosine", edge(rng))
         for name in RENAMED_COLLECTIONS:
             _recreate(http, name, "cosine", renamed(rng, name))
         _recreate(http, BULK, "cosine", bulk(rng))
@@ -500,4 +504,4 @@ if __name__ == "__main__":
         seed()
     except (ValueError, httpx.HTTPError) as exc:
         sys.exit(f"seed.py: {exc}")
-    print(f"Seeded {', '.join([*COLLECTIONS, BULK])}.")
+    print(f"Seeded {', '.join([*COLLECTIONS, EDGE, BULK])}.")
