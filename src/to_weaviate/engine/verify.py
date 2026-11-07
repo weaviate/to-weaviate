@@ -173,6 +173,10 @@ def verify_ids(diff: IdDiff, entry: CollectionPlan) -> Check:
         detail += f"; missing ids {_quoted(diff.missing_sample)}"
     if diff.extra_sample:
         detail += f"; extra ids {_quoted(diff.extra_sample)}"
+    if diff.missing:
+        detail += f"; {TARGET_BELOW_SOURCE}"
+    if diff.extra:
+        detail += f"; {TARGET_ABOVE_SOURCE}"
     return _check("ids", entry, diff.missing == diff.extra == 0, detail)
 
 

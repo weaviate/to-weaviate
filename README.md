@@ -139,9 +139,12 @@ and `report.json`.
 
 `copy` reads a live source by position. A record deleted from the source
 during a copy can make `copy` skip other records. Run a full `verify` after
-writes to the source have stopped. `verify --quick` skips the id comparison,
-so when the counts match it finds a missing record only if the sample holds
-that record.
+writes to the source have stopped. When the ids differ, the ids check names
+the fix, as the count check does. `verify --quick` skips the id comparison
+and compares the counts only, so it cannot see a missing record that an
+extra one cancels, such as an object whose source record was deleted; it
+finds a missing record only if the sample holds that record. Run the full
+`verify` after the last copy of a source that changed.
 
 Weaviate stores an `int` property as a double, so an int above 2**53 in
 magnitude is stored rounded, and `verify` compares the rounded value. An

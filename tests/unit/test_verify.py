@@ -222,6 +222,40 @@ def test_verify_ids_passes_only_without_differences():
         assert text in check.detail
 
 
+COPY_AGAIN = (
+    "run to-weaviate copy again. If the counts still differ, records were "
+    "skipped or rejected: read rejects.jsonl. Rejects are final for this "
+    "directory. After fixing the cause, copy plan.yaml and inspect.json to a "
+    "new --dir and run to-weaviate copy there; objects already in Weaviate are "
+    "written again unchanged."
+)
+NO_REMOVE = (
+    "the target holds objects whose source records were deleted. This version "
+    "has no command that removes them."
+)
+
+
+@pytest.mark.parametrize(
+    ("diff", "detail"),
+    [
+        (IdDiff(0, 0, [], []), "missing 0, extra 0"),
+        (
+            IdDiff(1, 0, ["a"], []),
+            f'missing 1, extra 0; missing ids ["a"]; {COPY_AGAIN}',
+        ),
+        (IdDiff(0, 1, [], ["b"]), f'missing 0, extra 1; extra ids ["b"]; {NO_REMOVE}'),
+        (
+            IdDiff(1, 1, ["a"], ["b"]),
+            f'missing 1, extra 1; missing ids ["a"]; extra ids ["b"]; {COPY_AGAIN}; '
+            f"{NO_REMOVE}",
+        ),
+    ],
+    ids=["none", "missing", "extra", "both"],
+)
+def test_id_diff_detail_names_the_fix(diff, detail):
+    assert verify_ids(diff, ENTRY).detail == detail
+
+
 def test_records_match():
     records = make_records(10)
     check = records_check(records, ENTRY, converted(records, ENTRY))

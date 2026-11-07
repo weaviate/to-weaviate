@@ -24,6 +24,7 @@ from fakes import (
 from typer.testing import Result
 from weaviate.exceptions import InsufficientPermissionsError, WeaviateBatchError
 
+from to_weaviate.engine.verify import TARGET_ABOVE_SOURCE, TARGET_BELOW_SOURCE
 from to_weaviate.ids import to_uuid
 from to_weaviate.lock import Locked, exclusive_lock
 from to_weaviate.plan import (
@@ -2104,7 +2105,9 @@ def test_an_object_that_weaviate_refuses_is_a_reject_with_its_message(tmp_path):
     assert r.exit_code == 1, r.output
     checks = {c["name"]: c for c in json.loads(r.stdout)["checks"]}
     assert not checks["count"]["passed"]
-    assert checks["ids"]["detail"] == 'missing 1, extra 0; missing ids ["id-7"]'
+    assert checks["ids"]["detail"] == (
+        f'missing 1, extra 0; missing ids ["id-7"]; {TARGET_BELOW_SOURCE}'
+    )
 
 
 def test_the_rejects_hint_says_how_to_copy_a_rejected_record_again():
@@ -2206,7 +2209,8 @@ def test_a_record_deleted_during_the_copy_shifts_another_one_past_the_cursor():
     assert r.exit_code == 1, r.output
     checks = {c["name"]: c for c in json.loads(r.stdout)["checks"]}
     assert checks["ids"]["detail"] == (
-        'missing 1, extra 1; missing ids ["id-200"]; extra ids ["id-150"]'
+        'missing 1, extra 1; missing ids ["id-200"]; extra ids ["id-150"]; '
+        f"{TARGET_BELOW_SOURCE}; {TARGET_ABOVE_SOURCE}"
     )
 
 

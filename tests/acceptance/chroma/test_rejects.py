@@ -4,6 +4,8 @@ import pytest
 from chroma.seed import count
 from conftest import run, weaviate_by_source_id, weaviate_count
 
+from to_weaviate.engine.verify import TARGET_BELOW_SOURCE
+
 TARGET = "Rejects"
 # (inspect options, rejected source id, reason). Chroma accepts both records:
 # a float under a key that holds ints elsewhere, and a record without a
@@ -44,4 +46,6 @@ def test_a_record_that_cannot_be_written_is_a_reject(
     assert r.exit_code == 1 and r.data["code"] == "verification_failed", r
     checks = {c["name"]: c for c in r.data["checks"]}
     assert not checks["count"]["passed"]
-    assert checks["ids"]["detail"] == f'missing 1, extra 0; missing ids ["{source_id}"]'
+    assert checks["ids"]["detail"] == (
+        f'missing 1, extra 0; missing ids ["{source_id}"]; {TARGET_BELOW_SOURCE}'
+    )
