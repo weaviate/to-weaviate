@@ -5,7 +5,13 @@ import httpx
 import pytest
 
 from to_weaviate.settings import ChromaSettings
-from to_weaviate.sources.chroma.client import CHROMA_MAX_PAGE, ChromaClient, ChromaError
+from to_weaviate.sources.chroma.client import (
+    CHROMA_MAX_PAGE,
+    COLLECTION_GONE_HINT,
+    DATABASES_FORBIDDEN_HINT,
+    ChromaClient,
+    ChromaError,
+)
 
 
 def settings(**kw):
@@ -448,3 +454,44 @@ def test_transport_errors_after_the_retries_raise_chroma_error():
     assert e.value.status is None and isinstance(e.value.__cause__, httpx.ConnectError)
     assert str(e.value) == "ConnectError: down"
     assert len(calls) == 6 and len(sleeps) == 5
+
+
+def _answer(status: int):
+    def handler(request):
+        return httpx.Response(status, json={"message": "no"})
+
+    return handler
+
+
+def test_a_403_on_the_database_list_names_the_database_settings():
+    client, _ = make(_answer(403))
+    with pytest.raises(ChromaError) as info:
+        client.databases("t")
+    assert (info.value.status, info.value.hint) == (403, DATABASES_FORBIDDEN_HINT)
+
+
+@pytest.mark.parametrize("call", ["count", "get", "query"])
+def test_a_404_on_a_collection_says_to_inspect_again(call):
+    client, _ = make(_answer(404))
+    calls = {
+        "count": lambda: client.count("t", "d", "c"),
+        "get": lambda: client.get("t", "d", "c", limit=1, offset=0, include=[]),
+        "query": lambda: client.query("t", "d", "c", embedding=[1.0], n_results=1),
+    }
+    with pytest.raises(ChromaError) as info:
+        calls[call]()
+    assert (str(info.value), info.value.hint) == (
+        "Chroma returned HTTP 404: no",
+        COLLECTION_GONE_HINT,
+    )
+
+
+def test_other_answers_keep_the_general_hint():
+    client, _ = make(_answer(404))
+    with pytest.raises(ChromaError) as info:
+        client.databases("t")
+    assert info.value.hint is None
+    client, _ = make(_answer(403))
+    with pytest.raises(ChromaError) as info:
+        client.count("t", "d", "c")
+    assert info.value.hint is None

@@ -237,7 +237,10 @@ def _as_cli_error(exc: Exception) -> CliError:
         return CliError("invalid_state", str(exc), UNREADABLE_STATE_HINT)
     if isinstance(exc, ChromaError):
         if exc.status in (401, 403):
-            return _refused("Chroma", "CHROMA_API_KEY", exc.status == 403)
+            refused = _refused("Chroma", "CHROMA_API_KEY", exc.status == 403)
+            if exc.hint is not None:
+                refused.hint = exc.hint
+            return refused
         if exc.status is None:
             return CliError(
                 "source_unreachable", f"Chroma could not be reached: {exc}", CHROMA_HINT
