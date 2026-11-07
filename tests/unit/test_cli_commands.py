@@ -1074,9 +1074,24 @@ def test_copy_refuses_two_entries_of_one_source(tmp_path, names):
 
 # (URL of the first run, URL of the resume, WEAVIATE_GRPC_URL, stored host)
 SAME_URLS = [
-    ("http://localhost:8099", "HTTP://LocalHost:8099", None, "localhost:8099"),
-    ("http://localhost:8099", "http://localhost:8099/", None, "localhost:8099"),
-    ("http://localhost:8099", "http://localhost.:8099", None, "localhost:8099"),
+    (
+        "http://localhost:8099",
+        "HTTP://LocalHost:8099",
+        "http://localhost:50099",
+        "localhost:8099",
+    ),
+    (
+        "http://localhost:8099",
+        "http://localhost:8099/",
+        "http://localhost:50099",
+        "localhost:8099",
+    ),
+    (
+        "http://localhost:8099",
+        "http://localhost.:8099",
+        "http://localhost:50099",
+        "localhost:8099",
+    ),
     (
         "http://weaviate.test",
         "http://weaviate.test:80",

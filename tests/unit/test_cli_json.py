@@ -862,6 +862,25 @@ def test_check_without_weaviate_url_names_it():
     assert d["code"] == "missing_credential" and "WEAVIATE_URL" in d["hint"]
 
 
+def test_check_refuses_a_weaviate_port_without_a_grpc_url():
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    url = "http://admin:B7-MADE-UP-PW@localhost:8099"
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    r = invoke(fakes, "check", "--json", WEAVIATE_URL=url, WEAVIATE_GRPC_URL=None)
+    assert r.exit_code == 2, r.output
+    assert json.loads(r.stdout) == {
+        "status": "error",
+        "code": "usage",
+        "message": "WEAVIATE_URL names port 8099, but without WEAVIATE_GRPC_URL "
+        "the client connects to port 443.",
+        "hint": "Set WEAVIATE_GRPC_URL for a Weaviate that is not on Weaviate Cloud.",
+    }
+    assert "localhost" not in r.output and "B7-MADE-UP" not in r.output
+    grpc = "http://localhost:50099"
+    r = invoke(fakes, "check", "--json", WEAVIATE_URL=url, WEAVIATE_GRPC_URL=grpc)
+    assert r.exit_code == 0, r.output
+
+
 def test_cli_error_document_and_exit_code():
     error = CliError("rejects", "2 records were rejected", "See rejects.jsonl.")
     assert error.exit_code == 1

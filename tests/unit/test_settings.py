@@ -71,7 +71,11 @@ KEY_VARIABLES = ["CHROMA_API_KEY", "WEAVIATE_API_KEY", "OPENAI_API_KEY", "XAI_AP
     ],
 )
 def test_key_with_a_control_character_is_refused(var, value):
-    env = {"WEAVIATE_URL": "http://localhost:8099", var: value}
+    env = {
+        "WEAVIATE_URL": "http://localhost:8099",
+        "WEAVIATE_GRPC_URL": "localhost:50099",
+        var: value,
+    }
     load = chroma_settings if var == "CHROMA_API_KEY" else weaviate_settings
     with pytest.raises(InvalidSetting) as e:
         load(env)
@@ -87,7 +91,11 @@ def test_key_with_a_control_character_is_refused(var, value):
     [("made up", "made up"), ("madé-up", "madé-up"), ("", None), (" \n ", None)],
 )
 def test_key_without_a_control_character_is_kept(var, value, expected):
-    env = {"WEAVIATE_URL": "http://localhost:8099", var: value}
+    env = {
+        "WEAVIATE_URL": "http://localhost:8099",
+        "WEAVIATE_GRPC_URL": "localhost:50099",
+        var: value,
+    }
     if var == "CHROMA_API_KEY":
         env["CHROMA_URL"] = "http://localhost:8001"
         assert chroma_settings(env).api_key == expected
@@ -217,7 +225,7 @@ def test_url_tokens(url, expected):
 
 def load(var, url):
     """The settings that read `var`, loaded with `var` set to `url`."""
-    env = {"WEAVIATE_URL": "http://localhost:8099", var: url}
+    env = {"WEAVIATE_URL": "http://localhost:8099", "WEAVIATE_GRPC_URL": GRPC, var: url}
     return chroma_settings(env) if var == "CHROMA_URL" else weaviate_settings(env)
 
 
@@ -316,7 +324,6 @@ def test_settings_hold_the_parsed_endpoints():
         ("http://c.weaviate.cloud", None, ("c.weaviate.cloud", 443, True)),
         ("https://c.weaviate.cloud", None, ("c.weaviate.cloud", 443, True)),
         ("c.weaviate.cloud", None, ("c.weaviate.cloud", 443, True)),
-        ("http://localhost:8099", None, ("localhost", 8099, True)),
         ("http://weaviate.test", "weaviate.test:50051", ("weaviate.test", 80, False)),
         ("weaviate.test", "weaviate.test:50051", ("weaviate.test", 80, False)),
         ("https://weaviate.test", "weaviate.test:50051", ("weaviate.test", 443, True)),
@@ -326,6 +333,40 @@ def test_http_endpoint_without_grpc_url_is_port_443_over_tls(url, grpc, expected
     env = {"WEAVIATE_URL": url, "WEAVIATE_GRPC_URL": grpc or ""}
     http = weaviate_settings(env).http
     assert (http.host, http.port, http.secure) == expected
+
+
+@pytest.mark.parametrize(
+    ("url", "port"),
+    [
+        ("http://localhost:8099", 8099),
+        ("https://admin:MADE-UP-PW@c.weaviate.cloud:8443/", 8443),
+        ("c.weaviate.cloud:80", 80),
+    ],
+)
+def test_weaviate_url_port_other_than_443_needs_a_grpc_url(url, port):
+    with pytest.raises(InvalidSetting) as e:
+        weaviate_settings({"WEAVIATE_URL": url})
+    assert str(e.value) == (
+        f"WEAVIATE_URL names port {port}, but without WEAVIATE_GRPC_URL the "
+        "client connects to port 443."
+    )
+    assert e.value.hint == (
+        "Set WEAVIATE_GRPC_URL for a Weaviate that is not on Weaviate Cloud."
+    )
+    s = weaviate_settings({"WEAVIATE_URL": url, "WEAVIATE_GRPC_URL": GRPC})
+    assert s.http.port == port
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://c.weaviate.cloud:443/",
+        "http://c.weaviate.cloud:443",
+        "c.weaviate.cloud",
+    ],
+)
+def test_weaviate_url_with_port_443_or_none_needs_no_grpc_url(url):
+    assert weaviate_settings({"WEAVIATE_URL": url}).http.port == 443
 
 
 @pytest.mark.parametrize(
