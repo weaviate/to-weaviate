@@ -1,8 +1,10 @@
 import json
+import re
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 import weaviate
 from weaviate.classes.config import ConsistencyLevel
@@ -51,6 +53,44 @@ OUTAGE_TEXTS = (
 def node_outage(message: str) -> bool:
     """Whether a per-object error says that a node or a shard was unavailable."""
     return any(text in message for text in OUTAGE_TEXTS)
+
+
+# How a Weaviate vectorizer module reports the answer of a model provider,
+# as in "connection to: OpenAI API failed with status: 401 ...", "connection
+# to Cohere API failed with status 403: ..." or "connection to: <url> failed
+# with status: 401 ...".
+PROVIDER_REFUSAL = re.compile(
+    r"connection to:? (?P<provider>.+?) (?:request )?failed with status:? "
+    r"(?P<status>401|403)\b"
+)
+
+
+class ProviderRefused(Exception):
+    """A model provider refused the key that Weaviate sent it for a batch.
+
+    The message does not repeat the provider's text, which can echo the key.
+    """
+
+    def __init__(self, provider: str, status: int) -> None:
+        super().__init__(
+            f"{provider} refused the key that Weaviate sent: HTTP {status}"
+        )
+        self.provider = provider
+        self.status = status
+
+
+def provider_refusal(message: str) -> ProviderRefused | None:
+    """The refusal in `message`, or None when it says something else.
+
+    A provider named by its URL is named by its host.
+    """
+    match = PROVIDER_REFUSAL.search(message)
+    if match is None:
+        return None
+    provider = match["provider"]
+    if "://" in provider:
+        provider = urlsplit(provider).hostname or provider
+    return ProviderRefused(provider, int(match["status"]))
 
 
 class BatchRefused(Exception):
@@ -153,9 +193,12 @@ def chunks(
 
 
 def _refused_or_transient(exc: Exception) -> float | None:
-    """`transient`, which also accepts a refusal of every object of a batch."""
+    """`transient`, which also accepts a refusal of every object of a batch.
+
+    A provider that refused the key does not accept it on a retry.
+    """
     if isinstance(exc, WeaviateInsertManyAllFailedError):
-        return 0.0
+        return None if provider_refusal(str(exc)) else 0.0
     return transient(exc)
 
 
@@ -233,6 +276,9 @@ class WeaviateWriter:
                 )
             except WeaviateInsertManyAllFailedError as exc:
                 reason = str(exc).removeprefix(ALL_FAILED_PREFIX)
+                refused_key = provider_refusal(reason)
+                if refused_key is not None:
+                    raise refused_key from exc
                 if single and not node_outage(reason):
                     rejects.append(Reject(_source_id(pending[0]), str(exc)))
                     return rejects

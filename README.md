@@ -225,7 +225,7 @@ takes a secret, and the tool prints no secret and writes none to a file.
 | `WEAVIATE_URL` | Weaviate server. Required. |
 | `WEAVIATE_API_KEY` | Weaviate API key. |
 | `WEAVIATE_GRPC_URL` | Weaviate gRPC endpoint. Set it only for a server outside Weaviate Cloud. |
-| `OPENAI_API_KEY`, `COHERE_API_KEY`, ... | Model provider keys. The tool sends them to Weaviate as headers for the vectorizer modules. `API_KEY_MAP` in `src/to_weaviate/settings.py` lists every variable. |
+| `OPENAI_API_KEY`, `COHERE_API_KEY`, ... | Model provider keys. The tool sends them to Weaviate as headers for the vectorizer modules. `API_KEY_MAP` in `src/to_weaviate/settings.py` lists every variable; when two variables name one header, the first one in that list that is set wins. A provider that refuses the key during `copy` is the error `auth_failed`, which names the provider and its variables. |
 | `TO_WEAVIATE_DEBUG` | `1` prints the traceback when a command fails. |
 
 For a Weaviate server outside Weaviate Cloud, set both URLs, for example

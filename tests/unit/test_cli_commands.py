@@ -2112,6 +2112,68 @@ def test_a_403_on_insert_is_not_retried_and_copy_resumes_at_its_page():
     assert set(client.writes_per_uuid.values()) == {1}
 
 
+UNAUTHORIZED = "Weaviate refused the request: the API key is missing or wrong."
+
+
+def test_a_batch_that_the_key_may_not_send_is_auth_failed_and_copy_resumes():
+    def fail(n: int) -> Exception | None:
+        if n != 2:
+            return None
+        try:
+            raise_grpc_failure("UNAUTHENTICATED", WeaviateBatchError, batch=True)
+        except WeaviateBatchError as exc:
+            return exc
+
+    fakes, client = refusing(250, fail)
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json")
+    assert r.exit_code == 3, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"]) == ("auth_failed", UNAUTHORIZED)
+    assert "WEAVIATE_API_KEY" in d["hint"]
+    assert (client.calls, len(client.writes_per_uuid)) == (2, 100)
+    client.fail = lambda n: None
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json")
+    assert r.exit_code == 0, r.output
+    assert len(client.writes_per_uuid) == 250
+    assert set(client.writes_per_uuid.values()) == {1}
+
+
+PROVIDER_401 = (
+    "connection to: OpenAI API failed with status: 401 request-id: req-1 error: "
+    "Incorrect API key provided: sk-made-***************3456. You can find your "
+    "API key at https://platform.openai.com/account/api-keys."
+)
+
+
+def test_a_provider_that_refuses_the_key_is_auth_failed_naming_its_variables():
+    fakes, client = refusing(10, lambda n: all_failed(PROVIDER_401))
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json")
+    assert r.exit_code == 3, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"]) == (
+        "auth_failed",
+        "OpenAI API refused the request: the API key is missing or wrong.",
+    )
+    assert d["hint"] == (
+        "Check OPENAI_APIKEY or OPENAI_API_KEY in the environment or in .env."
+    )
+    assert "sk-made" not in r.output and "3456" not in r.output
+    assert client.calls == 1
+    assert len(client.writes_per_uuid) == 0
+
+
+def test_a_provider_without_a_variable_is_named_in_the_hint():
+    refusal = "connection to Ollama API failed with status: 403 error: forbidden"
+    fakes, client = refusing(10, lambda n: all_failed(refusal))
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json")
+    assert r.exit_code == 3, r.output
+    d = json.loads(r.stdout)
+    assert d["message"] == (
+        "Ollama API refused the request: the API key lacks a permission."
+    )
+    assert d["hint"] == "Check the key of Ollama API in the environment or in .env."
+
+
 LENGTH_MESSAGE = "new node has a vector with length 1. Existing nodes have length 2"
 
 

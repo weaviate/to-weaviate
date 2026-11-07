@@ -6,6 +6,7 @@ from to_weaviate.settings import (
     MissingCredential,
     WeaviateSettings,
     chroma_settings,
+    key_variables,
     load_env,
     stored_url,
     url_passwords,
@@ -409,3 +410,23 @@ def test_weaviate_url_with_port_443_or_none_needs_no_grpc_url(url):
 )
 def test_chroma_settings_hold_the_stored_url(url, expected):
     assert chroma_settings({"CHROMA_URL": url}).stored_url == expected
+
+
+@pytest.mark.parametrize(
+    ("provider", "variables"),
+    [
+        ("OpenAI API", ["OPENAI_APIKEY", "OPENAI_API_KEY"]),
+        ("Cohere API", ["COHERE_APIKEY", "COHERE_API_KEY"]),
+        (
+            "Google",
+            ["VERTEX_APIKEY", "VERTEX_API_KEY", "STUDIO_APIKEY", "STUDIO_API_KEY"],
+        ),
+        ("api-inference.huggingface.co", ["HUGGINGFACE_APIKEY", "HUGGINGFACE_API_KEY"]),
+        ("AWS Sagemaker", ["AWS_ACCESS_KEY", "AWS_SECRET_KEY"]),
+        ("Ollama API", []),
+    ],
+)
+def test_key_variables_are_the_variables_of_the_provider_that_weaviate_names(
+    provider, variables
+):
+    assert key_variables(provider) == variables
