@@ -417,6 +417,27 @@ def test_a_quantizer_field_that_the_index_does_not_apply_is_refused(tmp_path, co
     assert fakes.schema_calls == 0 and fakes.schema.ensured == []
 
 
+def test_check_warns_that_a_dynamic_index_needs_async_indexing():
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))), "--index", "dynamic")
+    r = invoke(fakes, "check", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["warnings"] == [
+        {
+            "code": "needs_async_indexing",
+            "collection": "Docs",
+            "message": "vector default: the dynamic index needs ASYNC_INDEXING=true "
+            "on the server; check cannot read that setting",
+        }
+    ]
+
+
+def test_check_gives_no_async_indexing_warning_without_a_dynamic_index():
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))), "--index", "hnsw")
+    r = invoke(fakes, "check", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["warnings"] == []
+
+
 def test_inspect_unknown_collection_hint_names_both_database_settings():
     fakes = FakeFactories(FakeSource(cli_records(10)))
     r = invoke(fakes, "inspect", "chroma", "--collection", "nope", "--json")

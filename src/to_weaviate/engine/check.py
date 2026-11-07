@@ -571,6 +571,28 @@ def cleaned_option_findings(
     ]
 
 
+def async_indexing_findings(
+    groups: Mapping[str, list[CollectionPlan]],
+) -> list[Finding]:
+    """Warnings for each dynamic index of a target collection.
+
+    Weaviate creates a dynamic index only with ASYNC_INDEXING=true, which no
+    endpoint of the server reports. `collection_kwargs` sends the vectors of
+    the first entry of a group.
+    """
+    return [
+        Finding(
+            "needs_async_indexing",
+            name,
+            f"vector {vector.name}: the dynamic index needs ASYNC_INDEXING=true "
+            "on the server; check cannot read that setting",
+        )
+        for name, group in groups.items()
+        for vector in group[0].target.vectors
+        if vector.index.type == "dynamic"
+    ]
+
+
 def userinfo_only(errors: list[Finding]) -> bool:
     """Whether every one of `errors` is a URL option that keeps its userinfo."""
     return bool(errors) and all(
@@ -600,6 +622,7 @@ def plan_findings(
         vectorizer_findings({n: g for n, g in groups.items() if n not in unmapped})
     )
     warnings.extend(cleaned_option_findings(groups))
+    warnings.extend(async_indexing_findings(groups))
     for entry in plan.collections:
         errors.extend(_keep_model_findings(entry, vectorizer_for))
         errors.extend(_unmapped_findings(entry, inspected))

@@ -207,6 +207,8 @@ def test_index_settings_reach_the_server(docs_rq_inspection, tmp_path, index):
     _plan_with_index(docs_rq_inspection, tmp_path, index)
     r = run(["check"], tmp_path)
     assert r.exit_code == 0 and r.data["status"] == "success", r
+    warned = [w["code"] for w in r.data["warnings"]] == ["needs_async_indexing"]
+    assert warned == (index["type"] == "dynamic"), r
     r = run(["copy"], tmp_path)
     if (
         r.exit_code == 2
