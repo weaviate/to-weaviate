@@ -431,6 +431,9 @@ REFUSED_NAMES = [
     ("Docs", "Id", "property Id"),
     ("Docs", "_additional", "property _additional"),
     ("Docs", "vector", "property vector"),
+    ("Docs", "Position", "property Position"),
+    ("Docs", "ID", "property ID"),
+    ("Docs", "Vector", "property Vector"),
 ]
 
 
@@ -445,7 +448,7 @@ def test_a_name_that_weaviate_refuses_is_an_invalid_name(target, name, named):
     assert errors[0].message.startswith(f"{named}: Weaviate ")
 
 
-@pytest.mark.parametrize("name", ["iD", "ID", "__", "class", "p" * 231, "_x", "Vector"])
+@pytest.mark.parametrize("name", ["iD", "__", "class", "p" * 231, "_x", "_X"])
 def test_a_name_that_weaviate_accepts_is_no_invalid_name(name):
     found = entry([keep()], name="C" * 255)
     found.target.properties.append(
@@ -471,3 +474,18 @@ def test_an_empty_source_or_an_embedded_vector_needs_no_source_vectors(count, ve
     found.source.dimension, found.source.count = None, count
     errors, _ = plan_findings(plan_of(found), None, vectorizer_for)
     assert errors == []
+
+
+def test_a_property_name_with_an_upper_case_first_letter_names_the_stored_name():
+    found = entry([keep()])
+    found.target.properties.append(
+        p.PropertyPlan(source_key="position", name="Position", type="int")
+    )
+    errors, _ = plan_findings(plan_of(found), None, vectorizer_for)
+    assert [(e.code, e.message) for e in errors] == [
+        (
+            "invalid_name",
+            "property Position: Weaviate stores a property name with its first "
+            "letter in lower case, as position; use that name",
+        )
+    ]

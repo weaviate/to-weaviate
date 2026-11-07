@@ -56,6 +56,13 @@ def property_name_problem(name: str) -> str | None:
     stored = name[:1].lower() + name[1:]
     if stored in SERVER_RESERVED or name in CLIENT_RESERVED:
         return f"Weaviate reserves the property name {stored}"
+    # The plan would then name a property that the collection does not hold
+    # under that name.
+    if stored != name:
+        return (
+            "Weaviate stores a property name with its first letter in lower "
+            f"case, as {stored}; use that name"
+        )
     return None
 
 

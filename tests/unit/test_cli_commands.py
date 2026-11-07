@@ -1759,11 +1759,12 @@ def test_property_names_that_differ_only_in_case_are_an_invalid_plan(tmp_path, c
     fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
     target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
     year = next(p for p in target.properties if p.name == "year")
-    twin = year.model_copy(update={"name": "Year"})
+    # A first letter in upper case would also be an invalid_name in check.
+    twin = year.model_copy(update={"name": "yeaR"})
     edit_target(tmp_path / DIR, properties=[*target.properties, twin])
     r = invoke(fakes, cmd, "--json")
     message = (
-        "properties year, Year have the same name ignoring case; give each "
+        "properties year, yeaR have the same name ignoring case; give each "
         "property its own name"
     )
     assert plan_errors(r) == [
@@ -2393,3 +2394,21 @@ NO_VECTORS_ERROR = (
     "vectors; run to-weaviate inspect chroma --force --vectors embed "
     "--vectorizer MODULE"
 )
+
+
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_a_property_name_that_the_server_stores_otherwise_is_an_invalid_plan(
+    tmp_path, cmd
+):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    path = tmp_path / DIR / "plan.yaml"
+    plan = load_plan(path)
+    _prop(plan.collections[0], "year").name = "Year"
+    save_plan(plan, path)
+    r = invoke(fakes, cmd, "--json")
+    assert r.exit_code == 2, r.output
+    errors = json.loads(r.stdout)["errors"]
+    assert [(e["code"], e["message"].split(":")[0]) for e in errors] == [
+        ("invalid_name", "property Year")
+    ]
+    assert fakes.writer.calls == 0 and fakes.schema.ensured == []

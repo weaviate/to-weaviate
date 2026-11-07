@@ -3,6 +3,7 @@ import pytest
 from to_weaviate.naming import (
     collection_name,
     property_name,
+    property_name_problem,
     reserved_suffix,
     sidecar_word,
 )
@@ -134,3 +135,11 @@ def test_drafted_collection_names_in_order():
         found.append(collection_name(source, taken))
         taken.add(found[-1])
     assert found == ["C___", "C_1_leading_digit", "Mixed_Case", "Mixed_case_2", "Class"]
+
+
+@pytest.mark.parametrize(
+    "key", ["Position", "ID", "Year", "_X", "日本", "1st", "Vector"]
+)
+def test_a_drafted_property_name_is_stored_as_drafted(key):
+    name = property_name(key, set())
+    assert property_name_problem(name) is None, name
