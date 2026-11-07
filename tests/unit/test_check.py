@@ -491,6 +491,29 @@ def test_a_name_that_weaviate_accepts_is_no_invalid_name(name):
     assert errors == []
 
 
+@pytest.mark.parametrize("name", ["mt.dot", "a b", "t" * 65])
+def test_a_tenant_name_that_weaviate_refuses_is_an_invalid_name(name):
+    found = entry([keep()], name="Docs")
+    found.target.tenant = name
+    errors, _ = plan_findings(plan_of(found), None, vectorizer_for)
+    assert [(e.code, e.collection, e.message) for e in errors] == [
+        (
+            "invalid_name",
+            "Docs",
+            f"tenant {name}: Weaviate accepts a tenant name that matches "
+            "^[-_0-9A-Za-z]{1,64}$",
+        )
+    ]
+
+
+@pytest.mark.parametrize("name", ["mt_dot", "a-b", "T" * 64, "1"])
+def test_a_tenant_name_that_weaviate_accepts_is_no_invalid_name(name):
+    found = entry([keep()], name="Docs")
+    found.target.tenant = name
+    errors, _ = plan_findings(plan_of(found), None, vectorizer_for)
+    assert errors == []
+
+
 def test_a_kept_vector_of_a_source_without_vectors_is_an_error():
     found = entry([keep()])
     found.source.dimension = None

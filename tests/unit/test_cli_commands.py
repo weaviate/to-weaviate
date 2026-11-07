@@ -2364,6 +2364,26 @@ def test_a_property_name_that_the_client_refuses_is_an_invalid_plan(tmp_path, cm
     assert fakes.writer.calls == 0
 
 
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_a_tenant_name_that_weaviate_refuses_is_an_invalid_plan(tmp_path, cmd):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    path = tmp_path / DIR / "plan.yaml"
+    plan = load_plan(path)
+    plan.collections[0].target.tenant = "mt.dot"
+    save_plan(plan, path)
+    r = invoke(fakes, cmd, "--json")
+    assert r.exit_code == 2, r.output
+    errors = json.loads(r.stdout)["errors"]
+    assert [(e["code"], e["message"]) for e in errors] == [
+        (
+            "invalid_name",
+            "tenant mt.dot: Weaviate accepts a tenant name that matches "
+            "^[-_0-9A-Za-z]{1,64}$",
+        )
+    ]
+    assert fakes.schema.ensured == [] and fakes.writer.calls == 0
+
+
 STATE_HINT_UNREADABLE = "Start again with another --dir, or restore the file."
 
 

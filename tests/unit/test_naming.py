@@ -1,12 +1,14 @@
 import pytest
 
 from to_weaviate.naming import (
+    TENANT_NAME_RULE,
     collection_name,
     collection_name_problem,
     property_name,
     property_name_problem,
     reserved_suffix,
     sidecar_word,
+    tenant_name_problem,
 )
 
 COLLECTIONS = [
@@ -154,3 +156,15 @@ def test_drafted_collection_names_in_order():
 def test_a_drafted_property_name_is_stored_as_drafted(key):
     name = property_name(key, set())
     assert property_name_problem(name) is None, name
+
+
+@pytest.mark.parametrize("name", ["mt.dot", "a b", "", "t" * 65, "日本"])
+def test_a_tenant_name_that_weaviate_refuses_has_a_problem(name):
+    assert tenant_name_problem(name) == (
+        f"Weaviate accepts a tenant name that matches {TENANT_NAME_RULE}"
+    )
+
+
+@pytest.mark.parametrize("name", ["mt_dot", "a-b", "T" * 64, "1", "x"])
+def test_a_tenant_name_that_weaviate_accepts_has_no_problem(name):
+    assert tenant_name_problem(name) is None

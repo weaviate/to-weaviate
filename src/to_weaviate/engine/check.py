@@ -8,6 +8,7 @@ from to_weaviate.naming import (
     property_name_problem,
     reserved_suffix,
     sidecar_word,
+    tenant_name_problem,
 )
 from to_weaviate.plan import (
     DISTANCES,
@@ -579,7 +580,7 @@ def _value_findings(entry: CollectionPlan) -> list[Finding]:
 
 
 def _invalid_name_findings(entries: list[CollectionPlan]) -> list[Finding]:
-    """Collection and property names that Weaviate or its client refuses."""
+    """Collection, tenant and property names that Weaviate or its client refuses."""
     out: dict[tuple[str, str], Finding] = {}
     for entry in entries:
         name = entry.target.name
@@ -587,6 +588,12 @@ def _invalid_name_findings(entries: list[CollectionPlan]) -> list[Finding]:
         if problem is not None:
             message = f"collection {name}: {problem}"
             out.setdefault((name, message), Finding("invalid_name", name, message))
+        tenant = entry.target.tenant
+        if tenant is not None:
+            problem = tenant_name_problem(tenant)
+            if problem is not None:
+                message = f"tenant {tenant}: {problem}"
+                out.setdefault((name, message), Finding("invalid_name", name, message))
         for prop in entry.target.properties:
             problem = property_name_problem(prop.name)
             if problem is not None:

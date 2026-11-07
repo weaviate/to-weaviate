@@ -568,11 +568,18 @@ def ensure_collection(
     tenants = _tenants(group)
     if tenants:
         collection = client.collections.get(name)
-        with_retry(
-            lambda: collection.tenants.create([Tenant(name=t) for t in tenants]),
-            transient,
-            sleep=sleep,
-        )
+        try:
+            with_retry(
+                lambda: collection.tenants.create([Tenant(name=t) for t in tenants]),
+                transient,
+                sleep=sleep,
+            )
+        except UnexpectedStatusCodeError as exc:
+            if exc.status_code in (400, 422):
+                raise SchemaRejected(
+                    _server_message(exc), f"create the tenants of {name}"
+                ) from exc
+            raise
     return result
 
 
