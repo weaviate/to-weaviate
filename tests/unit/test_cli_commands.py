@@ -1377,7 +1377,7 @@ def test_a_key_that_appears_twice_in_one_mapping_is_an_invalid_plan(tmp_path, cm
     code, message = error_of(r)[1:3]
     assert (r.exit_code, code) == (2, "invalid_plan")
     assert "line 2, column 1" in message
-    assert "found duplicate key 'version', first at line 1" in message
+    assert "found duplicate key ..., first at line 1" in message
 
 
 @pytest.mark.parametrize(
@@ -1567,4 +1567,38 @@ def test_a_yaml_error_names_the_line_and_column_but_not_the_line_text(
     else:
         assert f"Error: {message}" in r.stderr
     for part in ["bob", *(password[i : i + 4] for i in range(len(password) - 3))]:
+        assert part not in r.stdout and part not in r.stderr
+
+
+@pytest.mark.parametrize("debug", [None, "1"])
+@pytest.mark.parametrize("mode", [[], ["--json"]])
+@pytest.mark.parametrize(
+    ("bad", "problem"),
+    [
+        ("notes: *B6-MADE-UP-PW\n", "found undefined alias ..."),
+        (
+            "notes: !B6-MADE-UP-PW x\n",
+            "could not determine a constructor for the tag ...",
+        ),
+    ],
+)
+def test_a_yaml_error_does_not_print_an_alias_or_tag_name(
+    tmp_path, bad, problem, mode, debug
+):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    path = tmp_path / DIR / "plan.yaml"
+    path.write_text(bad + path.read_text())
+    r = invoke(fakes, "check", *mode, TO_WEAVIATE_DEBUG=debug)
+    assert r.exit_code == 2, r.output
+    message = (
+        f"{DIR / 'plan.yaml'} is not a valid plan: YAML error at line 1, column 8: "
+        f"{problem}"
+    )
+    if mode:
+        d = json.loads(r.stdout)
+        assert (d["code"], d["message"]) == ("invalid_plan", message)
+    else:
+        assert f"Error: {message}" in r.stderr
+    password = "B6-MADE-UP-PW"
+    for part in (password[i : i + 4] for i in range(len(password) - 3)):
         assert part not in r.stdout and part not in r.stderr

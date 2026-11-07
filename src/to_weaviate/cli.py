@@ -20,6 +20,7 @@ import dataclasses
 import json
 import os
 import random
+import re
 import sys
 import traceback
 from collections.abc import Callable, Iterator
@@ -169,6 +170,9 @@ STATE_HINT = (
     "target, use another --dir."
 )
 BATCH_HINT = "Fix the cause and run to-weaviate copy again. It resumes at this page."
+# A part of a text in single or double quotes; a quote after a backslash is
+# part of it, as in a Python repr.
+_QUOTED = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
 
 
 @dataclass(frozen=True)
@@ -363,15 +367,18 @@ def _handled(json_output: bool) -> Iterator[None]:
 
 
 def _yaml_error_text(exc: yaml.YAMLError) -> str:
-    """The position and the problem of `exc`, without the text of the line.
+    """The position and the problem of `exc`, without any text of the file.
 
     The text that PyYAML gives for an error quotes the line, which can hold a
-    password.
+    password. Its problem text can quote a name from the line, such as an
+    alias, a tag or a key, so each quoted part becomes "...".
     """
     if isinstance(exc, yaml.MarkedYAMLError) and exc.problem_mark is not None:
         mark = exc.problem_mark
         where = f"YAML error at line {mark.line + 1}, column {mark.column + 1}"
-        return f"{where}: {exc.problem}" if exc.problem else where
+        if not exc.problem:
+            return where
+        return f"{where}: {_QUOTED.sub('...', exc.problem)}"
     return "the text is not valid YAML"
 
 
