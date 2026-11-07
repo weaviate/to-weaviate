@@ -4,14 +4,39 @@ RESERVED_PROPERTIES = frozenset(
     {"id", "_id", "_additional", "document", "source_id", "uri"}
 )
 
+# Weaviate refuses to create a property whose name ends in one of these:
+# reservedPropertyNameSuffixes in entities/schema/validation.go, v1.40.4.
+# Releases before 1.35.20, 1.36.15 and 1.37.5 accept such names.
+RESERVED_SUFFIXES = (
+    "_searchable",
+    "_rangeable",
+    "_temp",
+    "__meta_count",
+    "_propertyLength",
+    "_nullState",
+)
+
 _INVALID = re.compile(r"[^A-Za-z0-9_]")
 
 
+def reserved_suffix(name: str) -> str | None:
+    """The reserved suffix that `name` ends in, or None.
+
+    The comparison is case-sensitive, as in the server.
+    """
+    return next((s for s in RESERVED_SUFFIXES if name.endswith(s)), None)
+
+
 def _unique(base: str, taken: set[str]) -> str:
-    if base not in taken:
+    """`base`, or `base_<n>` with the lowest n from 2, not in `taken` ignoring case.
+
+    Weaviate compares collection names and property names ignoring case.
+    """
+    lowered = {name.lower() for name in taken}
+    if base.lower() not in lowered:
         return base
     n = 2
-    while f"{base}_{n}" in taken:
+    while f"{base}_{n}".lower() in lowered:
         n += 1
     return f"{base}_{n}"
 
@@ -30,6 +55,6 @@ def property_name(source_key: str, taken: set[str]) -> str:
     if not name or name[0].isdigit():
         name = "p_" + name
     name = name[0].lower() + name[1:]
-    if name in RESERVED_PROPERTIES:
+    if name in RESERVED_PROPERTIES or reserved_suffix(name):
         name += "_meta"
     return _unique(name, taken)

@@ -2,6 +2,7 @@ from collections import Counter
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 
+from to_weaviate.naming import reserved_suffix
 from to_weaviate.plan import (
     CollectionPlan,
     Plan,
@@ -203,13 +204,37 @@ def _id_findings(entry: CollectionPlan) -> list[Finding]:
     return out
 
 
+def _collection_case_findings(entries: list[CollectionPlan]) -> list[Finding]:
+    """Target collections whose stored names differ only in case.
+
+    Weaviate refuses a collection whose name equals an existing one ignoring
+    case. Names with one collection key are one collection.
+    """
+    by_lower: dict[str, list[str]] = {}
+    for entry in entries:
+        key = collection_key(entry.target.name)
+        keys = by_lower.setdefault(key.lower(), [])
+        if key not in keys:
+            keys.append(key)
+    return [
+        Finding(
+            "duplicate_collection_name",
+            keys[0],
+            f"target collections {', '.join(keys)} differ only in case; Weaviate "
+            "compares collection names ignoring case, so give each its own name",
+        )
+        for keys in by_lower.values()
+        if len(keys) > 1
+    ]
+
+
 def load_findings(plan: Plan) -> list[Finding]:
     """Errors that refuse the plan in every command that loads it."""
-    return [
-        f
-        for entry in plan.collections
-        for f in (*_name_findings(entry), *_id_findings(entry))
-    ]
+    out = _collection_case_findings(plan.collections)
+    for entry in plan.collections:
+        out.extend(_name_findings(entry))
+        out.extend(_id_findings(entry))
+    return out
 
 
 def _vectorizers(plan: Plan) -> Iterator[tuple[CollectionPlan, VectorizerPlan]]:
@@ -398,6 +423,17 @@ def plan_findings(
         errors.extend(_keep_model_findings(entry, vectorizer_for))
         errors.extend(_unmapped_findings(entry, inspected))
         for prop in entry.target.properties:
+            suffix = reserved_suffix(prop.name)
+            if suffix is not None:
+                warnings.append(
+                    Finding(
+                        "reserved_suffix",
+                        entry.target.name,
+                        f"property {prop.name} ends in {suffix}; Weaviate 1.35.20, "
+                        "1.36.15, 1.37.5 and later refuse to create a property "
+                        "with this suffix",
+                    )
+                )
             if prop.coerced_from:
                 warnings.append(
                     Finding(

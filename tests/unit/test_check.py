@@ -318,3 +318,46 @@ def test_unmapped_key_names_each_inspected_key_that_is_not_mapped_or_dropped():
         for key in ("year", "sparse")
     ]
     assert plan_findings(plan_of(e), None, voyage_mapper)[0] == []
+
+
+@pytest.mark.parametrize(
+    ("names", "found"),
+    [
+        (["docs", "Docs"], []),
+        (["Docs", "Other"], []),
+        (["docs", "dOcs"], [("Docs", "Docs, DOcs")]),
+        (
+            ["my_docs", "My_Docs", "MY_DOCS", "x"],
+            [("My_docs", "My_docs, My_Docs, MY_DOCS")],
+        ),
+    ],
+)
+def test_load_findings_refuse_collection_names_that_differ_only_in_case(names, found):
+    entries = [
+        with_target(targeted(f"r{i}", name, f"t{i}"), properties=[ID_PROPERTY])
+        for i, name in enumerate(names)
+    ]
+    assert load_findings(plan_of(*entries)) == [
+        Finding(
+            "duplicate_collection_name",
+            collection,
+            f"target collections {keys} differ only in case; Weaviate compares "
+            "collection names ignoring case, so give each its own name",
+        )
+        for collection, keys in found
+    ]
+
+
+def test_a_hand_written_property_name_with_a_reserved_suffix_is_a_warning():
+    properties = [ID_PROPERTY, prop("max_temp"), prop("title_searchable_meta")]
+    plan = plan_of(with_target(entry([keep()]), properties=properties))
+    errors, warnings = plan_findings(plan, None, voyage_mapper)
+    assert errors == []
+    assert warnings == [
+        Finding(
+            "reserved_suffix",
+            "Docs",
+            "property max_temp ends in _temp; Weaviate 1.35.20, 1.36.15, 1.37.5 "
+            "and later refuse to create a property with this suffix",
+        )
+    ]

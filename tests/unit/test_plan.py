@@ -95,6 +95,23 @@ def test_draft_unique_collection_names():
     assert names == ["My_docs", "My_docs_2"]
 
 
+def test_draft_names_differ_ignoring_case_and_avoid_reserved_suffixes():
+    keys = ["myKey", "mykey", "max_temp", "title_searchable"]
+    fields = [FieldStats(key, {"text": 1}) for key in keys]
+    sources = [make("my_docs", ref="a", fields=fields)]
+    sources += [make(name, ref=name) for name in ("my_Docs", "MY_DOCS")]
+    plan = draft_plan(SRC, sources, "keep")
+    names = [c.target.name for c in plan.collections]
+    assert names == ["My_docs", "My_Docs_2", "MY_DOCS_3"]
+    properties = [p.name for p in target(plan).properties]
+    assert properties[3:] == [
+        "myKey",
+        "mykey_2",
+        "max_temp_meta",
+        "title_searchable_meta",
+    ]
+
+
 def test_draft_source_ref():
     c = make(embedding={"type": "known", "name": "x", "config": {}})
     ref = draft_plan(SRC, [c], "keep").collections[0].source

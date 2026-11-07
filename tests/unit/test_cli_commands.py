@@ -1443,3 +1443,37 @@ def test_copy_resumes_after_an_unmapped_key_is_listed_under_dropped(tmp_path):
     assert r.exit_code == 0, r.output
     assert json.loads(r.stdout)["collections"][0]["copied"] == 10
     assert len(fakes.writer.objects) == 10
+
+
+def test_check_refuses_target_names_that_differ_only_in_case(tmp_path):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    two_entries(tmp_path / DIR, ("docs", None), ("dOcs", None))
+    for args in (["check"], ["copy", "--collection", "dOcs"]):
+        r = invoke(fakes, *args, "--json")
+        assert [(e["code"], e["collection"]) for e in plan_errors(r)] == [
+            ("duplicate_collection_name", "Docs")
+        ]
+    assert fakes.writer.calls == 0 and fakes.source.read_calls == 0
+
+
+@pytest.mark.parametrize("mode", [[], ["--json"]])
+def test_check_warns_on_a_property_name_with_a_reserved_suffix(tmp_path, mode):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    properties = [
+        p.model_copy(update={"name": "year_temp"}) if p.name == "year" else p
+        for p in target.properties
+    ]
+    edit_target(tmp_path / DIR, properties=properties)
+    r = invoke(fakes, "check", *mode)
+    assert r.exit_code == 0, r.output
+    message = (
+        "property year_temp ends in _temp; Weaviate 1.35.20, 1.36.15, 1.37.5 and "
+        "later refuse to create a property with this suffix"
+    )
+    if mode:
+        assert json.loads(r.stdout)["warnings"] == [
+            {"code": "reserved_suffix", "collection": "Docs", "message": message}
+        ]
+    else:
+        assert f"warning reserved_suffix Docs: {message}" in r.stdout

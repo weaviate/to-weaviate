@@ -9,6 +9,9 @@ COLLECTIONS = [
     ("123abc", set(), "C_123abc"),
     ("_x", set(), "C__x"),
     ("docs", set(), "Docs"),
+    ("my_Docs", {"My_docs"}, "My_Docs_2"),
+    ("MY_DOCS", {"My_docs", "My_Docs_2"}, "MY_DOCS_3"),
+    ("my_docs", {"MY_DOCS"}, "My_docs_2"),
 ]
 
 PROPERTIES = [
@@ -20,6 +23,15 @@ PROPERTIES = [
     ("a-b", {"a_b"}, "a_b_2"),
     ("a-b", {"a_b", "a_b_2"}, "a_b_3"),
     ("Year", set(), "year"),
+    ("mykey", {"myKey"}, "mykey_2"),
+    ("myKey", {"mykey", "MYKEY_2"}, "myKey_3"),
+    ("max_temp", set(), "max_temp_meta"),
+    ("title_searchable", set(), "title_searchable_meta"),
+    ("price_rangeable", set(), "price_rangeable_meta"),
+    ("x__meta_count", set(), "x__meta_count_meta"),
+    ("x_propertyLength", set(), "x_propertyLength_meta"),
+    ("x_nullState", set(), "x_nullState_meta"),
+    ("max_temp", {"max_temp_meta"}, "max_temp_meta_2"),
 ]
 
 
