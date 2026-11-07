@@ -2317,3 +2317,43 @@ def test_a_state_file_of_a_newer_schema_resumes(tmp_path):
     db = sqlite3.connect(tmp_path / DIR / "state.sqlite")
     assert db.execute("SELECT later FROM partitions").fetchall() == [("kept",)]
     db.close()
+
+
+def _with_lang(records: list[Record]) -> list[Record]:
+    return [replace(r, metadata={**r.metadata, "lang": "en"}) for r in records]
+
+
+def test_copy_adds_a_planned_property_that_the_collection_lacks(tmp_path):
+    source = FakeSource(cli_records(10))
+    fakes = inspected(FakeFactories(source))
+    assert invoke(fakes, "copy").exit_code == 0
+    source.records += _with_lang(cli_records(15)[10:])
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 1, r.output
+    reasons = {json.loads(x)["reason"] for x in (DIR / "rejects.jsonl").open()}
+    assert reasons == {
+        "metadata key lang is not in plan.yaml; add a property for it or list it "
+        "under dropped"
+    }
+    assert invoke(fakes, "inspect", "chroma", "--force").exit_code == 0
+    r = invoke(fakes, "check", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["warnings"] == [
+        {
+            "code": "missing_property",
+            "collection": "Docs",
+            "message": "property lang: missing in the collection; copy will add it",
+        }
+    ]
+    r = invoke(fakes, "copy", "--json")
+    assert fakes.schema.added == [("Docs", "lang")]
+    assert "Added the property lang to Docs" in r.stderr
+    # The five records were rejected by the run before and are not read again.
+    assert r.exit_code == 1 and json.loads(r.stdout)["code"] == "rejects", r.output
+    # A copy in a new directory writes them with the new property.
+    other = ["--dir", "other"]
+    assert invoke(fakes, "inspect", "chroma", *other).exit_code == 0
+    r = invoke(fakes, "copy", "--json", *other)
+    assert r.exit_code == 0, r.output
+    assert fakes.writer.objects[to_uuid("id-12")].properties["lang"] == "en"
+    assert len(fakes.writer.objects) == 15

@@ -171,6 +171,7 @@ STATE_HINT = (
 )
 UNREADABLE_STATE_HINT = "Start again with another --dir, or restore the file."
 BATCH_HINT = "Fix the cause and run to-weaviate copy again. It resumes at this page."
+MISSING_TEXT = "missing in the collection; copy will add it"
 # A part of a text in single or double quotes; a quote after a backslash is
 # part of it, as in a Python repr.
 _QUOTED = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
@@ -712,6 +713,10 @@ def _check(factories: _Factories, directory: Path, json_output: bool) -> None:
     for name, group in target_groups(plan.collections).items():
         for difference in schema.differences(group) or []:
             errors.append(Finding("plan_mismatch", name, difference))
+        warnings.extend(
+            Finding("missing_property", name, f"property {prop}: {MISSING_TEXT}")
+            for prop in schema.missing_properties(group)
+        )
     if errors:
         raise _plan_errors(errors, warnings)
     lines = _findings_text(errors, warnings)
@@ -917,8 +922,11 @@ def _copy(
                 source_names,
                 directory,
             )
-            for group in selected.values():
+            for name, group in selected.items():
+                added = schema.missing_properties(group)
                 schema.ensure(group)
+                for prop in added:
+                    info(json_output, f"Added the property {prop} to {name}")
             events = Events(directory / EVENTS_FILE)
             for entry in entries:
                 ref = entry.source.ref

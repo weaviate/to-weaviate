@@ -40,6 +40,7 @@ from to_weaviate.target.schema import (
     collection_kwargs,
     differences,
     ensure_collection,
+    missing_properties,
     quantizer_updates,
 )
 
@@ -215,8 +216,17 @@ class FakeCollection:
         self._cfg = cfg
         self.updates: list[Any] = []
         self.update_fail: list[Exception] = []
-        self.config = SimpleNamespace(get=lambda: self._cfg, update=self._update)
+        self.added: list[Any] = []
+        self.add_fail: list[Exception] = []
+        self.config = SimpleNamespace(
+            get=lambda: self._cfg, update=self._update, add_property=self._add
+        )
         self.tenants = FakeTenants()
+
+    def _add(self, prop: Any) -> None:
+        if self.add_fail:
+            raise self.add_fail.pop(0)
+        self.added.append(prop)
 
     def _update(self, *, vector_config: Any) -> None:
         if self.update_fail:
@@ -368,11 +378,42 @@ def test_differences_skip_a_property_type_without_a_mapping():
     assert found == []
 
 
-def test_differences_missing_property():
+def test_a_missing_property_is_no_difference_and_is_listed_as_missing():
     cfg = config()
     cfg.properties = [x for x in cfg.properties if x.name != "year"]
-    found = differences(FakeClient(FakeCollection(cfg)), [entry()])  # type: ignore[arg-type]
-    assert found and "year" in found[0]
+    client = FakeClient(FakeCollection(cfg))
+    assert differences(client, [entry()]) == []  # type: ignore[arg-type]
+    assert missing_properties(client, [entry()]) == ["year"]  # type: ignore[arg-type]
+
+
+def test_no_property_is_missing_from_a_collection_that_does_not_exist():
+    assert missing_properties(FakeClient(None), [entry()]) == []  # type: ignore[arg-type]
+
+
+def test_ensure_adds_a_missing_property_to_the_existing_collection():
+    cfg = config()
+    cfg.properties = [x for x in cfg.properties if x.name != "year"]
+    existing = FakeCollection(cfg)
+    existing.add_fail = [WeaviateConnectionError("down")]
+    client = FakeClient(existing)
+    result = ensure_collection(client, [entry()], sleep=lambda s: None)  # type: ignore[arg-type]
+    assert result == "exists" and client.collections.created == []
+    assert [(x.name, x.dataType.value) for x in existing.added] == [("year", "int")]
+
+
+@pytest.mark.parametrize("status", [400, 422])
+def test_a_refused_property_addition_is_schema_rejected(status):
+    cfg = config()
+    cfg.properties = [x for x in cfg.properties if x.name != "year"]
+    existing = FakeCollection(cfg)
+    body = {"error": [{"message": "property year already exists"}]}
+    existing.add_fail = [
+        UnexpectedStatusCodeError("refused", httpx.Response(status, json=body))
+    ]
+    with pytest.raises(SchemaRejected) as info:
+        WeaviateSchema(FakeClient(existing)).ensure([entry()])  # type: ignore[arg-type]
+    assert str(info.value) == "property year already exists"
+    assert info.value.action == "add the property year to My_docs"
 
 
 def test_differences_multi_tenancy():

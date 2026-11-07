@@ -117,6 +117,8 @@ class Schema(Protocol):
 
     def differences(self, group: list[CollectionPlan]) -> list[str] | None: ...
 
+    def missing_properties(self, group: list[CollectionPlan]) -> list[str]: ...
+
     def ensure(self, group: list[CollectionPlan]) -> Literal["created", "exists"]: ...
 
     def enable_trained_quantizers(self, entry: CollectionPlan) -> None: ...
@@ -483,11 +485,12 @@ def differences(
             out.extend(_vector_differences(plan, found))
     actual = {p.name: _val(p.data_type) for p in cfg.properties}
     for prop in _properties(group):
-        # A type without a mapping is an invalid_type finding of the plan.
+        # A type without a mapping is an invalid_type finding of the plan. A
+        # missing property is no difference: ensure adds it.
         planned_type = _DATA_TYPES.get(prop.type)
         if prop.name not in actual:
-            out.append(f"property {prop.name}: missing in the collection")
-        elif planned_type is not None and actual[prop.name] != planned_type.value:
+            continue
+        if planned_type is not None and actual[prop.name] != planned_type.value:
             out.append(
                 f"property {prop.name}: type is {actual[prop.name]}, "
                 f"plan has {prop.type}"
@@ -501,11 +504,49 @@ def differences(
     return out
 
 
+def _missing_properties(
+    client: weaviate.WeaviateClient, group: list[CollectionPlan]
+) -> list[PropertyPlan]:
+    name = group[0].target.name
+    if not client.collections.exists(name):
+        return []
+    stored = {p.name for p in client.collections.get(name).config.get().properties}
+    return [p for p in _properties(group) if p.name not in stored]
+
+
+def missing_properties(
+    client: weaviate.WeaviateClient, group: list[CollectionPlan]
+) -> list[str]:
+    """Planned properties that the existing collection lacks; [] without one."""
+    return [p.name for p in _missing_properties(client, group)]
+
+
+def _add_property(
+    client: weaviate.WeaviateClient,
+    name: str,
+    prop: PropertyPlan,
+    sleep: Callable[[float], None],
+) -> None:
+    config = client.collections.get(name).config
+    try:
+        with_retry(lambda: config.add_property(_property(prop)), transient, sleep=sleep)
+    except UnexpectedStatusCodeError as exc:
+        if exc.status_code in (400, 422):
+            raise SchemaRejected(
+                _server_message(exc), f"add the property {prop.name} to {name}"
+            ) from exc
+        raise
+
+
 def ensure_collection(
     client: weaviate.WeaviateClient,
     group: list[CollectionPlan],
     sleep: Callable[[float], None] = time.sleep,
 ) -> Literal["created", "exists"]:
+    """Create the collection of `group`, or add the planned properties it lacks.
+
+    Raises PlanMismatch when the existing collection has other settings.
+    """
     found = differences(client, group)
     if found:
         raise PlanMismatch("; ".join(found))
@@ -515,6 +556,9 @@ def ensure_collection(
         kwargs = collection_kwargs(group)
         with_retry(lambda: client.collections.create(**kwargs), transient, sleep=sleep)
         result = "created"
+    else:
+        for prop in _missing_properties(client, group):
+            _add_property(client, name, prop, sleep)
     tenants = _tenants(group)
     if tenants:
         collection = client.collections.get(name)
@@ -553,6 +597,9 @@ class WeaviateSchema:
 
     def differences(self, group: list[CollectionPlan]) -> list[str] | None:
         return differences(self._client, group)
+
+    def missing_properties(self, group: list[CollectionPlan]) -> list[str]:
+        return missing_properties(self._client, group)
 
     def ensure(self, group: list[CollectionPlan]) -> Literal["created", "exists"]:
         try:
