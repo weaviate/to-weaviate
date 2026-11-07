@@ -6,10 +6,12 @@ from to_weaviate import plan as p
 from to_weaviate.engine.check import (
     Finding,
     decisions,
+    load_findings,
     module_findings,
     plan_findings,
     provider_keys,
 )
+from to_weaviate.sources.base import FieldStats, SourceCollection
 from to_weaviate.sources.chroma.mapping import vectorizer_for
 
 
@@ -196,4 +198,224 @@ def test_a_url_option_that_keeps_its_userinfo_is_an_error():
     ]
     assert warnings == []
     clean = plan_of(entry([embed("text2vec-openai", base_url="https://u:p@h/v1")]))
-    assert plan_findings(clean, None, vectorizer_for) == ([], [])
+    assert plan_findings(clean, None, vectorizer_for) == (
+        [],
+        [
+            Finding(
+                "cleaned_option",
+                "Docs",
+                "option base_url of vector default in Docs holds userinfo, a query "
+                "or a fragment; it is sent without them.",
+            )
+        ],
+    )
+
+
+ID_PROPERTY = p.PropertyPlan(source_key="#id", name="source_id", type="text")
+
+
+def with_target(e: p.CollectionPlan, **update: Any) -> p.CollectionPlan:
+    return e.model_copy(update={"target": e.target.model_copy(update=update)})
+
+
+def prop(name: str, key: str | None = None) -> p.PropertyPlan:
+    return p.PropertyPlan(source_key=key or name, name=name, type="text")
+
+
+def test_load_findings_refuse_property_names_equal_ignoring_case():
+    properties = [ID_PROPERTY, prop("year"), prop("Year"), prop("title")]
+    properties.append(prop("YEAR", "y2"))
+    plan = plan_of(with_target(entry([keep()]), properties=properties))
+    assert load_findings(plan) == [
+        Finding(
+            "duplicate_property",
+            "Docs",
+            "properties year, Year, YEAR have the same name ignoring case; give "
+            "each property its own name",
+        )
+    ]
+
+
+def test_load_findings_refuse_a_repeated_vector_name():
+    both = entry([keep(), embed("text2vec-weaviate")])
+    plan = plan_of(with_target(both, properties=[ID_PROPERTY]))
+    assert load_findings(plan) == [
+        Finding(
+            "duplicate_vector",
+            "Docs",
+            "vector name default is used 2 times; give each vector its own name",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("properties", "expected"),
+    [
+        ([ID_PROPERTY, prop("year")], []),
+        (
+            [prop("year")],
+            [
+                (
+                    "missing_id_property",
+                    "no property has source_key #id; add the property source_id "
+                    "with source_key #id",
+                )
+            ],
+        ),
+        (
+            [ID_PROPERTY, prop("chroma_id", "#id")],
+            [
+                (
+                    "duplicate_id_property",
+                    "properties source_id, chroma_id have source_key #id; keep one "
+                    "property for #id and name it source_id",
+                )
+            ],
+        ),
+        (
+            [prop("chroma_id", "#id"), prop("source_id", "year")],
+            [
+                (
+                    "missing_id_property",
+                    "property chroma_id has source_key #id; name it source_id",
+                ),
+                (
+                    "duplicate_id_property",
+                    "property source_id has source_key year; only the property with "
+                    "source_key #id can be named source_id",
+                ),
+            ],
+        ),
+    ],
+)
+def test_load_findings_need_one_id_property_named_source_id(properties, expected):
+    plan = plan_of(with_target(entry([keep()]), properties=properties))
+    assert [(f.code, f.message) for f in load_findings(plan)] == expected
+
+
+def inspected_as(fields: list[str], sparse: list[str]) -> dict[str, SourceCollection]:
+    return {
+        "r": SourceCollection(
+            ref="r",
+            namespace="ns",
+            name="docs",
+            count=1,
+            dimension=2,
+            distance="cosine",
+            embedding=None,
+            fields=[FieldStats(key, {"text": 1}) for key in fields],
+            sparse_keys=sparse,
+            document_bytes_estimate=1,
+        )
+    }
+
+
+def test_unmapped_key_names_each_inspected_key_that_is_not_mapped_or_dropped():
+    e = with_target(
+        entry([keep()]),
+        properties=[ID_PROPERTY, prop("title")],
+        dropped=[p.DroppedKey(source_key="skipped", reason="r")],
+    )
+    found = inspected_as(["title", "year", "skipped"], ["sparse"])
+    errors, _ = plan_findings(plan_of(e), found, voyage_mapper)
+    assert [(f.code, f.collection, f.message) for f in errors] == [
+        (
+            "unmapped_key",
+            "Docs",
+            f"metadata key {key} is not in plan.yaml; add a property for it or "
+            "list it under dropped",
+        )
+        for key in ("year", "sparse")
+    ]
+    assert plan_findings(plan_of(e), None, voyage_mapper)[0] == []
+
+
+@pytest.mark.parametrize(
+    ("names", "found"),
+    [
+        (["docs", "Docs"], []),
+        (["Docs", "Other"], []),
+        (["docs", "dOcs"], [("Docs", "Docs, DOcs")]),
+        (
+            ["my_docs", "My_Docs", "MY_DOCS", "x"],
+            [("My_docs", "My_docs, My_Docs, MY_DOCS")],
+        ),
+    ],
+)
+def test_load_findings_refuse_collection_names_that_differ_only_in_case(names, found):
+    entries = [
+        with_target(targeted(f"r{i}", name, f"t{i}"), properties=[ID_PROPERTY])
+        for i, name in enumerate(names)
+    ]
+    assert load_findings(plan_of(*entries)) == [
+        Finding(
+            "duplicate_collection_name",
+            collection,
+            f"target collections {keys} differ only in case; Weaviate compares "
+            "collection names ignoring case, so give each its own name",
+        )
+        for collection, keys in found
+    ]
+
+
+def test_a_hand_written_property_name_with_a_reserved_suffix_is_a_warning():
+    properties = [ID_PROPERTY, prop("max_temp"), prop("title_searchable_meta")]
+    plan = plan_of(with_target(entry([keep()]), properties=properties))
+    errors, warnings = plan_findings(plan, None, voyage_mapper)
+    assert errors == []
+    assert warnings == [
+        Finding(
+            "reserved_suffix",
+            "Docs",
+            "property max_temp ends in _temp; Weaviate 1.35.20, 1.36.15, 1.37.5 "
+            "and later refuse to create a property with this suffix",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://proxy.example.com/v1?api-version=made-up",
+        "https://proxy.example.com/v1#made-up",
+        "https://u:p@proxy.example.com/v1?key=made-up",
+        "https://u:p@proxy.example.com/v1",
+    ],
+)
+def test_a_url_option_sent_in_another_form_gives_a_warning(url):
+    plan = plan_of(entry([embed("text2vec-openai", base_url=url)]))
+    errors, warnings = plan_findings(plan, None, vectorizer_for)
+    assert errors == []
+    assert warnings == [
+        Finding(
+            "cleaned_option",
+            "Docs",
+            "option base_url of vector default in Docs holds userinfo, a query or "
+            "a fragment; it is sent without them.",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("name", "word"),
+    [
+        ("geo__map", "map"),
+        ("doc__backup", "backup"),
+        ("x__reindex_3", "reindex"),
+        ("a__b_ingest", "ingest"),
+    ],
+)
+def test_a_hand_written_sidecar_shaped_property_name_is_a_warning(name, word):
+    properties = [ID_PROPERTY, prop(name), prop("geo_map"), prop("mapping__x")]
+    plan = plan_of(with_target(entry([keep()]), properties=properties))
+    errors, warnings = plan_findings(plan, None, voyage_mapper)
+    assert errors == []
+    assert warnings == [
+        Finding(
+            "reserved_suffix",
+            "Docs",
+            f"property {name} has the shape of a migration directory name (__ and "
+            f"the word {word}); Weaviate 1.39.3 and later refuse to create a "
+            "property with this shape",
+        )
+    ]

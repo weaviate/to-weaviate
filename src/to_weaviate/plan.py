@@ -1,9 +1,10 @@
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Hashable, Mapping
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, model_validator
+from weaviate.classes.config import VectorDistances
 
 from to_weaviate.naming import collection_name, property_name
 from to_weaviate.sources.base import SourceCollection
@@ -35,7 +36,10 @@ QUANTIZER_FIELDS: dict[str, set[str]] = {
     "bq": {"rescore_limit", "cache"},
 }
 
+# The distances that target.schema maps to VectorDistances.
+DISTANCES = tuple(sorted(d.value for d in VectorDistances))
 KEEP_DISTANCES_WITHOUT_INDEX = (None, "cosine")
+MERGE_TAG = "tag:yaml.org,2002:merge"
 
 
 class _Model(BaseModel):
@@ -109,8 +113,10 @@ class VectorPlan(_Model):
 
     @model_validator(mode="after")
     def _distance_needs_named_index(self) -> "VectorPlan":
+        # A distance outside DISTANCES is the invalid_distance finding of check.
         if (
             self.index.type == "default"
+            and self.distance in DISTANCES
             and self.distance not in KEEP_DISTANCES_WITHOUT_INDEX
         ):
             raise ValueError(
@@ -319,13 +325,41 @@ def draft_plan(
     return Plan(source=source, collections=drafted)
 
 
+class _PlanLoader(yaml.SafeLoader):
+    """A safe loader that refuses a key that appears twice in one mapping.
+
+    Keys that a merge key (`<<`) brings in may be repeated, as YAML allows.
+    """
+
+    def construct_mapping(
+        self, node: yaml.MappingNode, deep: bool = False
+    ) -> dict[Hashable, Any]:
+        first: dict[Any, yaml.Node] = {}
+        for key_node, _ in node.value:
+            if not isinstance(key_node, yaml.ScalarNode) or key_node.tag == MERGE_TAG:
+                continue
+            key = self.construct_object(key_node)
+            if key in first:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    f"found duplicate key {key!r}, first at line "
+                    f"{first[key].start_mark.line + 1}",
+                    key_node.start_mark,
+                )
+            first[key] = key_node
+        return super().construct_mapping(node, deep)
+
+
 def load_plan(path: Path) -> Plan:
-    return Plan.model_validate(yaml.safe_load(path.read_text()))
+    text = path.read_text(encoding="utf-8")
+    return Plan.model_validate(yaml.load(text, Loader=_PlanLoader))
 
 
 def save_plan(plan: Plan, path: Path) -> None:
     path.write_text(
         yaml.safe_dump(
             plan.model_dump(mode="json"), sort_keys=False, allow_unicode=True
-        )
+        ),
+        encoding="utf-8",
     )
