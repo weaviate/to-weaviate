@@ -79,7 +79,9 @@ vectorizer modules, and existing collections with other settings. It
 creates nothing. A collection, property or tenant name that Weaviate
 refuses is the error `invalid_name`; a tenant name has 1 to 64 letters,
 digits, `_` or `-`. A planned property that an existing collection lacks is
-the warning `missing_property`: `copy` adds it to the collection. Plan
+the warning `missing_property`: `copy` adds it to the collection. A
+trained quantizer whose `training_limit` is above the record count of the
+source is the warning `quantizer_training`. Plan
 entries that write into one collection, each into its own tenant, must
 have the same vectors and the same settings for each property that more
 than one of them has, and no two property names that differ only in case.
@@ -119,10 +121,15 @@ has, `copy` adds the property before it writes. Its JSON document lists
 each added property under `added_properties`.
 
 A quantizer that Weaviate trains on the vectors (`sq`, `pq`, and `rq` with
-`centering`) is enabled again after the last page of each plan entry, so
-it compresses the vectors with and without `ASYNC_INDEXING` on the server.
-The entry is done only after that update; a run that stops before it sends
-the update again and copies no page again.
+`centering`) is enabled again after the last page of each plan entry. A
+server without `ASYNC_INDEXING` then compresses the vectors at once. A
+server with `ASYNC_INDEXING=true` compresses a shard only once it holds
+`training_limit` vectors, which is 100000 for `sq` and `pq` and 10000 for
+`rq` unless `plan.yaml` sets it, so a smaller shard stays uncompressed.
+`check` and `copy` give the warning `quantizer_training` when the source
+has fewer records than that limit. The entry is done only after that
+update; a run that stops before it sends the update again and copies no
+page again.
 
 `state.sqlite` also records the target of each source collection: the
 Weaviate host and port, the collection and the tenant. Once records of a
