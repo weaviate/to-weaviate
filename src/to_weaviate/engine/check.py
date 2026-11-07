@@ -31,6 +31,8 @@ PROVIDER_KEYS: dict[str, tuple[str, str]] = {
 }
 GOOGLE_VERTEX_KEY = ("X-Goog-Vertex-Api-Key", "VERTEX_API_KEY")
 GOOGLE_STUDIO_KEY = ("X-Goog-Studio-Api-Key", "STUDIO_API_KEY")
+ID_KEY = "#id"
+ID_PROPERTY = "source_id"
 
 VECTOR_MODE_DETAIL = (
     "No Weaviate vectorizer matches the source embedding function. Either "
@@ -151,9 +153,62 @@ def _name_findings(entry: CollectionPlan) -> list[Finding]:
     return out
 
 
+def _id_findings(entry: CollectionPlan) -> list[Finding]:
+    """The source ID needs one property, named source_id.
+
+    The writer, the reader and verify find the source ID of an object in the
+    property source_id.
+    """
+    target = entry.target.name
+    properties = entry.target.properties
+    ids = [p.name for p in properties if p.source_key == ID_KEY]
+    out: list[Finding] = []
+    if not ids:
+        out.append(
+            Finding(
+                "missing_id_property",
+                target,
+                f"no property has source_key {ID_KEY}; add the property "
+                f"{ID_PROPERTY} with source_key {ID_KEY}",
+            )
+        )
+    elif len(ids) > 1:
+        out.append(
+            Finding(
+                "duplicate_id_property",
+                target,
+                f"properties {', '.join(ids)} have source_key {ID_KEY}; keep one "
+                f"property for {ID_KEY} and name it {ID_PROPERTY}",
+            )
+        )
+    elif ids[0] != ID_PROPERTY:
+        out.append(
+            Finding(
+                "missing_id_property",
+                target,
+                f"property {ids[0]} has source_key {ID_KEY}; name it {ID_PROPERTY}",
+            )
+        )
+    out.extend(
+        Finding(
+            "duplicate_id_property",
+            target,
+            f"property {ID_PROPERTY} has source_key {p.source_key}; only the "
+            f"property with source_key {ID_KEY} can be named {ID_PROPERTY}",
+        )
+        for p in properties
+        if p.name == ID_PROPERTY and p.source_key != ID_KEY
+    )
+    return out
+
+
 def load_findings(plan: Plan) -> list[Finding]:
     """Errors that refuse the plan in every command that loads it."""
-    return [f for entry in plan.collections for f in _name_findings(entry)]
+    return [
+        f
+        for entry in plan.collections
+        for f in (*_name_findings(entry), *_id_findings(entry))
+    ]
 
 
 def _vectorizers(plan: Plan) -> Iterator[tuple[CollectionPlan, VectorizerPlan]]:

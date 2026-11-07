@@ -1245,12 +1245,13 @@ def edit_target(directory: Path, **update: Any) -> None:
     plan = load_plan(path)
     first = plan.collections[0]
     entry = first.model_copy(update={"target": first.target.model_copy(update=update)})
-    save_plan(plan.model_copy(update={"collections": [entry]}), path)
+    entries = [entry, *plan.collections[1:]]
+    save_plan(plan.model_copy(update={"collections": entries}), path)
 
 
 def plan_errors(r: Result) -> list[dict[str, str]]:
     d = json.loads(r.stdout)
-    assert (r.exit_code, d["code"]) == (2, "invalid_plan"), r.output
+    assert (r.exit_code, d.get("code")) == (2, "invalid_plan"), r.output
     return d["errors"]
 
 
@@ -1360,3 +1361,49 @@ def test_a_key_that_appears_twice_in_one_mapping_is_an_invalid_plan(tmp_path, cm
     assert (r.exit_code, code) == (2, "invalid_plan")
     assert "line 2, column 1" in message
     assert "found duplicate key 'version', first at line 1" in message
+
+
+@pytest.mark.parametrize(
+    "args", [["check"], ["copy"], ["copy", "--collection", "Docs"], ["status"]]
+)
+def test_an_id_property_that_is_not_source_id_is_an_invalid_plan(tmp_path, args):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    renames = {"source_id": "chroma_id", "year": "source_id"}
+    properties = [
+        p.model_copy(update={"name": renames.get(p.name, p.name)})
+        for p in target.properties
+    ]
+    edit_target(tmp_path / DIR, properties=properties)
+    r = invoke(fakes, *args, "--json")
+    assert plan_errors(r) == [
+        {
+            "code": "missing_id_property",
+            "collection": "Docs",
+            "message": "property chroma_id has source_key #id; name it source_id",
+        },
+        {
+            "code": "duplicate_id_property",
+            "collection": "Docs",
+            "message": "property source_id has source_key year; only the property "
+            "with source_key #id can be named source_id",
+        },
+    ]
+    assert fakes.writer.calls == 0 and fakes.source.read_calls == 0
+
+
+def test_copy_of_another_entry_refuses_a_plan_without_an_id_property(tmp_path):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    two_entries(tmp_path / DIR, ("Docs", None), ("Other", None))
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    properties = [p for p in target.properties if p.source_key != "#id"]
+    edit_target(tmp_path / DIR, properties=properties)
+    r = invoke(fakes, "copy", "--collection", "Other", "--json")
+    message = (
+        "no property has source_key #id; add the property source_id with "
+        "source_key #id"
+    )
+    assert plan_errors(r) == [
+        {"code": "missing_id_property", "collection": "Docs", "message": message}
+    ]
+    assert fakes.writer.calls == 0 and fakes.source.read_calls == 0

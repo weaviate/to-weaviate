@@ -235,3 +235,48 @@ def test_load_findings_refuse_a_repeated_vector_name():
             "vector name default is used 2 times; give each vector its own name",
         )
     ]
+
+
+@pytest.mark.parametrize(
+    ("properties", "expected"),
+    [
+        ([ID_PROPERTY, prop("year")], []),
+        (
+            [prop("year")],
+            [
+                (
+                    "missing_id_property",
+                    "no property has source_key #id; add the property source_id "
+                    "with source_key #id",
+                )
+            ],
+        ),
+        (
+            [ID_PROPERTY, prop("chroma_id", "#id")],
+            [
+                (
+                    "duplicate_id_property",
+                    "properties source_id, chroma_id have source_key #id; keep one "
+                    "property for #id and name it source_id",
+                )
+            ],
+        ),
+        (
+            [prop("chroma_id", "#id"), prop("source_id", "year")],
+            [
+                (
+                    "missing_id_property",
+                    "property chroma_id has source_key #id; name it source_id",
+                ),
+                (
+                    "duplicate_id_property",
+                    "property source_id has source_key year; only the property with "
+                    "source_key #id can be named source_id",
+                ),
+            ],
+        ),
+    ],
+)
+def test_load_findings_need_one_id_property_named_source_id(properties, expected):
+    plan = plan_of(with_target(entry([keep()]), properties=properties))
+    assert [(f.code, f.message) for f in load_findings(plan)] == expected
