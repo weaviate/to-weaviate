@@ -56,6 +56,14 @@ RQ_BITS: dict[str, tuple[int, ...]] = {
 }
 CENTERING_INDEX = "hnsw"
 CENTERING_BITS = 4
+# The quantizer fields that Weaviate 1.40.4 drops without an error, by index
+# type and quantizer type. A dynamic index applies a field that its hnsw part
+# or its flat part applies, so it drops none.
+IGNORED_FIELDS: dict[str, dict[str, tuple[str, ...]]] = {
+    "hnsw": {"rq": ("cache",), "bq": ("cache", "rescore_limit")},
+    "flat": {"rq": ("training_limit",)},
+    "hfresh": {"rq": ("cache", "training_limit")},
+}
 
 # The distances that target.schema maps to VectorDistances.
 DISTANCES = tuple(sorted(d.value for d in VectorDistances))
@@ -128,6 +136,13 @@ class IndexPlan(_Model):
                 f"quantizer type {quantizer!r} is not supported by index type "
                 f"{self.type!r}; it supports {', '.join(supported)}"
             )
+        for field in IGNORED_FIELDS.get(self.type, {}).get(quantizer, ()):
+            value = getattr(self.quantizer, field)
+            if value is not None:
+                raise ValueError(
+                    f"{field}={value!r} of quantizer type {quantizer!r} is not "
+                    f"applied by index type {self.type!r}; remove it"
+                )
         if quantizer == "rq":
             self._check_rq()
         return self

@@ -378,6 +378,60 @@ def test_rq_without_centering_is_accepted_by_every_index(index):
     assert IndexPlan(type=index, quantizer=quantizer).quantizer.centering is False
 
 
+# (index type, quantizer type, field, value). Weaviate 1.40.4 stores the
+# collection without the field and returns no error.
+IGNORED_FIELDS = [
+    ("hnsw", "rq", "cache", True),
+    ("hnsw", "bq", "cache", True),
+    ("hnsw", "bq", "rescore_limit", 30),
+    ("flat", "rq", "training_limit", 100),
+    ("hfresh", "rq", "cache", True),
+    ("hfresh", "rq", "training_limit", 100),
+]
+# A dynamic index applies a field that its hnsw part or its flat part applies.
+APPLIED_FIELDS = [
+    ("hnsw", "rq", "rescore_limit", 40),
+    ("hnsw", "rq", "training_limit", 100),
+    ("hnsw", "sq", "rescore_limit", 25),
+    ("hnsw", "sq", "training_limit", 100),
+    ("hnsw", "pq", "segments", 8),
+    ("hnsw", "pq", "centroids", 16),
+    ("hnsw", "pq", "training_limit", 100),
+    ("flat", "rq", "cache", True),
+    ("flat", "rq", "rescore_limit", 40),
+    ("flat", "bq", "cache", True),
+    ("flat", "bq", "rescore_limit", 50),
+    ("hfresh", "rq", "rescore_limit", 66),
+    ("dynamic", "rq", "cache", True),
+    ("dynamic", "rq", "rescore_limit", 40),
+    ("dynamic", "rq", "training_limit", 100),
+    ("dynamic", "bq", "cache", True),
+    ("dynamic", "bq", "rescore_limit", 50),
+]
+
+
+@pytest.mark.parametrize(("index", "quantizer", "field", "value"), APPLIED_FIELDS)
+def test_index_accepts_a_quantizer_field_that_it_applies(
+    index, quantizer, field, value
+):
+    plan = IndexPlan(
+        type=index, quantizer=QuantizerPlan(type=quantizer, **{field: value})
+    )
+    assert getattr(plan.quantizer, field) == value
+
+
+@pytest.mark.parametrize(("index", "quantizer", "field", "value"), IGNORED_FIELDS)
+def test_index_refuses_a_quantizer_field_that_it_does_not_apply(
+    index, quantizer, field, value
+):
+    with pytest.raises(ValidationError) as e:
+        IndexPlan(type=index, quantizer=QuantizerPlan(type=quantizer, **{field: value}))
+    assert (
+        f"{field}={value!r} of quantizer type {quantizer!r} is not applied by "
+        f"index type {index!r}"
+    ) in str(e.value)
+
+
 def test_index_refuses_an_unknown_option():
     with pytest.raises(ValidationError) as e:
         IndexPlan(type="hnsw", options={"search_probe": 4})

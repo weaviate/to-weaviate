@@ -395,6 +395,21 @@ def test_rq_centering_that_the_index_does_not_support_is_refused(tmp_path, comma
     assert fakes.schema_calls == 0 and fakes.schema.ensured == []
 
 
+@pytest.mark.parametrize("command", ["check", "copy"])
+def test_a_quantizer_field_that_the_index_does_not_apply_is_refused(tmp_path, command):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    quantizer = {"type": "bq", "rescore_limit": 30}
+    _set_index(tmp_path / DIR / "plan.yaml", {"type": "hnsw", "quantizer": quantizer})
+    r = invoke(fakes, command, "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert d["code"] == "invalid_plan"
+    assert (
+        "rescore_limit=30 of quantizer type 'bq' is not applied by index type 'hnsw'"
+    ) in d["message"]
+    assert fakes.schema_calls == 0 and fakes.schema.ensured == []
+
+
 def test_inspect_unknown_collection_hint_names_both_database_settings():
     fakes = FakeFactories(FakeSource(cli_records(10)))
     r = invoke(fakes, "inspect", "chroma", "--collection", "nope", "--json")

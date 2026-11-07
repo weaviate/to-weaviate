@@ -62,7 +62,11 @@ vector settings. Review it before you run `check`.
   `none`, `rq` and `bq`, and `hfresh` takes `rq` only, as Weaviate 1.40.4
   does. `rq` takes 1, 4 or 8 bits with `hnsw`, 1 or 8 with `flat` and
   `dynamic`, and 1 with `hfresh`; its `centering` needs `hnsw` and 4 bits.
-  `inspect`, `check` and `copy` refuse any other setting.
+  A quantizer field in `plan.yaml` that the index type does not apply is
+  refused too: `cache` of `rq` and `bq`, and `rescore_limit` of `bq`, with
+  `hnsw`; `training_limit` of `rq` with `flat`; `cache` and
+  `training_limit` of `rq` with `hfresh`. `inspect`, `check` and `copy`
+  refuse any other setting.
 - `--force`: replace an existing `plan.yaml`.
 
 ### `check`
