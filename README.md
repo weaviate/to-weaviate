@@ -244,6 +244,12 @@ suite deletes the Weaviate collections that `SUITE_COLLECTIONS` in
 collection, also when the test Chroma holds collections that the seed does
 not make.
 
+Four tests are marked `xfail(strict=True)`: a dynamic index, and sq, pq or
+centered rq that compress the vectors. They describe two findings that are
+not fixed, and they expect a Weaviate server without `ASYNC_INDEXING`, as
+in CI. Against a server with `ASYNC_INDEXING=true` they can pass, and
+strict mode then reports them as failures.
+
 The `Makefile` starts the servers and sets the variables. `make` alone
 prints the targets. `make acceptance-up` and `make acceptance-down` call
 `tests/acceptance/cluster.sh up` and `down`. `make acceptance-up` needs a

@@ -23,7 +23,8 @@ ADD_BATCH = 300
 # most 5461 (max_batch_size of /api/v2/pre-flight-checks).
 LARGE_ADD_BATCH = 5000
 # Records of the resume collection. A copy in both mode embeds about 300
-# records a second on a laptop CPU, so a full copy runs about 27 seconds.
+# records a second on the CPU of a development machine, so a full copy runs
+# about 28 seconds there.
 RESUME_COUNT = 8000
 TOPICS = ("rivers", "mountains", "cities", "forests", "deserts", "oceans")
 TEST_URL = "http://localhost:8001"
