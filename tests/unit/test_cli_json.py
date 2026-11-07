@@ -1,4 +1,7 @@
+import errno
 import json
+import os
+import sqlite3
 from collections.abc import Iterator
 from typing import Any
 
@@ -959,9 +962,56 @@ def test_error_exit_covers_every_code():
         "target_rejected_schema": 2,
         "state_mismatch": 2,
         "invalid_state": 2,
+        "directory_unwritable": 2,
         "missing_credential": 3,
         "auth_failed": 3,
         "source_unreachable": 4,
         "target_unreachable": 4,
         "internal_error": 5,
     }
+
+
+UNWRITABLE_HINT = "Make --dir and its files writable, or use another --dir."
+DISK_FULL_HINT = "Free space on the disk of --dir, or use another --dir."
+
+
+@pytest.mark.parametrize(
+    ("code", "hint"),
+    [
+        (errno.ENOSPC, DISK_FULL_HINT),
+        (errno.EDQUOT, DISK_FULL_HINT),
+        (errno.EACCES, UNWRITABLE_HINT),
+        (errno.EPERM, UNWRITABLE_HINT),
+        (errno.EROFS, UNWRITABLE_HINT),
+    ],
+)
+def test_a_file_that_the_disk_or_its_permissions_refuse_is_directory_unwritable(
+    code, hint
+):
+    error = cli._as_cli_error(OSError(code, os.strerror(code), "mig/rejects.jsonl"))
+    assert (error.code, error.message, error.hint) == (
+        "directory_unwritable",
+        f"rejects.jsonl in mig cannot be written: {os.strerror(code)}.",
+        hint,
+    )
+    assert error.exit_code == 2
+
+
+def test_a_disk_error_without_a_file_names_the_migration_directory():
+    error = cli._as_cli_error(OSError(errno.ENOSPC, "No space left on device"))
+    assert (error.code, error.message) == (
+        "directory_unwritable",
+        "The migration directory cannot be written: No space left on device.",
+    )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ConnectionRefusedError(errno.ECONNREFUSED, "refused"),
+        FileNotFoundError(errno.ENOENT, "gone", "mig/plan.yaml"),
+        sqlite3.OperationalError("no such table: partitions"),
+    ],
+)
+def test_other_os_and_sqlite_errors_stay_internal_errors(error):
+    assert cli._as_cli_error(error).code == "internal_error"

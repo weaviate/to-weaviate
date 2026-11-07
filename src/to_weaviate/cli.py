@@ -17,10 +17,12 @@ else:
 
 import atexit
 import dataclasses
+import errno
 import json
 import os
 import random
 import re
+import sqlite3
 import sys
 import traceback
 from collections.abc import Callable, Iterator
@@ -113,7 +115,9 @@ from to_weaviate.state import (
     State,
     StateInUse,
     StateUnreadable,
+    StateUnwritable,
     Target,
+    unwritable_reason,
 )
 from to_weaviate.target.connect import connect
 from to_weaviate.target.reader import TargetReader, WeaviateReader
@@ -185,6 +189,16 @@ STATE_HINT = (
 )
 GONE_HINT = "To copy it again, use another --dir."
 UNREADABLE_STATE_HINT = "Start again with another --dir, or restore the file."
+UNWRITABLE_HINT = "Make --dir and its files writable, or use another --dir."
+DISK_FULL_HINT = "Free space on the disk of --dir, or use another --dir."
+# The errors of a write that the disk or the permissions of --dir refuse.
+UNWRITABLE_ERRNOS = {
+    errno.ENOSPC: DISK_FULL_HINT,
+    errno.EDQUOT: DISK_FULL_HINT,
+    errno.EACCES: UNWRITABLE_HINT,
+    errno.EPERM: UNWRITABLE_HINT,
+    errno.EROFS: UNWRITABLE_HINT,
+}
 STATE_IN_USE_HINT = "Wait for it to end, then run the command again."
 ADD_PROPERTY_HINT = (
     "Weaviate refused to add the property; read its message and edit plan.yaml."
@@ -224,6 +238,10 @@ def _validation_text(exc: ValidationError) -> str:
     return "; ".join(parts)
 
 
+def _unwritable_hint(reason: str) -> str:
+    return DISK_FULL_HINT if reason == "the disk is full" else UNWRITABLE_HINT
+
+
 def _refused(service: str, key: str, forbidden: bool) -> CliError:
     reason = (
         "the API key lacks a permission"
@@ -257,6 +275,23 @@ def _as_cli_error(exc: Exception) -> CliError:
         return CliError("invalid_state", str(exc), UNREADABLE_STATE_HINT)
     if isinstance(exc, StateInUse):
         return CliError("usage", str(exc), STATE_IN_USE_HINT)
+    if isinstance(exc, StateUnwritable):
+        return CliError("directory_unwritable", str(exc), _unwritable_hint(exc.reason))
+    if isinstance(exc, sqlite3.OperationalError):
+        reason = unwritable_reason(exc)
+        if reason is not None:
+            message = f"A database file cannot be written: {reason}."
+            return CliError("directory_unwritable", message, _unwritable_hint(reason))
+    if isinstance(exc, OSError) and exc.errno in UNWRITABLE_ERRNOS:
+        where = "The migration directory"
+        if exc.filename:
+            path = Path(str(exc.filename))
+            where = f"{path.name} in {path.parent}"
+        return CliError(
+            "directory_unwritable",
+            f"{where} cannot be written: {os.strerror(exc.errno)}.",
+            UNWRITABLE_ERRNOS[exc.errno],
+        )
     if isinstance(exc, ChromaError):
         if exc.status in (401, 403):
             refused = _refused("Chroma", "CHROMA_API_KEY", exc.status == 403)
