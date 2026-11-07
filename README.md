@@ -79,7 +79,7 @@ creates nothing. A planned property that an existing collection lacks is
 the warning `missing_property`: `copy` adds it to the collection. Plan
 entries that write into one collection, each into its own tenant, must
 have the same vectors and the same settings for each property that more
-than one of them has.
+than one of them has, and no two property names that differ only in case.
 
 ### `copy`
 

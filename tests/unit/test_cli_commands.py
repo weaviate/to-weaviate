@@ -1003,6 +1003,30 @@ def test_entries_of_one_collection_with_other_property_settings_are_an_invalid_p
     assert fakes.schema.ensured == [] and fakes.writer.calls == 0
 
 
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_entries_of_one_collection_may_not_name_a_property_in_two_cases(tmp_path, cmd):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    two_entries(tmp_path / DIR, ("Docs", "a"), ("Docs", "b"))
+    second = load_plan(tmp_path / DIR / "plan.yaml").collections[1].target
+    properties = [
+        p.model_copy(update={"name": "yEar"}) if p.name == "year" else p
+        for p in second.properties
+    ]
+    change_second_entry(tmp_path / DIR, properties=properties)
+    r = invoke(fakes, cmd, "--json")
+    message = (
+        f"properties year in {ENTRY_A} and yEar in {ENTRY_B} have the same name "
+        "ignoring case; Weaviate compares property names in lower case, so give "
+        "the property one name in every entry of Docs"
+    )
+    assert r.exit_code == 2, r.output
+    assert plan_errors(r) == [
+        {"code": "duplicate_property", "collection": "Docs", "message": message}
+    ]
+    assert json.loads(r.stdout)["code"] == "invalid_plan"
+    assert fakes.schema.ensured == [] and fakes.writer.calls == 0
+
+
 def test_entries_of_one_collection_may_have_other_properties_and_source_keys(
     tmp_path,
 ):
