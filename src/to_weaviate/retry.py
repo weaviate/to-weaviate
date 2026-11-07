@@ -6,13 +6,14 @@ from typing import TypeVar
 T = TypeVar("T")
 
 MAX_DELAY_SECONDS = 30.0
+ATTEMPTS = 6
 
 
 def with_retry(
     call: Callable[[], T],
     transient: Callable[[Exception], float | None],
     sleep: Callable[[float], None] = time.sleep,
-    attempts: int = 6,
+    attempts: int = ATTEMPTS,
 ) -> T:
     """Run `call`, retrying errors that `transient` accepts.
 
@@ -27,6 +28,15 @@ def with_retry(
             minimum = transient(exc)
             if minimum is None or attempt == attempts - 1:
                 raise
-            backoff = min(MAX_DELAY_SECONDS, 0.5 * 2**attempt)
-            sleep(min(MAX_DELAY_SECONDS, max(minimum, random.uniform(0, backoff))))
+            sleep(backoff_delay(attempt, minimum))
     raise AssertionError("attempts must be at least 1")
+
+
+def backoff_delay(attempt: int, minimum: float = 0.0) -> float:
+    """The delay after failed attempt number `attempt`, counted from 0.
+
+    Random up to 0.5 * 2**attempt seconds, at least `minimum` and at most
+    MAX_DELAY_SECONDS.
+    """
+    backoff = min(MAX_DELAY_SECONDS, 0.5 * 2**attempt)
+    return min(MAX_DELAY_SECONDS, max(minimum, random.uniform(0, backoff)))

@@ -247,6 +247,87 @@ def test_all_failed_exception_becomes_rejects():
     assert len(data.calls) == 1
 
 
+# Per-object errors of Weaviate 1.40.4 during a rolling restart of a 3-node
+# cluster: the coordinator could not reach the replica of the shard.
+OUTAGE_ERRORS = [
+    'resolve node name "weaviate-0" to host',
+    'connect: Post "http://10.244.1.30:7001/indices/My_docs/shards/mXrkWx66gdpV/'
+    'objects?schema_version=570": dial tcp 10.244.1.30:7001: connect: connection '
+    "refused",
+    'local index "My_docs" not found: deadline exceeded for waiting for update: '
+    "version got=569 want=570",
+]
+CONTENT_ERROR = (
+    "invalid integer property 'year' on class 'My_docs': requires an integer, "
+    "the given value is '1.5'"
+)
+
+
+def partial(*failed: tuple[int, str]) -> Any:
+    return SimpleNamespace(errors={i: SimpleNamespace(message=m) for i, m in failed})
+
+
+@pytest.mark.parametrize("error", OUTAGE_ERRORS)
+def test_objects_that_a_node_outage_refused_are_sent_again(error):
+    data = FakeData([partial((1, error)), SimpleNamespace(errors={})])
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    assert writer.write(ENTRY_KEEP, objects(3)) == []
+    assert [[o.uuid for o in call] for call in data.calls] == [
+        ["u0", "u1", "u2"],
+        ["u1"],
+    ]
+
+
+def test_objects_that_a_node_outage_keeps_refusing_are_a_refused_batch():
+    first = partial((0, OUTAGE_ERRORS[0]), (2, OUTAGE_ERRORS[1]))
+    data = FakeData([first] + [all_failed(OUTAGE_ERRORS[1])] * 10)
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    with pytest.raises(BatchRefused) as info:
+        writer.write(ENTRY_KEEP, objects(3))
+    assert str(info.value) == (
+        "Weaviate refused 2 objects of a batch of 3 in My_docs: " + OUTAGE_ERRORS[1]
+    )
+    assert [[o.uuid for o in call] for call in data.calls] == [["u0", "u1", "u2"]] + [
+        ["u0", "u2"]
+    ] * 6
+
+
+def test_objects_that_a_node_outage_refuses_on_every_attempt_are_a_refused_batch():
+    data = FakeData(
+        [partial((1, OUTAGE_ERRORS[2]))] + [partial((0, OUTAGE_ERRORS[2]))] * 10
+    )
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    with pytest.raises(BatchRefused) as info:
+        writer.write(ENTRY_KEEP, objects(3))
+    assert str(info.value) == (
+        "Weaviate refused 1 object of a batch of 3 in My_docs: " + OUTAGE_ERRORS[2]
+    )
+    assert len(data.calls) == 6
+
+
+def test_objects_refused_for_their_content_are_rejects_at_once():
+    data = FakeData(
+        [partial((1, CONTENT_ERROR), (2, OUTAGE_ERRORS[0])), SimpleNamespace(errors={})]
+    )
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    assert writer.write(ENTRY_KEEP, objects(3)) == [Reject("s1", CONTENT_ERROR)]
+    assert [[o.uuid for o in call] for call in data.calls] == [
+        ["u0", "u1", "u2"],
+        ["u2"],
+    ]
+
+
+def test_a_single_object_that_a_node_outage_refuses_is_a_refused_batch():
+    data = FakeData([all_failed(OUTAGE_ERRORS[0])] * 10)
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    with pytest.raises(BatchRefused) as info:
+        writer.write(ENTRY_KEEP, objects(1))
+    assert str(info.value) == (
+        "Weaviate refused every object of a batch of 1 in My_docs: " + OUTAGE_ERRORS[0]
+    )
+    assert len(data.calls) == 6
+
+
 def test_all_failed_batch_is_retried_and_then_raises():
     data = FakeData([all_failed("bad vector")] * 10)
     writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
