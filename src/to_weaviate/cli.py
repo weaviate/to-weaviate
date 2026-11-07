@@ -58,7 +58,7 @@ from to_weaviate.engine.check import (
     target_groups,
     userinfo_only,
 )
-from to_weaviate.engine.copy import copy_collection
+from to_weaviate.engine.copy import REJECTS_ARE_FINAL, copy_collection
 from to_weaviate.engine.verify import (
     REPORT_MD,
     Check,
@@ -1002,7 +1002,8 @@ def _copy(
         raise CliError(
             "rejects",
             f"{_plural(rejects, 'record')} rejected.",
-            f"See {directory / REJECTS_FILE} for each record and the reason.",
+            f"See {directory / REJECTS_FILE} for each record and the reason. "
+            f"{REJECTS_ARE_FINAL}",
             fields=document,
             text=text,
         )

@@ -93,11 +93,16 @@ deleted, the run reads again from an earlier record, or from the start with
 the warning "the source changed since the last run; re-reading from the
 start". A record read again is written again unchanged, so this is safe
 and only slower. The JSON document gives the offset of such a read as
-`reread_from`. Each record that the tool cannot convert or that Weaviate refuses goes to
-`rejects.jsonl` with the reason. When Weaviate refuses every object of a
-batch of more than one record, `copy` retries the batch as it retries a
-network error. When the retries are used up, it stops with
-`target_unreachable` and stores no reject. The next run starts at that page.
+`reread_from`.
+
+Each record that the tool cannot convert or that Weaviate refuses goes to
+`rejects.jsonl` with the reason. Rejects are final for this directory. After
+fixing the cause, copy `plan.yaml` and `inspect.json` to a new `--dir` and
+run `copy` there; objects already in Weaviate are written again unchanged.
+When Weaviate refuses every object of a batch of more than one record,
+`copy` retries the batch as it retries a network error. When the retries
+are used up, it stops with `target_unreachable` and stores no reject. The
+next run starts at that page.
 
 When the target collection exists without a property that `plan.yaml`
 has, `copy` adds the property before it writes. Its JSON document lists

@@ -145,7 +145,10 @@ def test_target_below_source_says_to_copy_again():
     assert check.detail == (
         "source count 10, target count 9; run to-weaviate copy again. If the "
         "counts still differ, records were skipped or rejected: read "
-        "rejects.jsonl and start the copy over in a new --dir."
+        "rejects.jsonl. Rejects are final for this directory. After fixing the "
+        "cause, copy plan.yaml and inspect.json to a new --dir and run "
+        "to-weaviate copy there; objects already in Weaviate are written again "
+        "unchanged."
     )
 
 

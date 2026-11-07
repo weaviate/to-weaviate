@@ -13,7 +13,7 @@ import os
 import random
 import sys
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
@@ -442,10 +442,19 @@ def extra_tiny_l2_ids(start: int, count: int) -> list[str]:
     return [r.id for r in _extra_tiny_l2(start, count)]
 
 
-def add_to_tiny_l2(start: int, count: int) -> None:
-    """Add `count` records numbered from `start` to tiny.l2."""
+def add_to_tiny_l2(
+    start: int, count: int, metadata: dict[str, Any] | None = None
+) -> None:
+    """Add `count` records numbered from `start` to tiny.l2.
+
+    The keys of `metadata` are added to the metadata of each record.
+    """
+    added = [
+        replace(r, metadata={**r.metadata, **(metadata or {})})
+        for r in _extra_tiny_l2(start, count)
+    ]
     with _test_server() as http:
-        _add(http, _collection_id(http, "tiny.l2"), _extra_tiny_l2(start, count))
+        _add(http, _collection_id(http, "tiny.l2"), added)
 
 
 def delete_from_tiny_l2(ids: list[str]) -> None:

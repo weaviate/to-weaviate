@@ -14,6 +14,11 @@ from to_weaviate.target.writer import Reject, TargetObject, Writer, to_object
 
 NOT_A_NUMBER = "embedding holds a value that is not a number"
 SOURCE_CHANGED = "the source changed since the last run; re-reading from the start"
+REJECTS_ARE_FINAL = (
+    "Rejects are final for this directory. After fixing the cause, copy "
+    "plan.yaml and inspect.json to a new --dir and run to-weaviate copy there; "
+    "objects already in Weaviate are written again unchanged."
+)
 
 
 @dataclass(frozen=True)

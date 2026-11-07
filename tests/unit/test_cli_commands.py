@@ -2107,6 +2107,21 @@ def test_an_object_that_weaviate_refuses_is_a_reject_with_its_message(tmp_path):
     assert checks["ids"]["detail"] == 'missing 1, extra 0; missing ids ["id-7"]'
 
 
+def test_the_rejects_hint_says_how_to_copy_a_rejected_record_again():
+    writer = FakeWriter(reject_ids={"id-3"})
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10)), writer=writer))
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 1, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["hint"]) == (
+        "rejects",
+        "See .to-weaviate/rejects.jsonl for each record and the reason. Rejects "
+        "are final for this directory. After fixing the cause, copy plan.yaml "
+        "and inspect.json to a new --dir and run to-weaviate copy there; "
+        "objects already in Weaviate are written again unchanged.",
+    )
+
+
 MIB = 1024 * 1024
 
 

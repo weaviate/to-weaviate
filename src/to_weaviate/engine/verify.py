@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, TypeVar
 
+from to_weaviate.engine.copy import REJECTS_ARE_FINAL
 from to_weaviate.ids import to_uuid
 from to_weaviate.plan import CollectionPlan
 from to_weaviate.sources.base import Source, SourceCollection
@@ -27,8 +28,7 @@ REPORT_MD = "report.md"
 REPORT_JSON = "report.json"
 TARGET_BELOW_SOURCE = (
     "run to-weaviate copy again. If the counts still differ, records were "
-    "skipped or rejected: read rejects.jsonl and start the copy over in a new "
-    "--dir."
+    f"skipped or rejected: read rejects.jsonl. {REJECTS_ARE_FINAL}"
 )
 TARGET_ABOVE_SOURCE = (
     "the target holds objects whose source records were deleted. This version "
