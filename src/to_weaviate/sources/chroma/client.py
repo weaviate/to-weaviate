@@ -177,17 +177,23 @@ class ChromaClient:
         return [row["name"] for row in rows]
 
     def collections(self, tenant: str, database: str) -> list[dict[str, Any]]:
+        """Every collection of `database`. Each page starts after the rows read.
+
+        A server can cap a page below the limit. The largest page received,
+        at most the limit, is taken as the server's page size. The listing
+        ends at an empty page or at a page shorter than that size.
+        """
         path = f"/api/v2/tenants/{_seg(tenant)}/databases/{_seg(database)}/collections"
         found: list[dict[str, Any]] = []
-        offset = 0
+        size = 0
         while True:
             page = self._request(
-                "GET", path, params={"limit": COLLECTIONS_PAGE, "offset": offset}
+                "GET", path, params={"limit": COLLECTIONS_PAGE, "offset": len(found)}
             )
             found.extend(page)
-            if len(page) < COLLECTIONS_PAGE:
+            if not page or len(page) < size:
                 return found
-            offset += COLLECTIONS_PAGE
+            size = min(COLLECTIONS_PAGE, max(size, len(page)))
 
     def count(self, tenant: str, database: str, collection_id: str) -> int:
         path = self._collection_path(tenant, database, collection_id) + "/count"

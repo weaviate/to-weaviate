@@ -275,6 +275,48 @@ def test_collections_reads_all_pages():
     assert seen[0].url.path == "/api/v2/tenants/t/databases/d/collections"
 
 
+def collection_rows(total, cap):
+    """A handler that serves `total` collections, at most `cap` per page."""
+    rows = [{"id": str(i)} for i in range(total)]
+
+    def handler(request):
+        offset = int(request.url.params["offset"])
+        limit = int(request.url.params["limit"])
+        return httpx.Response(200, json=rows[offset : offset + min(limit, cap)])
+
+    return handler
+
+
+@pytest.mark.parametrize("total", [250, 200])
+def test_collections_advance_by_the_rows_received(total):
+    seen = []
+    serve = collection_rows(total, cap=100)
+
+    def handler(request):
+        seen.append(request)
+        return serve(request)
+
+    client, _ = make(handler)
+    found = client.collections("t", "d")
+    assert [row["id"] for row in found] == [str(i) for i in range(total)]
+    assert [r.url.params["offset"] for r in seen][:3] == ["0", "100", "200"]
+    assert {r.url.params["limit"] for r in seen} == {"1000"}
+
+
+def test_collections_page_over_the_limit_counts_as_full():
+    rows = [{"id": str(i)} for i in range(2500)]
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        offset = int(request.url.params["offset"])
+        return httpx.Response(200, json=rows[offset : offset + 1200])
+
+    client, _ = make(handler)
+    assert client.collections("t", "d") == rows
+    assert [r.url.params["offset"] for r in seen][:3] == ["0", "1200", "2400"]
+
+
 REDIRECT_HINT = "Set CHROMA_URL to the address the server redirects to."
 NOT_JSON_HINT = (
     "Check that CHROMA_URL points at the Chroma API and not at a proxy or a web page."
