@@ -453,3 +453,21 @@ def test_a_name_that_weaviate_accepts_is_no_invalid_name(name):
     )
     errors, _ = plan_findings(plan_of(found), None, vectorizer_for)
     assert errors == []
+
+
+def test_a_kept_vector_of_a_source_without_vectors_is_an_error():
+    found = entry([keep()])
+    found.source.dimension = None
+    errors, _ = plan_findings(plan_of(found), None, vectorizer_for)
+    assert [(e.code, e.collection) for e in errors] == [("no_source_vectors", "Docs")]
+    assert "--vectors embed --vectorizer" in errors[0].message
+
+
+@pytest.mark.parametrize(
+    ("count", "vector"), [(0, keep()), (1, embed("text2vec-weaviate"))]
+)
+def test_an_empty_source_or_an_embedded_vector_needs_no_source_vectors(count, vector):
+    found = entry([vector])
+    found.source.dimension, found.source.count = None, count
+    errors, _ = plan_findings(plan_of(found), None, vectorizer_for)
+    assert errors == []

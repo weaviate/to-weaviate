@@ -11,12 +11,14 @@ from to_weaviate.naming import (
 )
 from to_weaviate.plan import (
     DISTANCES,
+    EMBED_INSTEAD,
     INDEX_DISTANCES,
     CollectionPlan,
     Plan,
     PropertyPlan,
     VectorizerMapper,
     VectorizerPlan,
+    has_no_vectors,
 )
 from to_weaviate.sources.base import SourceCollection
 from to_weaviate.target.schema import (
@@ -473,6 +475,22 @@ def _unmapped_findings(
     ]
 
 
+def _no_vector_findings(entry: CollectionPlan) -> list[Finding]:
+    """A kept vector of a source that holds records but no vector."""
+    if not has_no_vectors(entry.source):
+        return []
+    return [
+        Finding(
+            "no_source_vectors",
+            entry.target.name,
+            f"{entry.source.name} has records without vectors, but vector "
+            f"{vector.name} keeps the source vectors; {EMBED_INSTEAD}",
+        )
+        for vector in entry.target.vectors
+        if vector.mode == "keep"
+    ]
+
+
 def _segment_findings(entry: CollectionPlan) -> list[Finding]:
     """pq segments that do not divide the dimension of a kept vector.
 
@@ -648,6 +666,7 @@ def plan_findings(
     warnings.extend(cleaned_option_findings(groups))
     warnings.extend(async_indexing_findings(groups))
     for entry in plan.collections:
+        errors.extend(_no_vector_findings(entry))
         errors.extend(_keep_model_findings(entry, vectorizer_for))
         errors.extend(_unmapped_findings(entry, inspected))
         for prop in entry.target.properties:

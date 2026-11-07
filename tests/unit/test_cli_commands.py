@@ -2357,3 +2357,39 @@ def test_copy_adds_a_planned_property_that_the_collection_lacks(tmp_path):
     assert r.exit_code == 0, r.output
     assert fakes.writer.objects[to_uuid("id-12")].properties["lang"] == "en"
     assert len(fakes.writer.objects) == 15
+
+
+def test_inspect_notes_and_check_refuses_a_source_without_vectors(tmp_path):
+    records = [replace(r, vector=None) for r in cli_records(10)]
+    fakes = FakeFactories(FakeSource(records))
+    r = invoke(fakes, "inspect", "chroma", "--json")
+    assert r.exit_code == 0, r.output
+    row = json.loads(r.stdout)["collections"][0]
+    assert (row["dimension"], row["vectors"][0]["mode"]) == (None, "keep")
+    assert NO_VECTORS_NOTE in row["notes"]
+    for cmd in ("check", "copy"):
+        r = invoke(fakes, cmd, "--json")
+        assert r.exit_code == 2, r.output
+        errors = json.loads(r.stdout)["errors"]
+        assert [(e["code"], e["message"]) for e in errors] == [
+            ("no_source_vectors", NO_VECTORS_ERROR)
+        ]
+    assert fakes.writer.calls == 0
+    args = ["--force", "--vectors", "embed", "--vectorizer", "text2vec-weaviate"]
+    r = invoke(fakes, "inspect", "chroma", *args, "--json")
+    assert r.exit_code == 0, r.output
+    assert NO_VECTORS_NOTE not in json.loads(r.stdout)["collections"][0]["notes"]
+    for cmd in ("check", "copy"):
+        assert invoke(fakes, cmd).exit_code == 0, cmd
+    assert len(fakes.writer.objects) == 10
+
+
+NO_VECTORS_NOTE = (
+    "the source has no vectors; run to-weaviate inspect chroma --force "
+    "--vectors embed --vectorizer MODULE"
+)
+NO_VECTORS_ERROR = (
+    "docs has records without vectors, but vector default keeps the source "
+    "vectors; run to-weaviate inspect chroma --force --vectors embed "
+    "--vectorizer MODULE"
+)
