@@ -32,6 +32,7 @@ from e2e import (
     weaviate_near_vector,
     weaviate_object,
     weaviate_set_shard_status,
+    weaviate_set_tenant_status,
     weaviate_tenants,
     weaviate_update_object,
 )
@@ -58,6 +59,7 @@ __all__ = [
     "weaviate_near_vector",
     "weaviate_object",
     "weaviate_set_shard_status",
+    "weaviate_set_tenant_status",
     "weaviate_tenants",
     "weaviate_update_object",
     "write_plan",

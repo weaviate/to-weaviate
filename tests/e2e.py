@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 import weaviate
 from weaviate.classes.query import Filter
+from weaviate.classes.tenants import Tenant, TenantActivityStatus
 from weaviate.collections import Collection
 from weaviate.collections.classes.config import CollectionConfig
 from weaviate.collections.classes.internal import Object
@@ -254,6 +255,13 @@ def weaviate_update_object(name: str, uuid: Any, properties: dict[str, Any]) -> 
 def weaviate_set_shard_status(name: str, status: str) -> None:
     """Set every shard of the target collection `name` to READY or READONLY."""
     _weaviate().collections.use(name).config.update_shards(status=status)  # type: ignore[arg-type]
+
+
+def weaviate_set_tenant_status(name: str, tenant: str, status: str) -> None:
+    """Set `tenant` of the target collection `name` to ACTIVE or INACTIVE."""
+    _weaviate().collections.use(name).tenants.update(
+        Tenant(name=tenant, activity_status=TenantActivityStatus(status))
+    )
 
 
 def weaviate_tenants(name: str) -> set[str]:

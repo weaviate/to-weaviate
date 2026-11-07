@@ -4,7 +4,14 @@ from chroma.seed import (
     extra_tiny_l2_ids,
     tiny_l2_count,
 )
-from conftest import run, weaviate_count, weaviate_set_shard_status
+from conftest import (
+    read_plan,
+    run,
+    weaviate_count,
+    weaviate_set_shard_status,
+    weaviate_set_tenant_status,
+    write_plan,
+)
 
 TARGET = "Tiny_l2"
 BATCH_HINT = "Fix the cause and run to-weaviate copy again. It resumes at this page."
@@ -59,3 +66,31 @@ def test_an_unreachable_source_or_target_exits_4(seeded, tmp_path):
     assert r.exit_code == 4 and r.data["code"] == "target_unreachable", r
     assert "WEAVIATE_URL" in r.data["hint"]
     assert sorted(p.name for p in tmp_path.iterdir()) == ["inspect.json", "plan.yaml"]
+
+
+def test_an_inactive_tenant_stops_copy_and_the_next_copy_resumes(seeded, tmp_path):
+    names = ["--collection", "tenant-a", "--collection", "tenant-b"]
+    r = run(["inspect", "chroma", *names], tmp_path)
+    assert r.exit_code == 0, r
+    plan = read_plan(tmp_path)
+    for entry in plan["collections"]:
+        entry["target"]["name"] = "Tenants"
+        entry["target"]["tenant"] = entry["source"]["name"].removeprefix("tenant-")
+    write_plan(tmp_path, plan)
+    r = run(["copy", "--collection", "tenant-a"], tmp_path)
+    assert r.exit_code == 0, r
+    weaviate_set_tenant_status("Tenants", "b", "INACTIVE")
+    r = run(["copy", "--collection", "tenant-b"], tmp_path)
+    assert r.exit_code == 4 and r.data["code"] == "target_unreachable", r
+    assert r.data["hint"] == BATCH_HINT, r
+    # Five readers write chunks of four records of tenant-b.
+    assert r.data["message"] == (
+        "Weaviate refused every object of a batch of 4 in Tenants: tenant not "
+        "active: 'b'"
+    ), r
+    weaviate_set_tenant_status("Tenants", "b", "ACTIVE")
+    r = run(["copy", "--collection", "tenant-b"], tmp_path)
+    assert r.exit_code == 0, r
+    assert weaviate_count("Tenants", "b") == 20
+    r = run(["verify"], tmp_path)
+    assert r.exit_code == 0, r
