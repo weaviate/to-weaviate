@@ -299,7 +299,9 @@ def test_a_later_run_reads_the_records_added_after_a_deletion(src, state, events
     # the two pages of the tail from offset 900.
     assert (src.id_reads - id_reads, src.read_calls - reads) == (3, 2)
     assert set(writer.writes_per_uuid.values()) == {1}
-    assert result.reread_from == 900
+    assert state.partitions(C.ref)[-1] == Partition("900-", "900", "1050")
+    # No record was read again.
+    assert result.reread_from is None
 
 
 def test_a_deleted_last_read_record_makes_the_run_read_from_the_start(
@@ -389,11 +391,11 @@ def test_a_one_record_partition_has_no_previous_id_and_its_last_id_is_taken(
     assert state.previous_ids(C.ref) == {}
     del src.records[0]
     src.records.extend(make_records(3, start=2))
-    copy_collection(src, writer, state, events, ENTRY, two, 2)
+    result = copy_collection(src, writer, state, events, ENTRY, two, 2)
     assert {to_uuid(r.id) for r in src.records} <= set(writer.objects)
     # id-1, the last id of the partition 1-2, is at offset 0 now.
     assert state.partitions(C.ref)[-1] == Partition("1-", "1", "4")
-    assert _warnings(tmp_path) == []
+    assert result.reread_from is None and _warnings(tmp_path) == []
 
 
 def test_a_copy_in_progress_in_an_older_state_resumes_without_a_reread(

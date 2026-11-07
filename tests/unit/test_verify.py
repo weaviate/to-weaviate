@@ -223,7 +223,7 @@ def test_verify_ids_passes_only_without_differences():
 
 
 COPY_AGAIN = (
-    "run to-weaviate copy again. If the counts still differ, records were "
+    "run to-weaviate copy again. If ids are still missing, records were "
     "skipped or rejected: read rejects.jsonl. Rejects are final for this "
     "directory. After fixing the cause, copy plan.yaml and inspect.json to a "
     "new --dir and run to-weaviate copy there; objects already in Weaviate are "

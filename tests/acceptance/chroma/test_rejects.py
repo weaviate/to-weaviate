@@ -4,7 +4,7 @@ import pytest
 from chroma.seed import count
 from conftest import run, weaviate_by_source_id, weaviate_count
 
-from to_weaviate.engine.verify import TARGET_BELOW_SOURCE
+from to_weaviate.engine.verify import MISSING_IDS
 
 TARGET = "Rejects"
 # (inspect options, rejected source id, reason). Chroma accepts both records:
@@ -47,5 +47,5 @@ def test_a_record_that_cannot_be_written_is_a_reject(
     checks = {c["name"]: c for c in r.data["checks"]}
     assert not checks["count"]["passed"]
     assert checks["ids"]["detail"] == (
-        f'missing 1, extra 0; missing ids ["{source_id}"]; {TARGET_BELOW_SOURCE}'
+        f'missing 1, extra 0; missing ids ["{source_id}"]; {MISSING_IDS}'
     )

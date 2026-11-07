@@ -88,11 +88,13 @@ Creates the target collections, then copies the records. Progress goes to
 `state.sqlite`, so a second run continues where the first one stopped.
 Each run also copies the records added to the source since the last run,
 also when records were deleted in between: it finds the last record that
-the run before read and reads the records after it. When that record was
-deleted, the run reads again from an earlier record, or from the start with
-the warning "the source changed since the last run; re-reading from the
-start". A record read again is written again unchanged, so this is safe
-and only slower. The JSON document gives the offset of such a read as
+the run before read, with the record before it, and reads the records
+after it. When one of the two was deleted, or the last one was deleted and
+added again, the run reads again from an earlier record, or from the start
+with the warning "the source changed since the last run; re-reading from
+the start". A record read again is written again unchanged, so this is
+safe and only slower. A run that reads records again gives the offset it
+reads from as `reread_from` in its JSON document; other runs have no
 `reread_from`.
 
 Each record that the tool cannot convert or that Weaviate refuses goes to
@@ -140,10 +142,10 @@ and `report.json`.
 `copy` reads a live source by position. A record deleted from the source
 during a copy can make `copy` skip other records. Run a full `verify` after
 writes to the source have stopped. When the ids differ, the ids check names
-the fix, as the count check does. `verify --quick` skips the id comparison
-and compares the counts only, so it cannot see a missing record that an
-extra one cancels, such as an object whose source record was deleted; it
-finds a missing record only if the sample holds that record. Run the full
+the fix, as the count check does. `verify --quick` skips the comparison of
+the full id lists. The counts can match when an extra object, such as one
+whose source record was deleted, cancels a missing one; `--quick` then
+finds the missing record only if the sample holds it. Run the full
 `verify` after the last copy of a source that changed.
 
 Weaviate stores an `int` property as a double, so an int above 2**53 in
@@ -161,7 +163,10 @@ depends on its CPU. To keep every digit of such a value, type the property
 
 Shows the copy progress and the recorded target of each collection from
 `state.sqlite`. It needs no credentials. The total of a collection is the
-highest source count that a `copy` read.
+highest source count that a `copy` read. The copied count is the number of
+records that `copy` wrote, also those deleted from the source since, so
+after deletions in the source it can be above the total. Records that a
+run reads again are counted once.
 
 ## Migration directory
 

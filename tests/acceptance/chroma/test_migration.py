@@ -164,8 +164,11 @@ def test_a_copy_after_deletions_reads_the_records_added_since(seeded, tmp_path):
         add_to_tiny_l2(10, 5)
         r = run(["copy"], tmp_path)
         assert r.exit_code == 0, r
-        # The 7 seed records left come first, so the 5 added start at offset 7.
-        assert r.data["collections"][0]["reread_from"] == 7, r
+        # The 7 seed records left come first, and the tail reads the 5 added
+        # from offset 7. No record is read again: 10 + 5 were copied.
+        row = r.data["collections"][0]
+        assert "reread_from" not in row, r
+        assert (row["copied"], row["total"]) == (15, 12), r
         # copy deletes no object, so the test deletes those of the deleted
         # records. A tiny.l2 id is a UUID, which the object keeps.
         for source_id in deleted:

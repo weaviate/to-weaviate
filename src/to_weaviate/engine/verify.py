@@ -30,6 +30,10 @@ TARGET_BELOW_SOURCE = (
     "run to-weaviate copy again. If the counts still differ, records were "
     f"skipped or rejected: read rejects.jsonl. {REJECTS_ARE_FINAL}"
 )
+MISSING_IDS = (
+    "run to-weaviate copy again. If ids are still missing, records were "
+    f"skipped or rejected: read rejects.jsonl. {REJECTS_ARE_FINAL}"
+)
 TARGET_ABOVE_SOURCE = (
     "the target holds objects whose source records were deleted. This version "
     "has no command that removes them."
@@ -174,7 +178,7 @@ def verify_ids(diff: IdDiff, entry: CollectionPlan) -> Check:
     if diff.extra_sample:
         detail += f"; extra ids {_quoted(diff.extra_sample)}"
     if diff.missing:
-        detail += f"; {TARGET_BELOW_SOURCE}"
+        detail += f"; {MISSING_IDS}"
     if diff.extra:
         detail += f"; {TARGET_ABOVE_SOURCE}"
     return _check("ids", entry, diff.missing == diff.extra == 0, detail)

@@ -25,7 +25,7 @@ REJECTS_ARE_FINAL = (
 class CopyResult:
     copied: int
     rejects: int
-    # The start offset of a tail that a shift of the source offsets moved.
+    # The start offset of a tail that reads records of earlier runs again.
     reread_from: int | None = None
 
 
@@ -370,9 +370,9 @@ def copy_collection(
 
     `_tail_place` decides where the tail starts. When the source offsets
     shifted, the tail is added also without new records, so that the next
-    run starts from its end, and `reread_from` holds its start. A tail from
-    offset 0 writes a `source_changed` warning event and passes the same
-    text to `warn`.
+    run starts from its end. When the tail reads records of earlier runs
+    again, `reread_from` holds its start. A tail from offset 0 writes a
+    `source_changed` warning event and passes the same text to `warn`.
     """
     ref = collection.ref
     state.init_collection(
@@ -396,7 +396,7 @@ def copy_collection(
         }
         place = _tail_place(source, collection, stored, marks, covered, count)
         shifted = place.start != covered
-        if shifted:
+        if place.superseded:
             reread_from = place.start
         if shifted and place.start == 0:
             events.emit("warning", "source_changed", ref=ref, message=SOURCE_CHANGED)

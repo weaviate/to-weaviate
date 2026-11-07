@@ -172,8 +172,11 @@ SCHEMA_HINT = (
     "Read the server's message and edit plan.yaml. A free Weaviate Cloud "
     "cluster accepts only the index type hfresh."
 )
-NEW_DIR_HINT = "To copy to the new target, use another --dir."
-STATE_HINT = f"To resume, set WEAVIATE_URL and the target name back. {NEW_DIR_HINT}"
+STATE_HINT = (
+    "To resume, set WEAVIATE_URL and the target name back. To copy to the new "
+    "target, use another --dir."
+)
+GONE_HINT = "To copy it again, use another --dir."
 UNREADABLE_STATE_HINT = "Start again with another --dir, or restore the file."
 STATE_IN_USE_HINT = "Wait for it to end, then run the command again."
 ADD_PROPERTY_HINT = (
@@ -849,7 +852,7 @@ def _planned_targets(
                 directory,
                 f"{name} to {_target_text(target)}",
                 f"That {missing} does not exist in the target now.",
-                NEW_DIR_HINT,
+                GONE_HINT,
             )
         planned[ref] = target
     return planned
