@@ -162,8 +162,8 @@ INTERNAL_HINT = (
 )
 DEBUG_VARIABLE = "TO_WEAVIATE_DEBUG"
 SCHEMA_HINT = (
-    "A free Weaviate Cloud cluster accepts only the hfresh index. Run "
-    "to-weaviate inspect chroma --index hfresh --force, or edit plan.yaml."
+    "Read the server's message and edit plan.yaml. A free Weaviate Cloud "
+    "cluster accepts only the index type hfresh."
 )
 STATE_HINT = (
     "To resume, set WEAVIATE_URL and the target name back. To copy to the new "
