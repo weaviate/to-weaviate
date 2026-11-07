@@ -5,8 +5,9 @@ import re
 RESERVED_PROPERTIES = frozenset(
     {"id", "_id", "_additional", "vector", "document", "source_id", "uri"}
 )
-# Weaviate 1.40.4 refuses a longer property name.
+# Weaviate 1.40.4 refuses a longer property name or collection name.
 MAX_PROPERTY_NAME = 231
+MAX_COLLECTION_NAME = 255
 
 # Weaviate refuses to create a property whose name ends in one of these:
 # reservedPropertyNameSuffixes in entities/schema/validation.go, v1.40.4.
@@ -117,11 +118,20 @@ def _numbered(base: str, taken: set[str]) -> str:
 
 
 def collection_name(source_name: str, taken: set[str]) -> str:
-    """Return a valid collection name not in `taken`. Does not modify `taken`."""
+    """Return a valid collection name not in `taken`. Does not modify `taken`.
+
+    A name longer than MAX_COLLECTION_NAME is cut, so that it stays within
+    the limit with its `_<n>` suffix.
+    """
     name = _INVALID.sub("_", source_name)
     if not name or not ("A" <= name[0] <= "Z" or "a" <= name[0] <= "z"):
         name = "C_" + name
-    return _unique(name[0].upper() + name[1:], taken)
+    base = name[0].upper() + name[1:MAX_COLLECTION_NAME]
+    found = _unique(base, taken)
+    while len(found) > MAX_COLLECTION_NAME:
+        base = base[: len(base) - (len(found) - MAX_COLLECTION_NAME)]
+        found = _unique(base, taken)
+    return found
 
 
 def property_name(source_key: str, taken: set[str]) -> str:

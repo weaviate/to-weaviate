@@ -110,6 +110,10 @@ class SchemaRejected(Exception):
         self.action = action
 
 
+class PropertyRejected(SchemaRejected):
+    """The server refused to add a property to an existing collection."""
+
+
 class Schema(Protocol):
     """Target schema operations. `group` holds the entries of one target name."""
 
@@ -532,7 +536,7 @@ def _add_property(
         with_retry(lambda: config.add_property(_property(prop)), transient, sleep=sleep)
     except UnexpectedStatusCodeError as exc:
         if exc.status_code in (400, 422):
-            raise SchemaRejected(
+            raise PropertyRejected(
                 _server_message(exc), f"add the property {prop.name} to {name}"
             ) from exc
         raise

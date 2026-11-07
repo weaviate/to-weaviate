@@ -56,6 +56,14 @@ class StateUnreadable(Exception):
         self.path = path
 
 
+class StateInUse(Exception):
+    """Another process holds a lock on the state at `path`."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(f"Another to-weaviate process is using {path.parent}.")
+        self.path = path
+
+
 @dataclass(frozen=True)
 class CollectionProgress:
     ref: str
@@ -84,7 +92,8 @@ class State:
     Collections and partitions are listed in insertion (rowid) order. A file
     written before the `targets` or the `quantizer_updates` table existed gets
     the table when it is opened, with no row for any ref. A file that sqlite
-    cannot read raises StateUnreadable when it is opened.
+    cannot read raises StateUnreadable when it is opened, and a file that
+    another process keeps locked raises StateInUse.
     """
 
     def __init__(self, path: Path) -> None:
@@ -97,6 +106,9 @@ class State:
                 self._db.executescript(_SCHEMA)
         except sqlite3.DatabaseError as exc:
             self._db.close()
+            # Python 3.10 gives no sqlite error code, only its message.
+            if isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc):
+                raise StateInUse(path) from exc
             raise StateUnreadable(path) from exc
 
     def close(self) -> None:

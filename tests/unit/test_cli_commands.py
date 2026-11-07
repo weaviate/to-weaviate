@@ -38,7 +38,7 @@ from to_weaviate.sources.base import Page, Partition, Record, SourceCollection
 from to_weaviate.sources.chroma.client import ChromaError
 from to_weaviate.sources.chroma.source import ChromaSource
 from to_weaviate.state import State
-from to_weaviate.target.schema import SchemaRejected
+from to_weaviate.target.schema import PropertyRejected, SchemaRejected
 from to_weaviate.target.writer import WeaviateWriter
 
 DIR = Path(".to-weaviate")
@@ -2349,6 +2349,9 @@ def test_copy_adds_a_planned_property_that_the_collection_lacks(tmp_path):
     r = invoke(fakes, "copy", "--json")
     assert fakes.schema.added == [("Docs", "lang")]
     assert "Added the property lang to Docs" in r.stderr
+    assert json.loads(r.stdout)["added_properties"] == [
+        {"collection": "Docs", "property": "lang"}
+    ]
     # The five records were rejected by the run before and are not read again.
     assert r.exit_code == 1 and json.loads(r.stdout)["code"] == "rejects", r.output
     # A copy in a new directory writes them with the new property.
@@ -2356,6 +2359,7 @@ def test_copy_adds_a_planned_property_that_the_collection_lacks(tmp_path):
     assert invoke(fakes, "inspect", "chroma", *other).exit_code == 0
     r = invoke(fakes, "copy", "--json", *other)
     assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["added_properties"] == []
     assert fakes.writer.objects[to_uuid("id-12")].properties["lang"] == "en"
     assert len(fakes.writer.objects) == 15
 
@@ -2412,3 +2416,54 @@ def test_a_property_name_that_the_server_stores_otherwise_is_an_invalid_plan(
         ("invalid_name", "property Year")
     ]
     assert fakes.writer.calls == 0 and fakes.schema.ensured == []
+
+
+def test_a_state_file_that_another_process_locks_is_in_use(tmp_path, monkeypatch):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    assert invoke(fakes, "copy").exit_code == 0
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(
+        "to_weaviate.state.sqlite3.connect",
+        lambda *a, **k: _Locked(real_connect(*a, **k)),
+    )
+    r = invoke(fakes, "status", "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"], d["hint"]) == (
+        "usage",
+        f"Another to-weaviate process is using {DIR}.",
+        "Wait for it to end, then run the command again.",
+    )
+
+
+class _Locked:
+    """A sqlite connection whose statements find the file locked."""
+
+    def __init__(self, db: sqlite3.Connection) -> None:
+        self._db = db
+
+    def __enter__(self) -> "_Locked":
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def executescript(self, script: str) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    def close(self) -> None:
+        self._db.close()
+
+
+def test_a_refused_property_addition_names_the_plan_in_its_hint():
+    refused = PropertyRejected("conflict for property lang", "add the property lang")
+    source = FakeSource(cli_records(10))
+    fakes = inspected(FakeFactories(source, schema=FakeSchema(ensure_error=refused)))
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"], d["hint"]) == (
+        "target_rejected_schema",
+        "Weaviate refused to add the property lang: conflict for property lang",
+        "Weaviate refused to add the property; read its message and edit plan.yaml.",
+    )

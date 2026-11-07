@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -7,7 +8,13 @@ import pytest
 from fakes import old_state_file
 
 from to_weaviate.sources.base import Partition
-from to_weaviate.state import CollectionProgress, State, StateUnreadable, Target
+from to_weaviate.state import (
+    CollectionProgress,
+    State,
+    StateInUse,
+    StateUnreadable,
+    Target,
+)
 from to_weaviate.target.writer import Reject
 
 REF = "default/c1"
@@ -396,3 +403,28 @@ def test_a_file_that_is_not_a_database_raises_state_unreadable(tmp_path):
     with pytest.raises(StateUnreadable) as info:
         State(path)
     assert info.value.path == path
+
+
+class LockedConnection:
+    """A sqlite connection whose first statement finds the file locked."""
+
+    def __enter__(self) -> "LockedConnection":
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def executescript(self, script: str) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    def close(self) -> None:
+        pass
+
+
+def test_a_locked_file_raises_state_in_use(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "to_weaviate.state.sqlite3.connect", lambda *a, **k: LockedConnection()
+    )
+    with pytest.raises(StateInUse) as info:
+        State(tmp_path / "state.sqlite")
+    assert str(info.value) == f"Another to-weaviate process is using {tmp_path}."

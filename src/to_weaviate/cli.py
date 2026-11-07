@@ -107,11 +107,18 @@ from to_weaviate.sources.base import FieldStats, Source, SourceCollection
 from to_weaviate.sources.chroma.client import ChromaClient, ChromaError
 from to_weaviate.sources.chroma.mapping import stored_embedding, vectorizer_for
 from to_weaviate.sources.chroma.source import ChromaSource
-from to_weaviate.state import CollectionProgress, State, StateUnreadable, Target
+from to_weaviate.state import (
+    CollectionProgress,
+    State,
+    StateInUse,
+    StateUnreadable,
+    Target,
+)
 from to_weaviate.target.connect import connect
 from to_weaviate.target.reader import TargetReader, WeaviateReader
 from to_weaviate.target.schema import (
     PlanMismatch,
+    PropertyRejected,
     Schema,
     SchemaRejected,
     WeaviateSchema,
@@ -170,6 +177,10 @@ STATE_HINT = (
     "target, use another --dir."
 )
 UNREADABLE_STATE_HINT = "Start again with another --dir, or restore the file."
+STATE_IN_USE_HINT = "Wait for it to end, then run the command again."
+ADD_PROPERTY_HINT = (
+    "Weaviate refused to add the property; read its message and edit plan.yaml."
+)
 BATCH_HINT = "Fix the cause and run to-weaviate copy again. It resumes at this page."
 MISSING_TEXT = "missing in the collection; copy will add it"
 # A part of a text in single or double quotes; a quote after a backslash is
@@ -236,6 +247,8 @@ def _as_cli_error(exc: Exception) -> CliError:
         return CliError("usage", str(exc), exc.hint)
     if isinstance(exc, StateUnreadable):
         return CliError("invalid_state", str(exc), UNREADABLE_STATE_HINT)
+    if isinstance(exc, StateInUse):
+        return CliError("usage", str(exc), STATE_IN_USE_HINT)
     if isinstance(exc, ChromaError):
         if exc.status in (401, 403):
             refused = _refused("Chroma", "CHROMA_API_KEY", exc.status == 403)
@@ -277,7 +290,7 @@ def _as_cli_error(exc: Exception) -> CliError:
         return CliError(
             "target_rejected_schema",
             f"Weaviate refused to {exc.action}: {exc}",
-            SCHEMA_HINT,
+            ADD_PROPERTY_HINT if isinstance(exc, PropertyRejected) else SCHEMA_HINT,
         )
     if isinstance(exc, BatchRefused):
         return CliError("target_unreachable", str(exc), BATCH_HINT)
@@ -922,11 +935,13 @@ def _copy(
                 source_names,
                 directory,
             )
+            added: list[dict[str, str]] = []
             for name, group in selected.items():
-                added = schema.missing_properties(group)
+                missing = schema.missing_properties(group)
                 schema.ensure(group)
-                for prop in added:
+                for prop in missing:
                     info(json_output, f"Added the property {prop} to {name}")
+                    added.append({"collection": name, "property": prop})
             events = Events(directory / EVENTS_FILE)
             for entry in entries:
                 ref = entry.source.ref
@@ -965,6 +980,7 @@ def _copy(
             state.close()
     rows = _rows(entries, progress)
     document, text = _progress_output(entries, rows)
+    document["added_properties"] = added
     rejects = sum(row["rejects"] for row in rows)
     if rejects:
         raise CliError(

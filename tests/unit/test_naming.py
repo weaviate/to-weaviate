@@ -2,6 +2,7 @@ import pytest
 
 from to_weaviate.naming import (
     collection_name,
+    collection_name_problem,
     property_name,
     property_name_problem,
     reserved_suffix,
@@ -126,6 +127,16 @@ def test_drafted_property_names_are_names_the_server_accepts():
 
 def test_a_reserved_name_near_the_length_limit_falls_back_to_a_numbered_key():
     assert property_name("t" * 226 + "_temp", set()) == "key_1"
+
+
+def test_a_long_collection_name_is_cut_to_the_server_limit():
+    long = "c" * 300
+    first = collection_name(long, set())
+    second = collection_name(long, {first})
+    assert len(first) == 255 and len(second) <= 255
+    assert second.lower() != first.lower()
+    assert collection_name_problem(first) is None
+    assert collection_name_problem(second) is None
 
 
 def test_drafted_collection_names_in_order():

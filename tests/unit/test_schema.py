@@ -35,6 +35,7 @@ from to_weaviate.target import connect as connect_module
 from to_weaviate.target import schema
 from to_weaviate.target.schema import (
     PlanMismatch,
+    PropertyRejected,
     SchemaRejected,
     WeaviateSchema,
     collection_kwargs,
@@ -410,7 +411,7 @@ def test_a_refused_property_addition_is_schema_rejected(status):
     existing.add_fail = [
         UnexpectedStatusCodeError("refused", httpx.Response(status, json=body))
     ]
-    with pytest.raises(SchemaRejected) as info:
+    with pytest.raises(PropertyRejected) as info:
         WeaviateSchema(FakeClient(existing)).ensure([entry()])  # type: ignore[arg-type]
     assert str(info.value) == "property year already exists"
     assert info.value.action == "add the property year to My_docs"
