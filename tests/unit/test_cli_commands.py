@@ -1610,6 +1610,33 @@ def test_pq_segments_of_an_embedded_vector_are_not_compared_with_the_source(
     assert r.exit_code == 0, r.output
 
 
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_hfresh_with_a_dot_distance_is_an_invalid_plan(tmp_path, cmd):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))), "--index", "hfresh")
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    vectors = [v.model_copy(update={"distance": "dot"}) for v in target.vectors]
+    edit_target(tmp_path / DIR, vectors=vectors)
+    r = invoke(fakes, cmd, "--json")
+    message = (
+        "vector default: distance dot is not supported by index type hfresh; "
+        "it supports cosine, l2-squared"
+    )
+    assert plan_errors(r) == [
+        {"code": "invalid_distance", "collection": "Docs", "message": message}
+    ]
+    assert fakes.writer.calls == 0 and fakes.schema.ensured == []
+
+
+@pytest.mark.parametrize("distance", ["cosine", "l2-squared", None])
+def test_hfresh_with_a_cosine_or_l2_distance_passes_check(tmp_path, distance):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))), "--index", "hfresh")
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    vectors = [v.model_copy(update={"distance": distance}) for v in target.vectors]
+    edit_target(tmp_path / DIR, vectors=vectors)
+    r = invoke(fakes, "check", "--json")
+    assert r.exit_code == 0, r.output
+
+
 @pytest.mark.parametrize("cmd", ["check", "copy", "status", "verify"])
 def test_a_plan_that_is_not_utf8_is_an_invalid_plan(tmp_path, cmd):
     fakes = inspected(FakeFactories(FakeSource(cli_records(10))))

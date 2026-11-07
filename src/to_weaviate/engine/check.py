@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from to_weaviate.naming import reserved_suffix, sidecar_word
 from to_weaviate.plan import (
     DISTANCES,
+    INDEX_DISTANCES,
     CollectionPlan,
     Plan,
     PropertyPlan,
@@ -463,6 +464,22 @@ def _value_findings(entry: CollectionPlan) -> list[Finding]:
         for vector in entry.target.vectors
         if vector.distance is not None and vector.distance not in DISTANCES
     )
+    for vector in entry.target.vectors:
+        accepted = INDEX_DISTANCES.get(vector.index.type)
+        if (
+            accepted
+            and vector.distance in DISTANCES
+            and vector.distance not in accepted
+        ):
+            out.append(
+                Finding(
+                    "invalid_distance",
+                    name,
+                    f"vector {vector.name}: distance {vector.distance} is not "
+                    f"supported by index type {vector.index.type}; it supports "
+                    f"{', '.join(accepted)}",
+                )
+            )
     return out
 
 

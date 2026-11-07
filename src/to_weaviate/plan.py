@@ -70,6 +70,9 @@ IGNORED_FIELDS: dict[str, dict[str, tuple[str, ...]]] = {
 # when a config update enables it on an index that holds vectors. With
 # ASYNC_INDEXING that update changes nothing.
 TRAINED_QUANTIZERS = ("sq", "pq")
+# The distances that Weaviate 1.40.4 accepts for an index type that does not
+# take every distance.
+INDEX_DISTANCES: dict[str, tuple[str, ...]] = {"hfresh": ("cosine", "l2-squared")}
 
 # The distances that target.schema maps to VectorDistances.
 DISTANCES = tuple(sorted(d.value for d in VectorDistances))

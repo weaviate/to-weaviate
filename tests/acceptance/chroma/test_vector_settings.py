@@ -157,11 +157,22 @@ def docs_rq_inspection(seeded, tmp_path_factory) -> Path:
     return workdir
 
 
-def _plan_with_index(inspection: Path, workdir: Path, index: dict[str, Any]) -> None:
-    """Write the docs-rq inspection to `workdir`, with `index` in the plan."""
+def _plan_with_index(
+    inspection: Path,
+    workdir: Path,
+    index: dict[str, Any],
+    distance: str | None = None,
+) -> None:
+    """Write the docs-rq inspection to `workdir`, with `index` in the plan.
+
+    A `distance` replaces the planned distance.
+    """
     shutil.copy(inspection / "inspect.json", workdir / "inspect.json")
     plan = read_plan(inspection)
-    plan["collections"][0]["target"]["vectors"][0]["index"] = index
+    vector = plan["collections"][0]["target"]["vectors"][0]
+    vector["index"] = index
+    if distance is not None:
+        vector["distance"] = distance
     write_plan(workdir, plan)
 
 
@@ -209,11 +220,21 @@ def test_index_settings_reach_the_server(docs_rq_inspection, tmp_path, index):
         _assert_quantizer(part.quantizer, index["quantizer"])
 
 
-@pytest.mark.parametrize("index", UNSUPPORTED.values(), ids=UNSUPPORTED)
+# (index, distance). The distance of a Chroma ip collection is dot, and
+# hfresh refuses it.
+UNSUPPORTED_CASES = {
+    **{case: (index, None) for case, index in UNSUPPORTED.items()},
+    "hfresh-dot": ({"type": "hfresh"}, "dot"),
+}
+
+
+@pytest.mark.parametrize(
+    ("index", "distance"), UNSUPPORTED_CASES.values(), ids=UNSUPPORTED_CASES
+)
 def test_check_refuses_index_settings_that_the_server_does_not_create(
-    docs_rq_inspection, tmp_path, index
+    docs_rq_inspection, tmp_path, index, distance
 ):
-    _plan_with_index(docs_rq_inspection, tmp_path, index)
+    _plan_with_index(docs_rq_inspection, tmp_path, index, distance)
     for cmd in (["check"], ["copy"]):
         r = run(cmd, tmp_path)
         assert r.exit_code == 2 and r.data["code"] == "invalid_plan", r
