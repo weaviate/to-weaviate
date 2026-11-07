@@ -391,6 +391,57 @@ def test_load_findings_refuse_collection_names_that_differ_only_in_case(names, f
     ]
 
 
+def quantized(count: int, **quantizer: Any) -> p.CollectionPlan:
+    index = p.IndexPlan(type="hnsw", quantizer=p.QuantizerPlan(**quantizer))
+    e = entry([p.VectorPlan(mode="keep", distance="cosine", index=index)])
+    return e.model_copy(update={"source": e.source.model_copy(update={"count": count})})
+
+
+@pytest.mark.parametrize(
+    ("quantizer", "count", "limit"),
+    [
+        ({"type": "sq"}, 300, 100000),
+        ({"type": "pq"}, 99999, 100000),
+        ({"type": "rq", "centering": True, "bits": 4}, 9999, 10000),
+        ({"type": "sq", "training_limit": 500}, 300, 500),
+    ],
+)
+def test_a_trained_quantizer_above_the_record_count_is_a_warning(
+    quantizer, count, limit
+):
+    plan = plan_of(quantized(count, **quantizer))
+    errors, warnings = plan_findings(plan, None, voyage_mapper)
+    assert errors == []
+    assert warnings == [
+        Finding(
+            "quantizer_training",
+            "Docs",
+            f"vector default: Weaviate trains the {quantizer['type']} quantizer of "
+            f"a shard once the shard holds {limit} vectors, and the source has "
+            f"{count} records; with ASYNC_INDEXING on the server the vectors stay "
+            "uncompressed. Set training_limit below the count of a shard.",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("quantizer", "count"),
+    [
+        ({"type": "sq"}, 100000),
+        ({"type": "sq", "training_limit": 100}, 300),
+        ({"type": "rq"}, 10),
+        ({"type": "rq", "centering": True, "bits": 4}, 10000),
+        ({"type": "bq"}, 1),
+        ({"type": "none"}, 1),
+        ({"type": "default"}, 1),
+    ],
+)
+def test_other_quantizers_give_no_training_warning(quantizer, count):
+    plan = plan_of(quantized(count, **quantizer))
+    errors, warnings = plan_findings(plan, None, voyage_mapper)
+    assert errors == [] and warnings == []
+
+
 def test_a_hand_written_property_name_with_a_reserved_suffix_is_a_warning():
     properties = [ID_PROPERTY, prop("max_temp"), prop("title_searchable_meta")]
     plan = plan_of(with_target(entry([keep()]), properties=properties))
