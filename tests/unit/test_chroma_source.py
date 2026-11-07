@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from to_weaviate.sources.base import Partition
-from to_weaviate.sources.chroma.client import CHROMA_MAX_PAGE
+from to_weaviate.sources.chroma.client import CHROMA_MAX_PAGE, ChromaError
 from to_weaviate.sources.chroma.source import ChromaSource, _sample_pages
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -23,12 +23,16 @@ class Call:
 
 
 class FakeClient:
+    """`page_cap` caps the rows of a get; `ignore_offset` serves offset 0 always."""
+
     def __init__(self, collection, records):
         self.collection = collection
         self.records = records
         self.calls: list[Call] = []
         self.queries: list[tuple[list[float], int]] = []
         self.count_calls = 0
+        self.page_cap: int | None = None
+        self.ignore_offset = False
 
     def databases(self, tenant):
         return ["db"]
@@ -48,7 +52,10 @@ class FakeClient:
         if where is not None:
             ((key, cond),) = where.items()
             rows = [r for r in rows if (r["metadata"] or {}).get(key) == cond["$eq"]]
-        rows = rows[offset : offset + limit]
+        if self.page_cap is not None:
+            limit = min(limit, self.page_cap)
+        start = 0 if self.ignore_offset else offset
+        rows = rows[start : start + limit]
 
         def column(name, field):
             return [r[field] for r in rows] if name in include else None
@@ -229,10 +236,45 @@ def test_read_cursor_continues_and_clamps(source, fake_client, inspected):
     assert fake_client.calls[-1].limit == 100
 
 
-def test_read_open_ended_partition_stops_on_short_page(source, inspected):
+def test_read_open_ended_partition_stops_on_an_empty_page(source, inspected):
     part = Partition("600-", "600", None)
     page = source.read(inspected, part, None, False)
-    assert len(page.records) == 50 and page.next_cursor is None
+    assert len(page.records) == 50 and page.next_cursor == "650"
+    last = source.read(inspected, part, page.next_cursor, False)
+    assert last.records == [] and last.next_cursor is None
+
+
+@pytest.mark.parametrize("stop", ["650", None])
+def test_read_a_page_shorter_than_the_limit_does_not_end_a_partition(
+    source, fake_client, inspected, stop
+):
+    fake_client.page_cap = 100
+    fake_client.calls.clear()
+    part = Partition("0-", "0", stop)
+    cursor, read = None, []
+    while True:
+        page = source.read(inspected, part, cursor, False)
+        read.extend(r.id for r in page.records)
+        if page.next_cursor is None:
+            break
+        cursor = page.next_cursor
+    assert read == [f"id{i}" for i in range(650)]
+    # A bounded partition ends at its stop; an open one reads one empty page.
+    assert [c.offset for c in fake_client.calls] == [
+        *range(0, 700, 100),
+        *([] if stop else [650]),
+    ]
+
+
+def test_read_raises_when_the_server_ignores_the_offset(source, fake_client, inspected):
+    fake_client.ignore_offset = True
+    part = Partition("0-", "0", None)
+    first = source.read(inspected, part, None, False)
+    assert first.next_cursor == "300"
+    with pytest.raises(ChromaError, match="did not advance at offset 300"):
+        source.read(inspected, part, first.next_cursor, False)
+    # A page read again from its own offset is no error.
+    assert source.read(inspected, part, None, False).next_cursor == "300"
 
 
 def test_read_record_mapping(source, inspected):
@@ -266,7 +308,20 @@ def test_ids_pages_without_includes(source, fake_client, inspected):
     fake_client.calls.clear()
     ids = list(source.ids(inspected))
     assert len(ids) == 650 and ids[0] == "id0" and ids[-1] == "id649"
-    assert [c.include for c in fake_client.calls] == [[], [], []]
+    assert [c.include for c in fake_client.calls] == [[], [], [], []]
+
+
+def test_ids_read_past_a_page_shorter_than_the_limit(source, fake_client, inspected):
+    fake_client.page_cap = 100
+    fake_client.calls.clear()
+    assert list(source.ids(inspected)) == [f"id{i}" for i in range(650)]
+    assert [c.offset for c in fake_client.calls] == [*range(0, 700, 100), 650]
+
+
+def test_ids_raise_when_the_server_ignores_the_offset(source, fake_client, inspected):
+    fake_client.ignore_offset = True
+    with pytest.raises(ChromaError, match="did not advance at offset 300"):
+        list(source.ids(inspected))
 
 
 def test_count(source, inspected):

@@ -1,5 +1,6 @@
 import math
 import random
+import threading
 from collections import Counter
 from collections.abc import Iterator
 from typing import Any, ClassVar
@@ -11,7 +12,7 @@ from to_weaviate.sources.base import (
     Record,
     SourceCollection,
 )
-from to_weaviate.sources.chroma.client import CHROMA_MAX_PAGE, ChromaClient
+from to_weaviate.sources.chroma.client import CHROMA_MAX_PAGE, ChromaClient, ChromaError
 from to_weaviate.sources.chroma.config import (
     distance_of,
     embedding_of,
@@ -64,6 +65,12 @@ def _sample_pages(count: int, size: int, rng: random.Random) -> list[tuple[int, 
     return pages
 
 
+def _no_advance(collection: SourceCollection, offset: int) -> ChromaError:
+    return ChromaError(
+        200, f"the records of {collection.name} did not advance at offset {offset}"
+    )
+
+
 def _number(value: Any) -> float:
     """`value` as a float. A value that is not a number, such as None, gives NaN."""
     return float(value) if isinstance(value, int | float) else math.nan
@@ -100,6 +107,10 @@ class ChromaSource:
     def __init__(self, client: ChromaClient, tenant: str) -> None:
         self._client = client
         self._tenant = tenant
+        # The offset and the ids of the last page read, by (ref, partition key).
+        # Workers read other partitions at the same time.
+        self._last_pages: dict[tuple[str, str], tuple[int, set[str]]] = {}
+        self._pages_lock = threading.Lock()
 
     def _get(
         self,
@@ -233,6 +244,11 @@ class ChromaSource:
         cursor: str | None,
         with_vectors: bool,
     ) -> Page:
+        """The page at `cursor`. The next page starts after the rows received.
+
+        A partition ends at its stop or at an empty page: a server can return
+        fewer rows than the limit before its last page.
+        """
         offset = int(cursor if cursor is not None else partition.start or 0)
         limit = CHROMA_MAX_PAGE
         stop = None if partition.stop is None else int(partition.stop)
@@ -244,21 +260,48 @@ class ChromaSource:
         records = _records(
             self._get(collection, limit=limit, offset=offset, include=include)
         )
+        self._check_advance(collection, partition.key, offset, records)
         next_offset = offset + len(records)
-        done = len(records) < limit or (stop is not None and next_offset >= stop)
+        done = not records or (stop is not None and next_offset >= stop)
         return Page(records, None if done else str(next_offset))
 
+    def _check_advance(
+        self,
+        collection: SourceCollection,
+        key: str,
+        offset: int,
+        records: list[Record],
+    ) -> None:
+        """Raise ChromaError when the page at `offset` holds only rows of the last page.
+
+        The last page is the page of partition `key` read before at a lower
+        offset. A server that ignores `offset` would otherwise give a tail
+        without end.
+        """
+        ids = {r.id for r in records}
+        place = (collection.ref, key)
+        with self._pages_lock:
+            last_offset, last_ids = self._last_pages.get(place, (-1, set()))
+            self._last_pages[place] = (offset, ids)
+        if ids and offset > last_offset and ids <= last_ids:
+            raise _no_advance(collection, offset)
+
     def ids(self, collection: SourceCollection) -> Iterator[str]:
+        """Every id. Pages start after the rows received and end at an empty page."""
         offset = 0
+        last: set[str] = set()
         while True:
             response = self._get(
                 collection, limit=CHROMA_MAX_PAGE, offset=offset, include=[]
             )
             ids: list[str] = response["ids"]
-            yield from ids
-            if len(ids) < CHROMA_MAX_PAGE:
+            if not ids:
                 return
-            offset += CHROMA_MAX_PAGE
+            if last.issuperset(ids):
+                raise _no_advance(collection, offset)
+            yield from ids
+            last = set(ids)
+            offset += len(ids)
 
     def count(self, collection: SourceCollection) -> int:
         return self._client.count(self._tenant, collection.namespace, collection.ref)
