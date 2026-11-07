@@ -79,6 +79,7 @@ SUITE_COLLECTIONS = [
     "Tenant_b",
     "Tenants",
     "Rejects",
+    "Tiny_l2_renamed",
 ]
 
 
