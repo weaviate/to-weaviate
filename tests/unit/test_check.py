@@ -198,7 +198,17 @@ def test_a_url_option_that_keeps_its_userinfo_is_an_error():
     ]
     assert warnings == []
     clean = plan_of(entry([embed("text2vec-openai", base_url="https://u:p@h/v1")]))
-    assert plan_findings(clean, None, vectorizer_for) == ([], [])
+    assert plan_findings(clean, None, vectorizer_for) == (
+        [],
+        [
+            Finding(
+                "cleaned_option",
+                "Docs",
+                "option base_url of vector default in Docs holds userinfo, a query "
+                "or a fragment; it is sent without them.",
+            )
+        ],
+    )
 
 
 ID_PROPERTY = p.PropertyPlan(source_key="#id", name="source_id", type="text")
@@ -369,9 +379,10 @@ def test_a_hand_written_property_name_with_a_reserved_suffix_is_a_warning():
         "https://proxy.example.com/v1?api-version=made-up",
         "https://proxy.example.com/v1#made-up",
         "https://u:p@proxy.example.com/v1?key=made-up",
+        "https://u:p@proxy.example.com/v1",
     ],
 )
-def test_a_url_option_sent_without_its_query_or_fragment_gives_a_warning(url):
+def test_a_url_option_sent_in_another_form_gives_a_warning(url):
     plan = plan_of(entry([embed("text2vec-openai", base_url=url)]))
     errors, warnings = plan_findings(plan, None, vectorizer_for)
     assert errors == []

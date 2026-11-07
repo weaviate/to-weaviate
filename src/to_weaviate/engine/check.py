@@ -397,7 +397,7 @@ def vectorizer_findings(groups: Mapping[str, list[CollectionPlan]]) -> list[Find
 def cleaned_option_findings(
     groups: Mapping[str, list[CollectionPlan]],
 ) -> list[Finding]:
-    """URL options that lose a query or a fragment when sent, as warnings.
+    """URL options that lose userinfo, a query or a fragment when sent, as warnings.
 
     `collection_kwargs` sends the vectors of the first entry of a group.
     """

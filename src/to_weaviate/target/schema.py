@@ -35,7 +35,7 @@ from to_weaviate.plan import (
     VectorPlan,
 )
 from to_weaviate.retry import with_retry
-from to_weaviate.settings import stored_url, without_userinfo
+from to_weaviate.settings import stored_url
 
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 GRPC_RETRY_STATUSES = frozenset(
@@ -199,11 +199,14 @@ def _sent_options(vectorizer: VectorizerPlan, collection: str) -> dict[str, Any]
 
 
 def cleaned_options(vectorizer: VectorizerPlan) -> list[str]:
-    """The keys of the URL options that are sent without a query or a fragment."""
+    """Keys of the URL options that are sent without userinfo, a query or a fragment.
+
+    A URL option whose userinfo cannot be removed is an error, not one of these.
+    """
     return [
         key
         for key, value in vectorizer.options.items()
-        if _is_url(value) and stored_url(value) not in (None, without_userinfo(value))
+        if _is_url(value) and stored_url(value) not in (None, value)
     ]
 
 
