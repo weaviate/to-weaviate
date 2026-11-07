@@ -74,7 +74,9 @@ vector settings. Review it before you run `check`.
 
 Checks `plan.yaml` against the Weaviate server: the plan itself, the
 vectorizer modules, and existing collections with other settings. It
-creates nothing.
+creates nothing. Plan entries that write into one collection, each into its
+own tenant, must have the same vectors and the same settings for each
+property that more than one of them has.
 
 ### `copy`
 

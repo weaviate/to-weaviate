@@ -102,6 +102,60 @@ def _duplicate_findings(entries: list[CollectionPlan]) -> list[Finding]:
     return out
 
 
+def _index_settings(prop: PropertyPlan) -> tuple[object, ...]:
+    """The settings of `prop` that the collection stores."""
+    return (
+        prop.type,
+        prop.tokenization,
+        prop.searchable,
+        prop.filterable,
+        prop.range_filters,
+    )
+
+
+def _shared_collection_findings(entries: list[CollectionPlan]) -> list[Finding]:
+    """Entries of one collection that disagree on its vectors or on a property.
+
+    copy creates the collection with the vectors of the first entry, and each
+    property with the settings of the first entry that has it. Entries may
+    have properties that others lack.
+    """
+    by_key: dict[str, list[CollectionPlan]] = {}
+    for entry in entries:
+        by_key.setdefault(collection_key(entry.target.name), []).append(entry)
+    out: list[Finding] = []
+    for key, group in by_key.items():
+        first = group[0]
+        for entry in group[1:]:
+            if entry.target.vectors != first.target.vectors:
+                out.append(
+                    Finding(
+                        "conflicting_vectors",
+                        key,
+                        f"entries {_describe(first)} and {_describe(entry)} give "
+                        f"collection {key} different vectors; copy creates it with "
+                        "the vectors of the first entry, so give every entry of "
+                        f"{key} the same vectors",
+                    )
+                )
+        owners: dict[str, tuple[CollectionPlan, PropertyPlan]] = {}
+        for entry in group:
+            for prop in entry.target.properties:
+                owner, planned = owners.setdefault(prop.name, (entry, prop))
+                if _index_settings(prop) != _index_settings(planned):
+                    out.append(
+                        Finding(
+                            "conflicting_property",
+                            key,
+                            f"property {prop.name} has other settings in "
+                            f"{_describe(entry)} than in {_describe(owner)}; give "
+                            "it the same type and index settings in every entry "
+                            f"of {key}",
+                        )
+                    )
+    return out
+
+
 def _duplicate_source_findings(entries: list[CollectionPlan]) -> list[Finding]:
     """Entries that copy one source ref: one finding per target collection.
 
@@ -462,6 +516,7 @@ def plan_findings(
     warnings: list[Finding] = []
     errors.extend(_duplicate_findings(plan.collections))
     errors.extend(_duplicate_source_findings(plan.collections))
+    errors.extend(_shared_collection_findings(plan.collections))
     value_errors = [f for e in plan.collections for f in _value_findings(e)]
     errors.extend(value_errors)
     errors.extend(f for e in plan.collections for f in _segment_findings(e))

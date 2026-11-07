@@ -21,7 +21,7 @@ from typer.testing import Result
 
 from to_weaviate.ids import to_uuid
 from to_weaviate.lock import Locked, exclusive_lock
-from to_weaviate.plan import DroppedKey, QuantizerPlan, load_plan, save_plan
+from to_weaviate.plan import DroppedKey, IndexPlan, QuantizerPlan, load_plan, save_plan
 from to_weaviate.sources.base import Page, Partition, Record, SourceCollection
 from to_weaviate.sources.chroma.client import ChromaError
 from to_weaviate.sources.chroma.source import ChromaSource
@@ -872,6 +872,81 @@ def test_check_accepts_entries_that_write_to_separate_places(
 ):
     fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
     two_entries(tmp_path / DIR, (name_a, tenant_a), (name_b, tenant_b))
+    r = invoke(fakes, "check", "--json")
+    assert r.exit_code == 0, r.output
+
+
+def change_second_entry(directory: Path, **update: Any) -> None:
+    """Replace fields of the target of the second plan entry."""
+    plan = load_plan(directory / "plan.yaml")
+    first, second = plan.collections
+    target = second.target.model_copy(update=update)
+    entries = [first, second.model_copy(update={"target": target})]
+    save_plan(plan.model_copy(update={"collections": entries}), directory / "plan.yaml")
+
+
+SHARED = "docs -> Docs (tenant a) and docs -> Docs (tenant b)"
+
+
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_entries_of_one_collection_with_other_vectors_are_an_invalid_plan(
+    tmp_path, cmd
+):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    two_entries(tmp_path / DIR, ("Docs", "a"), ("Docs", "b"))
+    second = load_plan(tmp_path / DIR / "plan.yaml").collections[1].target
+    update = {"distance": "dot", "index": IndexPlan(type="hnsw")}
+    vectors = [v.model_copy(update=update) for v in second.vectors]
+    change_second_entry(tmp_path / DIR, vectors=vectors)
+    r = invoke(fakes, cmd, "--json")
+    message = (
+        f"entries {SHARED} give collection Docs different vectors; copy creates "
+        "it with the vectors of the first entry, so give every entry of Docs the "
+        "same vectors"
+    )
+    assert plan_errors(r) == [
+        {"code": "conflicting_vectors", "collection": "Docs", "message": message}
+    ]
+    assert fakes.schema.ensured == [] and fakes.writer.calls == 0
+
+
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_entries_of_one_collection_with_other_property_settings_are_an_invalid_plan(
+    tmp_path, cmd
+):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    two_entries(tmp_path / DIR, ("Docs", "a"), ("Docs", "b"))
+    second = load_plan(tmp_path / DIR / "plan.yaml").collections[1].target
+    update = {"type": "text", "tokenization": "field", "range_filters": False}
+    properties = [
+        p.model_copy(update=update) if p.name == "year" else p
+        for p in second.properties
+    ]
+    change_second_entry(tmp_path / DIR, properties=properties)
+    r = invoke(fakes, cmd, "--json")
+    message = (
+        "property year has other settings in docs -> Docs (tenant b) than in "
+        "docs -> Docs (tenant a); give it the same type and index settings in "
+        "every entry of Docs"
+    )
+    assert plan_errors(r) == [
+        {"code": "conflicting_property", "collection": "Docs", "message": message}
+    ]
+    assert fakes.schema.ensured == [] and fakes.writer.calls == 0
+
+
+def test_entries_of_one_collection_may_have_other_properties_and_source_keys(
+    tmp_path,
+):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    two_entries(tmp_path / DIR, ("Docs", "a"), ("Docs", "b"))
+    second = load_plan(tmp_path / DIR / "plan.yaml").collections[1].target
+    properties = [
+        p.model_copy(update={"coerced_from": ["text"]}) if p.name == "year" else p
+        for p in second.properties
+        if p.name != "uri"
+    ]
+    change_second_entry(tmp_path / DIR, properties=properties)
     r = invoke(fakes, "check", "--json")
     assert r.exit_code == 0, r.output
 
