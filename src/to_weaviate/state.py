@@ -96,9 +96,8 @@ class State:
     written before the `targets` or the `quantizer_updates` table existed gets
     the table when it is opened, with no row for any ref. A file written before
     the `last_id` or the `previous_id` column existed gets the column, NULL in
-    every row. A file
-    that sqlite cannot read raises StateUnreadable when it is opened, and a
-    file that another process keeps locked raises StateInUse.
+    every row. A file that sqlite cannot read raises StateUnreadable when it is
+    opened, and a file that another process keeps locked raises StateInUse.
     """
 
     def __init__(self, path: Path) -> None:
