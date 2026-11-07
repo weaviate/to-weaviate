@@ -37,14 +37,21 @@ jobs:
       - run: pytest tests/unit
 
   acceptance:
+    name: acceptance (ASYNC_INDEXING=${{ matrix.async_indexing }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        async_indexing: ["false", "true"]
     env:
       WEAVIATE_URL: http://localhost:8099
       WEAVIATE_GRPC_URL: http://localhost:50099
       WEAVIATE_API_KEY: admin-key
       CHROMA_URL: http://localhost:8001
       TO_WEAVIATE_REQUIRE_ACCEPTANCE: "1"
+      # Read by the tests whose outcome depends on the server's ASYNC_INDEXING.
+      WEAVIATE_ASYNC_INDEXING: ${{ matrix.async_indexing }}
     steps:
       - uses: actions/checkout@v4
       - run: echo "WEAVIATE_VERSION=$(cat tests/acceptance/weaviate-version)" >> "$GITHUB_ENV"
@@ -60,6 +67,9 @@ jobs:
           rbac: true
           modules: text2vec-transformers
           expose-pods: false
+          values-override: |
+            env:
+              ASYNC_INDEXING: "${{ matrix.async_indexing }}"
       - run: docker compose -f tests/acceptance/chroma/docker-compose.yml up -d --wait
       - uses: actions/setup-python@v5
         with: {python-version: "3.13"}

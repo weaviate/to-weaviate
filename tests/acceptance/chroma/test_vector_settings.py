@@ -6,7 +6,10 @@ from typing import Any
 import pytest
 from chroma.seed import records
 from conftest import (
-    KnownFinding,
+    ASYNC_VARIABLE,
+    Result,
+    async_indexing,
+    compression_wait,
     copy_and_verify,
     read_plan,
     run,
@@ -14,6 +17,7 @@ from conftest import (
     weaviate_config,
     weaviate_exists,
     weaviate_near_vector,
+    weaviate_wait_indexed,
     write_plan,
 )
 from weaviate.collections.classes.config import (
@@ -44,8 +48,8 @@ QUANTIZERS = {
 COMPRESS_AT_ONCE = {"rq": True, "bq": True, "none": False}
 DYNAMIC_REASON = (
     "B8 finding, not fixed: Weaviate 1.40.4 refuses a dynamic index unless "
-    "ASYNC_INDEXING is on, which the acceptance servers do not set, and check "
-    "has no way to read that setting, so check passes and copy fails"
+    "ASYNC_INDEXING is on, and check has no way to read that setting, so on a "
+    "server without it check passes and copy fails"
 )
 INDEXES = {
     "default": {"type": "default"},
@@ -64,16 +68,11 @@ INDEXES = {
         "options": {"max_posting_size_kb": 64, "replicas": 2, "search_probe": 32},
         "quantizer": {"type": "rq", "bits": 1, "rescore_limit": 66},
     },
-    "dynamic": pytest.param(
-        {
-            "type": "dynamic",
-            "options": {"threshold": 1000},
-            "quantizer": {"type": "rq", "bits": 8, "rescore_limit": 40},
-        },
-        marks=pytest.mark.xfail(
-            strict=True, reason=DYNAMIC_REASON, raises=KnownFinding
-        ),
-    ),
+    "dynamic": {
+        "type": "dynamic",
+        "options": {"threshold": 1000},
+        "quantizer": {"type": "rq", "bits": 8, "rescore_limit": 40},
+    },
 }
 # Settings that the plan model accepts and that Weaviate 1.40.4 refuses, or
 # creates with other values than the plan holds.
@@ -118,8 +117,9 @@ UNSUPPORTED = {
         "quantizer": {"type": "pq", "segments": 5, "training_limit": 100},
     },
 }
-# Quantizers that the server trains on the copied vectors. Without
-# ASYNC_INDEXING it trains them when copy enables them again after the pages.
+# Quantizers that the server trains on the copied vectors. copy enables them
+# again after the pages; a server with ASYNC_INDEXING trains them once the
+# shard holds training_limit vectors, which docs-rq reaches.
 TRAINED = {
     "sq": {"type": "sq", "training_limit": 100},
     "pq": {"type": "pq", "segments": 8, "centroids": 16, "training_limit": 100},
@@ -130,7 +130,7 @@ TRAINED = {
         "training_limit": 100,
     },
 }
-COMPRESSION_WAIT = 3.0
+COMPRESSION_WAIT = compression_wait()
 
 
 def test_chroma_distances_map_to_weaviate_distances(seeded, tmp_path):
@@ -141,6 +141,7 @@ def test_chroma_distances_map_to_weaviate_distances(seeded, tmp_path):
     for source, target, distance in DISTANCES:
         index = weaviate_config(target).vector_config["default"].vector_index_config
         assert index.distance_metric.value == distance, target
+        weaviate_wait_indexed(target)
         for record in records(source, limit=3):
             nearest = weaviate_near_vector(target, record.embedding)
             assert nearest[0] == record.id, (target, record.id, nearest)
@@ -205,6 +206,30 @@ def test_quantizer_settings_reach_the_server(docs_rq_inspection, tmp_path, quant
         assert weaviate_compressed("Docs_rq") == [expected]
 
 
+def _expect_dynamic_outcome(r: Result) -> None:
+    """Go on when the server created the dynamic index; xfail when it refused it.
+
+    ASYNC_VARIABLE, when set, says which of the two the server must do. The
+    xfail reason and the assertion messages say what the server did.
+    """
+    refused = (
+        r.exit_code == 2
+        and r.data.get("code") == "target_rejected_schema"
+        and "async indexing" in r.data["message"]
+    )
+    expected = async_indexing()
+    if refused:
+        assert expected is not True, (
+            f"{ASYNC_VARIABLE} says the server has ASYNC_INDEXING, and it refused "
+            f"the dynamic index: {r.data['message']}"
+        )
+        pytest.xfail(f"{DYNAMIC_REASON}; this server refused it: {r.data['message']}")
+    assert expected is not False, (
+        f"{ASYNC_VARIABLE} says the server has no ASYNC_INDEXING, and it created "
+        "the dynamic index"
+    )
+
+
 @pytest.mark.parametrize("index", INDEXES.values(), ids=INDEXES)
 def test_index_settings_reach_the_server(docs_rq_inspection, tmp_path, index):
     _plan_with_index(docs_rq_inspection, tmp_path, index)
@@ -213,12 +238,8 @@ def test_index_settings_reach_the_server(docs_rq_inspection, tmp_path, index):
     warned = [w["code"] for w in r.data["warnings"]] == ["needs_async_indexing"]
     assert warned == (index["type"] == "dynamic"), r
     r = run(["copy"], tmp_path)
-    if (
-        r.exit_code == 2
-        and r.data.get("code") == "target_rejected_schema"
-        and "async indexing" in r.data["message"]
-    ):
-        raise KnownFinding(r.data["message"])
+    if index["type"] == "dynamic":
+        _expect_dynamic_outcome(r)
     assert r.exit_code == 0 and r.data["status"] == "success", r
     r = run(["verify"], tmp_path)
     assert r.exit_code == 0 and r.data["status"] == "success", r
