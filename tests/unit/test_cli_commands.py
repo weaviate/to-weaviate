@@ -21,7 +21,7 @@ from typer.testing import Result
 
 from to_weaviate.ids import to_uuid
 from to_weaviate.lock import Locked, exclusive_lock
-from to_weaviate.plan import DroppedKey, load_plan, save_plan
+from to_weaviate.plan import DroppedKey, QuantizerPlan, load_plan, save_plan
 from to_weaviate.sources.base import Page, Partition, Record, SourceCollection
 from to_weaviate.sources.chroma.client import ChromaError
 from to_weaviate.sources.chroma.source import ChromaSource
@@ -1422,6 +1422,53 @@ def test_a_distance_without_a_mapping_and_the_default_index_is_an_invalid_plan(
         {"code": "invalid_distance", "collection": "Docs", "message": message}
     ]
     assert fakes.writer.calls == 0
+
+
+def _with_pq_segments(vectors: list[Any], segments: int) -> list[Any]:
+    quantizer = QuantizerPlan(type="pq", segments=segments)
+    return [
+        v.model_copy(
+            update={"index": v.index.model_copy(update={"quantizer": quantizer})}
+        )
+        for v in vectors
+    ]
+
+
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_pq_segments_that_do_not_divide_the_dimension_are_an_invalid_plan(
+    tmp_path, cmd
+):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))), "--index", "hnsw")
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    edit_target(tmp_path / DIR, vectors=_with_pq_segments(target.vectors, 3))
+    r = invoke(fakes, cmd, "--json")
+    message = (
+        "vector default: pq segments 3 do not divide the dimension 2 of the "
+        "source vectors"
+    )
+    assert plan_errors(r) == [
+        {"code": "invalid_quantizer", "collection": "Docs", "message": message}
+    ]
+    assert fakes.writer.calls == 0 and fakes.schema.ensured == []
+
+
+def test_pq_segments_of_an_embedded_vector_are_not_compared_with_the_source(
+    tmp_path,
+):
+    fakes = inspected(
+        FakeFactories(FakeSource(cli_records(10))),
+        "--vectors",
+        "both",
+        "--index",
+        "hnsw",
+    )
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    assert [v.mode for v in target.vectors] == ["keep", "embed"]
+    kept, embedded = target.vectors
+    vectors = [*_with_pq_segments([kept], 2), *_with_pq_segments([embedded], 3)]
+    edit_target(tmp_path / DIR, vectors=vectors)
+    r = invoke(fakes, "check", "--json")
+    assert r.exit_code == 0, r.output
 
 
 @pytest.mark.parametrize("cmd", ["check", "copy", "status", "verify"])

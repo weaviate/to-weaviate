@@ -357,6 +357,35 @@ def _unmapped_findings(
     ]
 
 
+def _segment_findings(entry: CollectionPlan) -> list[Finding]:
+    """pq segments that do not divide the dimension of a kept vector.
+
+    Weaviate refuses every object of such a collection. The dimension of an
+    embedded vector comes from the model, so it is not known here.
+    """
+    dimension = entry.source.dimension
+    out: list[Finding] = []
+    for vector in entry.target.vectors:
+        quantizer = vector.index.quantizer
+        segments = quantizer.segments
+        if (
+            vector.mode == "keep"
+            and quantizer.type == "pq"
+            and segments
+            and dimension
+            and dimension % segments
+        ):
+            out.append(
+                Finding(
+                    "invalid_quantizer",
+                    entry.target.name,
+                    f"vector {vector.name}: pq segments {segments} do not divide "
+                    f"the dimension {dimension} of the source vectors",
+                )
+            )
+    return out
+
+
 def _value_findings(entry: CollectionPlan) -> list[Finding]:
     """Property types and distances that the schema mapping does not have."""
     name = entry.target.name
@@ -435,6 +464,7 @@ def plan_findings(
     errors.extend(_duplicate_source_findings(plan.collections))
     value_errors = [f for e in plan.collections for f in _value_findings(e)]
     errors.extend(value_errors)
+    errors.extend(f for e in plan.collections for f in _segment_findings(e))
     # collection_kwargs cannot map a group that has a value error.
     unmapped = {f.collection for f in value_errors}
     groups = target_groups(plan.collections)

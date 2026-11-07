@@ -66,7 +66,8 @@ vector settings. Review it before you run `check`.
   refused too: `cache` of `rq` and `bq`, and `rescore_limit` of `bq`, with
   `hnsw`; `training_limit` of `rq` with `flat`; `cache` and
   `training_limit` of `rq` with `hfresh`. `inspect`, `check` and `copy`
-  refuse any other setting.
+  refuse any other setting. `check` and `copy` also refuse `pq` `segments`
+  that do not divide the dimension of the source vectors.
 - `--force`: replace an existing `plan.yaml`.
 
 ### `check`
