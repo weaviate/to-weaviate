@@ -85,12 +85,14 @@ def to_object(record: Record, entry: CollectionPlan) -> TargetObject | Reject:
                 return Reject(record.id, f"{prop.source_key}: {exc}")
         properties[prop.name] = value
     vectors: dict[str, list[float]] = {}
+    # With a kept vector, a record without a document gets no embedded vector.
+    keeps = any(v.mode == "keep" for v in target.vectors)
     for vector in target.vectors:
         if vector.mode == "keep":
             if record.vector is None:
                 return Reject(record.id, "no vector")
             vectors[vector.name] = record.vector
-        elif not record.document:
+        elif not record.document and not keeps:
             return Reject(record.id, "no document to embed")
     return TargetObject(to_uuid(record.id), properties, vectors)
 

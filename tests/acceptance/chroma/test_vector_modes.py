@@ -73,3 +73,22 @@ def test_both_mode_keeps_the_source_vector_and_embeds_the_document(seeded, tmp_p
         assert by_text[0] == record.id, (record.document, by_text)
         by_vector = weaviate_near_vector("Tiny_l2", record.embedding, "source")
         assert by_vector[0] == record.id, (record.id, by_vector)
+
+
+def test_both_mode_keeps_the_source_vector_of_a_record_without_a_document(
+    seeded, tmp_path
+):
+    args = ["--collection", "docs-cosine", "--vectors", "both", "--vectorizer", MODULE]
+    r = run(["inspect", "chroma", *args], tmp_path)
+    assert r.exit_code == 0, r
+    copy_and_verify(tmp_path)
+    r = run(["status"], tmp_path)
+    assert r.data["collections"][0]["rejects"] == 0, r
+    without = [record for record in records("docs-cosine", 700) if not record.document]
+    assert len(without) == 20
+    for record in without:
+        found = weaviate_by_source_id("Docs_cosine", record.id)
+        assert found is not None and sorted(found.vector) == ["source"], record.id
+    first = without[0]
+    by_vector = weaviate_near_vector("Docs_cosine", first.embedding, "source")
+    assert by_vector[0] == first.id, (first.id, by_vector)

@@ -53,7 +53,8 @@ vector settings. Review it before you run `check`.
 - `--database NAME`, `--collection NAME`: limit the inspection. Both repeat.
 - `--sample-pages N`: metadata pages to read per collection. Default: all.
 - `--vectors keep|embed|both`: keep the Chroma vectors (default), let a
-  Weaviate vectorizer embed the documents, or both.
+  Weaviate vectorizer embed the documents, or both. With `both`, a record
+  without a document keeps its source vector and gets no embedded vector.
 - `--vectorizer MODULE`, `--vectorizer-option KEY=VALUE`: the Weaviate
   vectorizer module and its options. `plan.yaml` holds each value as text;
   `copy` sends it as a number or a boolean where the module takes one.
