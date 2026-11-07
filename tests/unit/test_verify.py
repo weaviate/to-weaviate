@@ -256,6 +256,36 @@ def test_float_property_is_compared_with_isclose():
     assert check.passed, check.detail
 
 
+# (source int, int that the target returns, same). Weaviate 1.40.4 returns an
+# int above 2**53 rounded to a double.
+STORED_INTS = [
+    (2**53 + 1, 2**53, True),
+    (2**63 - 1, 2**63 - 1, True),
+    ([2**53 + 1, 3], [2**53, 3], True),
+    (2**53 + 1, 2**53 + 4, False),
+    (2003, 2004, False),
+]
+
+
+@pytest.mark.parametrize(("source", "stored", "same"), STORED_INTS)
+def test_an_int_is_compared_with_the_double_that_the_target_stores(
+    source, stored, same
+):
+    records = [replace(r, metadata={"year": source}) for r in make_records(3)]
+    entry = make_entry()
+    if isinstance(source, list):
+        year = next(x for x in entry.target.properties if x.name == "year")
+        entry.target.properties[entry.target.properties.index(year)] = year.model_copy(
+            update={"type": "int[]"}
+        )
+    objects = converted(records, entry)
+    objects[1] = replace(
+        objects[1], properties={**objects[1].properties, "year": stored}
+    )
+    check = records_check(records, entry, objects)
+    assert check.passed is same, check.detail
+
+
 def test_vector_within_tolerance_passes():
     records = make_records(10)
     stored = converted(records, ENTRY)

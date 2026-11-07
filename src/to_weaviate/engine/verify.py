@@ -176,9 +176,20 @@ def verify_ids(diff: IdDiff, entry: CollectionPlan) -> Check:
     return _check("ids", entry, diff.missing == diff.extra == 0, detail)
 
 
+def _int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _same(expected: Any, found: Any) -> bool:
+    """Whether `found` is how the target stores `expected`.
+
+    Weaviate 1.40.4 returns an int above 2**53 rounded to a double, so ints
+    are equal when their doubles are.
+    """
     if isinstance(expected, list) and isinstance(found, list):
         return len(expected) == len(found) and all(map(_same, expected, found))
+    if _int(expected) and _int(found):
+        return float(expected) == float(found)
     if isinstance(expected, float) or isinstance(found, float):
         numbers = (int, float)
         return (
