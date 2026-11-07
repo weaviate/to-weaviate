@@ -2,6 +2,12 @@ from typing import Any
 
 SCALARS = ("text", "int", "number", "boolean")
 SPARSE_VECTOR = "sparse_vector"
+# The client sends property values in a protobuf Struct, whose numbers are
+# doubles. Weaviate checks that a double for an int property survives Go's
+# int64 conversion, which for 2**63 depends on the CPU: amd64 refuses it,
+# arm64 stores 2**63 - 1. An int whose double reaches this limit is refused
+# here, so the outcome does not depend on the server.
+INT_DOUBLE_LIMIT = 2.0**63
 
 
 def _scalar_type(value: Any) -> str:
@@ -44,6 +50,15 @@ def resolve_type(counts: dict[str, int]) -> tuple[str, list[str]]:
     return target, sorted(observed - {target})
 
 
+def _stored_int(value: int) -> int:
+    if float(value) >= INT_DOUBLE_LIMIT:
+        raise ValueError(
+            f"int {value} cannot be stored: Weaviate keeps ints as doubles and "
+            "refuses this value; type the property text"
+        )
+    return value
+
+
 def _coerce_scalar(value: Any, target: str) -> Any:
     kind = _scalar_type(value)
     if target == "text":
@@ -55,9 +70,9 @@ def _coerce_scalar(value: Any, target: str) -> Any:
     if target == "number" and kind in ("int", "number"):
         return float(value)
     if target == "int" and kind == "int":
-        return value
+        return _stored_int(value)
     if target == "int" and kind == "number" and value.is_integer():
-        return int(value)
+        return _stored_int(int(value))
     if target == "boolean" and kind == "boolean":
         return value
     raise ValueError(

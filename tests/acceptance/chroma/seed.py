@@ -28,7 +28,8 @@ LARGE_ADD_BATCH = 5000
 RESUME_COUNT = 8000
 TOPICS = ("rivers", "mountains", "cities", "forests", "deserts", "oceans")
 TEST_URL = "http://localhost:8001"
-# Every collection that `seed` makes, in the order it makes them.
+# The collections that `seed` makes and that copy without a reject, in the
+# order it makes them. It also makes EDGE and BULK.
 COLLECTIONS = (
     "docs-cosine",
     "tiny.l2",
@@ -39,7 +40,21 @@ COLLECTIONS = (
     "rejects",
     "openai-proxy",
     "resume",
+    "empty",
+    "Mixed-Case",
+    "mixed-case",
+    "1-leading-digit",
+    "class",
 )
+# Collections whose names need a change for Weaviate, made in this order.
+RENAMED_COLLECTIONS = ("Mixed-Case", "mixed-case", "1-leading-digit", "class")
+# Values at the limits of their type. Its records with the int 2**63 - 1 are
+# rejects by design, so it is not in COLLECTIONS.
+EDGE = "edge"
+# The large collection. seed makes it, but it is not in COLLECTIONS, so the
+# test that copies every collection does not copy it.
+BULK = "bulk"
+BULK_COUNT = 50_000
 CATEGORIES = ("guide", "reference", "tutorial")
 TAGS = ("red", "green", "blue", "small", "large")
 
@@ -194,6 +209,103 @@ def resume(rng: random.Random) -> list[Record]:
     ]
 
 
+# Values at the limits of their type. Chroma returns -0.0 as 0.0. Weaviate
+# 1.40.4 returns an int above 2**53 rounded to a double. copy rejects
+# 2**63 - 1, whose double is 2**63.
+INT_EDGES = (0, -1, 2**53 + 1, 2**63 - 1, -(2**63))
+FLOAT_EDGES = (1e308, -1e308, -0.0, 5e-324, 0.1)
+FLAGS = (True, False, "true", "false")
+# Metadata keys that are reserved words or that need a change to be property names.
+ODD_KEYS = (
+    "ID",
+    "Id",
+    "id",
+    "_additional",
+    "document",
+    "uri",
+    "vector",
+    "class",
+    "1st key",
+    "my key",
+    "日本",
+    "created_temp",
+    "a__backup",
+    "x_nullState",
+)
+LONG_DOCUMENT_BYTES = 200_000
+UNICODE_IDS = ("edge-ключ-1", "edge-日本-2", "edge-🙂-3")
+# CJK text, an e and an a with combining marks, and Hebrew and Arabic words.
+UNICODE_DOCUMENT = (
+    "日本語のテキスト e\u0301 a\u0308 "
+    "\u05e9\u05dc\u05d5\u05dd \u0627\u0644\u0633\u0644\u0627\u0645"
+)
+
+
+def edge(rng: random.Random) -> list[Record]:
+    """40 records of 8 dimensions with values at the limits of their type.
+
+    The first three ids hold non-ASCII text. Record 0 has an empty document,
+    record 1 a long one, record 2 a document with combining marks and right
+    to left text, record 3 none. `flag` is a boolean in some records and text
+    in others; `num` is an int in some and a float in others.
+    """
+    documents: dict[int, str | None] = {
+        0: "",
+        1: "x" * LONG_DOCUMENT_BYTES,
+        2: UNICODE_DOCUMENT,
+        3: None,
+    }
+    records = []
+    for i in range(40):
+        metadata: dict[str, Any] = {
+            "int_edge": INT_EDGES[i % len(INT_EDGES)],
+            "float_edge": FLOAT_EDGES[i % len(FLOAT_EDGES)],
+            "flag": FLAGS[i % len(FLAGS)],
+            "num": (3, 2.5)[i % 2],
+            "empty": "",
+            "tags": (["a"], ["a", "b", "c"])[i % 2],
+        }
+        metadata.update({key: f"{key} {i}" for key in ODD_KEYS})
+        records.append(
+            Record(
+                id=UNICODE_IDS[i] if i < len(UNICODE_IDS) else f"edge-{i:02d}",
+                embedding=_vector(rng, 8),
+                document=documents.get(i, f"Edge record {i}."),
+                metadata=metadata,
+                uri=f"https://example.com/edge/{i}",
+            )
+        )
+    return records
+
+
+def bulk(rng: random.Random) -> list[Record]:
+    """BULK_COUNT records of 32 dimensions, each with a document."""
+    return [
+        Record(
+            id=f"bulk-{i:05d}",
+            embedding=_vector(rng, 32),
+            document=f"Record {i} of the bulk collection.",
+            metadata={"position": i},
+            uri=None,
+        )
+        for i in range(BULK_COUNT)
+    ]
+
+
+def renamed(rng: random.Random, name: str) -> list[Record]:
+    """5 records of 8 dimensions for the collection `name`."""
+    return [
+        Record(
+            id=f"{name}-{i}",
+            embedding=_vector(rng, 8),
+            document=f"Record {i} of {name}.",
+            metadata={"position": i},
+            uri=None,
+        )
+        for i in range(5)
+    ]
+
+
 # Made-up secrets of the embedding function of openai-proxy. The tool must
 # neither store nor print them.
 PROXY_USER = "b8-proxy-user"
@@ -299,7 +411,7 @@ def _collection_id(http: httpx.Client, name: str) -> str:
 
 
 def seed() -> None:
-    """Delete and recreate the COLLECTIONS on the test server."""
+    """Delete and recreate the COLLECTIONS, EDGE and BULK on the test server."""
     rng = random.Random(0)
     with _test_server() as http:
         _recreate(http, "docs-cosine", "cosine", docs_cosine(rng))
@@ -313,6 +425,11 @@ def seed() -> None:
             http, "openai-proxy", "cosine", openai_proxy(rng), OPENAI_PROXY_FUNCTION
         )
         _recreate(http, "resume", "cosine", resume(rng))
+        _recreate(http, "empty", "cosine", [])
+        _recreate(http, EDGE, "cosine", edge(rng))
+        for name in RENAMED_COLLECTIONS:
+            _recreate(http, name, "cosine", renamed(rng, name))
+        _recreate(http, BULK, "cosine", bulk(rng))
 
 
 def _extra_tiny_l2(start: int, count: int) -> list[Record]:
@@ -387,4 +504,4 @@ if __name__ == "__main__":
         seed()
     except (ValueError, httpx.HTTPError) as exc:
         sys.exit(f"seed.py: {exc}")
-    print(f"Seeded {', '.join(COLLECTIONS)}.")
+    print(f"Seeded {', '.join([*COLLECTIONS, EDGE, BULK])}.")

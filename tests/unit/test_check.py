@@ -419,3 +419,73 @@ def test_a_hand_written_sidecar_shaped_property_name_is_a_warning(name, word):
             "property with this shape",
         )
     ]
+
+
+# (target name, property name, the refused name that the finding names).
+# Weaviate 1.40.4 refuses each of these names; the client refuses vector.
+REFUSED_NAMES = [
+    ("tiny-l2", "position", "collection tiny-l2"),
+    ("C" * 256, "position", f"collection {'C' * 256}"),
+    ("Docs", "has space", "property has space"),
+    ("Docs", "p" * 232, f"property {'p' * 232}"),
+    ("Docs", "Id", "property Id"),
+    ("Docs", "_additional", "property _additional"),
+    ("Docs", "vector", "property vector"),
+    ("Docs", "Position", "property Position"),
+    ("Docs", "ID", "property ID"),
+    ("Docs", "Vector", "property Vector"),
+]
+
+
+@pytest.mark.parametrize(("target", "name", "named"), REFUSED_NAMES)
+def test_a_name_that_weaviate_refuses_is_an_invalid_name(target, name, named):
+    found = entry([keep()], name=target)
+    found.target.properties.append(
+        p.PropertyPlan(source_key="position", name=name, type="int")
+    )
+    errors, _ = plan_findings(plan_of(found), None, vectorizer_for)
+    assert [(e.code, e.collection) for e in errors] == [("invalid_name", target)]
+    assert errors[0].message.startswith(f"{named}: Weaviate ")
+
+
+@pytest.mark.parametrize("name", ["iD", "__", "class", "p" * 231, "_x", "_X"])
+def test_a_name_that_weaviate_accepts_is_no_invalid_name(name):
+    found = entry([keep()], name="C" * 255)
+    found.target.properties.append(
+        p.PropertyPlan(source_key="position", name=name, type="int")
+    )
+    errors, _ = plan_findings(plan_of(found), None, vectorizer_for)
+    assert errors == []
+
+
+def test_a_kept_vector_of_a_source_without_vectors_is_an_error():
+    found = entry([keep()])
+    found.source.dimension = None
+    errors, _ = plan_findings(plan_of(found), None, vectorizer_for)
+    assert [(e.code, e.collection) for e in errors] == [("no_source_vectors", "Docs")]
+    assert "--vectors embed --vectorizer" in errors[0].message
+
+
+@pytest.mark.parametrize(
+    ("count", "vector"), [(0, keep()), (1, embed("text2vec-weaviate"))]
+)
+def test_an_empty_source_or_an_embedded_vector_needs_no_source_vectors(count, vector):
+    found = entry([vector])
+    found.source.dimension, found.source.count = None, count
+    errors, _ = plan_findings(plan_of(found), None, vectorizer_for)
+    assert errors == []
+
+
+def test_a_property_name_with_an_upper_case_first_letter_names_the_stored_name():
+    found = entry([keep()])
+    found.target.properties.append(
+        p.PropertyPlan(source_key="position", name="Position", type="int")
+    )
+    errors, _ = plan_findings(plan_of(found), None, vectorizer_for)
+    assert [(e.code, e.message) for e in errors] == [
+        (
+            "invalid_name",
+            "property Position: Weaviate stores a property name with its first "
+            "letter in lower case, as position; use that name",
+        )
+    ]

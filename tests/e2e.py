@@ -16,17 +16,61 @@ from typing import Any
 import pytest
 import weaviate
 from weaviate.classes.query import Filter
+from weaviate.classes.tenants import Tenant, TenantActivityStatus
 from weaviate.collections import Collection
 from weaviate.collections.classes.config import CollectionConfig
 from weaviate.collections.classes.internal import Object
 
+from to_weaviate.output import ERROR_EXIT, secret_values
 from to_weaviate.settings import weaviate_settings
 from to_weaviate.target.connect import connect
 
 COMMAND = Path(sysconfig.get_path("scripts")) / "to-weaviate"
 COMMAND_TIMEOUT = 600
+MAX_MESSAGE_CHARS = 500
+ERROR_KEYS = {"status", "code", "message", "hint"}
 
 _client: weaviate.WeaviateClient | None = None
+# The secret values of the environments that `run` and `start` gave a command.
+_secrets: set[str] = set()
+
+
+def take_secrets() -> set[str]:
+    """The secret values given to commands since the last call, then forget them."""
+    found = set(_secrets)
+    _secrets.clear()
+    return found
+
+
+def _environment(env: dict[str, str] | None) -> dict[str, str]:
+    merged = {**os.environ, **(env or {})}
+    _secrets.update(secret_values(merged))
+    return merged
+
+
+def _contract_problems(exit_code: int, data: dict[str, Any], stderr: str) -> list[str]:
+    """How the JSON document, the exit code and stderr break the CLI contract."""
+    problems = []
+    if data.get("status") == "error":
+        missing = ERROR_KEYS - set(data)
+        if missing:
+            problems.append(f"the error document has no {', '.join(sorted(missing))}")
+        code = data.get("code")
+        if code not in ERROR_EXIT:
+            problems.append(f"the error code {code!r} is not a known code")
+        elif exit_code != ERROR_EXIT[code]:
+            problems.append(f"exit code {exit_code} for the error code {code}")
+        message = str(data.get("message"))
+        if "\n" in message or len(message) > MAX_MESSAGE_CHARS:
+            problems.append("the message is not one line of at most 500 characters")
+    elif data.get("status") == "success":
+        if exit_code != 0:
+            problems.append(f"exit code {exit_code} for a success document")
+    else:
+        problems.append("the document has no status success or error")
+    if '"status"' in stderr:
+        problems.append("stderr holds a JSON document")
+    return problems
 
 
 @dataclass(frozen=True)
@@ -40,17 +84,24 @@ def run(args: list[str], workdir: Path, env: dict[str, str] | None = None) -> Re
     """Run the installed to-weaviate with `args`, --json and --dir `workdir`.
 
     The working directory is `workdir`, so no `.env` of the repository is read.
-    The environment is os.environ with `env` on top.
+    The environment is os.environ with `env` on top. The run fails the test
+    when stdout or stderr holds the value of a secret variable, or when the
+    document, the exit code and stderr break the CLI contract.
     """
+    merged = _environment(env)
     completed = subprocess.run(
         [str(COMMAND), *args, "--json", "--dir", str(workdir)],
         cwd=workdir,
-        env={**os.environ, **(env or {})},
+        env=merged,
         capture_output=True,
         text=True,
         timeout=COMMAND_TIMEOUT,
         check=False,
     )
+    output = completed.stdout + completed.stderr
+    if any(secret in output for secret in secret_values(merged)):
+        # The value is not printed here either.
+        pytest.fail(f"to-weaviate {' '.join(args)} printed a secret value")
     try:
         data = json.loads(completed.stdout)
     except ValueError:
@@ -61,7 +112,36 @@ def run(args: list[str], workdir: Path, env: dict[str, str] | None = None) -> Re
             f"one JSON document on stdout.\nstdout:\n{completed.stdout}\n"
             f"stderr:\n{completed.stderr}"
         )
+    problems = _contract_problems(completed.returncode, data, completed.stderr)
+    if problems:
+        pytest.fail(
+            f"to-weaviate {' '.join(args)}: {'; '.join(problems)}.\n"
+            f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+        )
     return Result(completed.returncode, data, completed.stderr)
+
+
+def run_text(
+    args: list[str], workdir: Path, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run the installed to-weaviate like `run` does, without --json.
+
+    The run fails the test when stdout or stderr holds the value of a secret
+    variable.
+    """
+    merged = _environment(env)
+    completed = subprocess.run(
+        [str(COMMAND), *args, "--dir", str(workdir)],
+        cwd=workdir,
+        env=merged,
+        capture_output=True,
+        text=True,
+        timeout=COMMAND_TIMEOUT,
+        check=False,
+    )
+    if any(s in completed.stdout + completed.stderr for s in secret_values(merged)):
+        pytest.fail(f"to-weaviate {' '.join(args)} printed a secret value")
+    return completed
 
 
 def start(
@@ -75,7 +155,7 @@ def start(
         return subprocess.Popen(
             [str(COMMAND), *args, "--json", "--dir", str(workdir)],
             cwd=workdir,
-            env={**os.environ, **(env or {})},
+            env=_environment(env),
             stdout=handle,
             stderr=subprocess.DEVNULL,
         )
@@ -172,6 +252,18 @@ def weaviate_update_object(name: str, uuid: Any, properties: dict[str, Any]) -> 
     _collection(name).data.update(uuid=uuid, properties=properties)
 
 
+def weaviate_set_shard_status(name: str, status: str) -> None:
+    """Set every shard of the target collection `name` to READY or READONLY."""
+    _weaviate().collections.use(name).config.update_shards(status=status)  # type: ignore[arg-type]
+
+
+def weaviate_set_tenant_status(name: str, tenant: str, status: str) -> None:
+    """Set `tenant` of the target collection `name` to ACTIVE or INACTIVE."""
+    _weaviate().collections.use(name).tenants.update(
+        Tenant(name=tenant, activity_status=TenantActivityStatus(status))
+    )
+
+
 def weaviate_tenants(name: str) -> set[str]:
     """The tenant names of the target collection `name`."""
     return set(_weaviate().collections.use(name).tenants.get())
@@ -180,6 +272,11 @@ def weaviate_tenants(name: str) -> set[str]:
 def weaviate_exists(name: str) -> bool:
     """Whether the target collection `name` exists."""
     return _weaviate().collections.exists(name)
+
+
+def weaviate_modules() -> set[str]:
+    """The names of the modules that the target lists in /v1/meta."""
+    return set(_weaviate().get_meta().get("modules") or {})
 
 
 def weaviate_compressed(name: str) -> list[bool]:
@@ -191,6 +288,11 @@ def weaviate_compressed(name: str) -> list[bool]:
 def weaviate_config(name: str) -> CollectionConfig:
     """The configuration of the target collection `name`, read from the server."""
     return _weaviate().collections.use(name).config.get()
+
+
+def create_target_collection(kwargs: dict[str, Any]) -> None:
+    """Create a target collection with the arguments of `collections.create`."""
+    _weaviate().collections.create(**kwargs)
 
 
 def delete_target_collection(name: str) -> None:

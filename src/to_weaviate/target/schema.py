@@ -1,8 +1,9 @@
 import inspect
 import re
 import time
+import typing
 from collections.abc import Callable
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, Union
 
 import weaviate
 from pydantic import ValidationError
@@ -109,12 +110,18 @@ class SchemaRejected(Exception):
         self.action = action
 
 
+class PropertyRejected(SchemaRejected):
+    """The server refused to add a property to an existing collection."""
+
+
 class Schema(Protocol):
     """Target schema operations. `group` holds the entries of one target name."""
 
     def modules(self) -> set[str]: ...
 
     def differences(self, group: list[CollectionPlan]) -> list[str] | None: ...
+
+    def missing_properties(self, group: list[CollectionPlan]) -> list[str]: ...
 
     def ensure(self, group: list[CollectionPlan]) -> Literal["created", "exists"]: ...
 
@@ -150,24 +157,39 @@ def _chain(exc: BaseException) -> list[BaseException]:
     return found
 
 
+def _nearest_grpc_status(exc: Exception) -> str | None:
+    """The status name of the nearest gRPC error in the chain of `exc`, or None.
+
+    The client raises its own error inside the except block of the gRPC
+    error, so the gRPC error is in the chain. Only the nearest gRPC error
+    decides: the client's retry makes each attempt inside the except block of
+    the one before, so a deeper link can be an earlier attempt. After its own
+    retries of UNAVAILABLE, the client raises WeaviateRetryError, or a query
+    error inside the except block of one; that link counts as UNAVAILABLE.
+    """
+    for link in _chain(exc):
+        if isinstance(link, WeaviateRetryError):
+            return "UNAVAILABLE"
+        status = _grpc_status(link)
+        if status is not None:
+            return status
+    return None
+
+
 def transient(exc: Exception) -> float | None:
     if isinstance(exc, WeaviateConnectionError | WeaviateTimeoutError):
         return 0.0
     if isinstance(exc, UnexpectedStatusCodeError) and exc.status_code in RETRY_STATUSES:
         return 0.0
-    # The client raises its own error inside the except block of the gRPC
-    # error, so the gRPC error is in the chain. Only the nearest gRPC error
-    # decides: the client's retry makes each attempt inside the except block of
-    # the one before, so a deeper link can be an earlier attempt. After its own
-    # retries of UNAVAILABLE, the client raises WeaviateRetryError, or a query
-    # error inside the except block of one.
-    for link in _chain(exc):
-        if isinstance(link, WeaviateRetryError):
-            return 0.0
-        status = _grpc_status(link)
-        if status is not None:
-            return 0.0 if status in GRPC_RETRY_STATUSES else None
-    return None
+    return 0.0 if _nearest_grpc_status(exc) in GRPC_RETRY_STATUSES else None
+
+
+def refused_for_size(exc: Exception) -> bool:
+    """Whether the nearest gRPC error in the chain of `exc` is RESOURCE_EXHAUSTED.
+
+    gRPC refuses a message above its size limit with this status.
+    """
+    return _nearest_grpc_status(exc) == "RESOURCE_EXHAUSTED"
 
 
 def _property(plan: PropertyPlan) -> Property:
@@ -238,6 +260,43 @@ def cleaned_options(vectorizer: VectorizerPlan) -> list[str]:
     ]
 
 
+_SCALAR_TYPES = (bool, int, float)
+
+
+def _declared_scalar(hint: Any) -> type | None:
+    """bool, int or float when `hint` is that type, optional or not; else None."""
+    types = [hint]
+    if typing.get_origin(hint) is Union:
+        types = [t for t in typing.get_args(hint) if t is not type(None)]
+    if len(types) == 1 and types[0] in _SCALAR_TYPES:
+        return types[0]  # type: ignore[no-any-return]
+    return None
+
+
+def _scalar(text: str, kind: type) -> Any:
+    """`text` as `kind`, or `text` when it does not read as one."""
+    if kind is bool:
+        return {"true": True, "false": False}.get(text.lower(), text)
+    try:
+        return kind(text)
+    except ValueError:
+        return text
+
+
+def _declared_options(factory: Any, options: dict[str, Any]) -> dict[str, Any]:
+    """`options` with each text value as the bool, int or float the factory declares.
+
+    plan.yaml holds a --vectorizer-option value as the text given, and the
+    client refuses a text where it declares a number or a boolean.
+    """
+    hints = typing.get_type_hints(factory)
+    out: dict[str, Any] = {}
+    for key, value in options.items():
+        kind = _declared_scalar(hints.get(key))
+        out[key] = _scalar(value, kind) if isinstance(value, str) and kind else value
+    return out
+
+
 def _vector(plan: VectorPlan, collection: str) -> Any:
     kwargs: dict[str, Any] = {"name": plan.name}
     index = plan.index
@@ -271,6 +330,7 @@ def _vector(plan: VectorPlan, collection: str) -> Any:
     for key in options:
         if key in _RESERVED_OPTIONS or key not in accepted:
             raise PlanMismatch(f"vectorizer option {key} is not accepted by {module}")
+    options = _declared_options(factory, options)
     try:
         return factory(
             **kwargs,
@@ -430,11 +490,12 @@ def differences(
             out.extend(_vector_differences(plan, found))
     actual = {p.name: _val(p.data_type) for p in cfg.properties}
     for prop in _properties(group):
-        # A type without a mapping is an invalid_type finding of the plan.
+        # A type without a mapping is an invalid_type finding of the plan. A
+        # missing property is no difference: ensure adds it.
         planned_type = _DATA_TYPES.get(prop.type)
         if prop.name not in actual:
-            out.append(f"property {prop.name}: missing in the collection")
-        elif planned_type is not None and actual[prop.name] != planned_type.value:
+            continue
+        if planned_type is not None and actual[prop.name] != planned_type.value:
             out.append(
                 f"property {prop.name}: type is {actual[prop.name]}, "
                 f"plan has {prop.type}"
@@ -448,11 +509,49 @@ def differences(
     return out
 
 
+def _missing_properties(
+    client: weaviate.WeaviateClient, group: list[CollectionPlan]
+) -> list[PropertyPlan]:
+    name = group[0].target.name
+    if not client.collections.exists(name):
+        return []
+    stored = {p.name for p in client.collections.get(name).config.get().properties}
+    return [p for p in _properties(group) if p.name not in stored]
+
+
+def missing_properties(
+    client: weaviate.WeaviateClient, group: list[CollectionPlan]
+) -> list[str]:
+    """Planned properties that the existing collection lacks; [] without one."""
+    return [p.name for p in _missing_properties(client, group)]
+
+
+def _add_property(
+    client: weaviate.WeaviateClient,
+    name: str,
+    prop: PropertyPlan,
+    sleep: Callable[[float], None],
+) -> None:
+    config = client.collections.get(name).config
+    try:
+        with_retry(lambda: config.add_property(_property(prop)), transient, sleep=sleep)
+    except UnexpectedStatusCodeError as exc:
+        if exc.status_code in (400, 422):
+            raise PropertyRejected(
+                _server_message(exc), f"add the property {prop.name} to {name}"
+            ) from exc
+        raise
+
+
 def ensure_collection(
     client: weaviate.WeaviateClient,
     group: list[CollectionPlan],
     sleep: Callable[[float], None] = time.sleep,
 ) -> Literal["created", "exists"]:
+    """Create the collection of `group`, or add the planned properties it lacks.
+
+    Raises PlanMismatch when the existing collection has other settings.
+    """
     found = differences(client, group)
     if found:
         raise PlanMismatch("; ".join(found))
@@ -462,6 +561,9 @@ def ensure_collection(
         kwargs = collection_kwargs(group)
         with_retry(lambda: client.collections.create(**kwargs), transient, sleep=sleep)
         result = "created"
+    else:
+        for prop in _missing_properties(client, group):
+            _add_property(client, name, prop, sleep)
     tenants = _tenants(group)
     if tenants:
         collection = client.collections.get(name)
@@ -500,6 +602,9 @@ class WeaviateSchema:
 
     def differences(self, group: list[CollectionPlan]) -> list[str] | None:
         return differences(self._client, group)
+
+    def missing_properties(self, group: list[CollectionPlan]) -> list[str]:
+        return missing_properties(self._client, group)
 
     def ensure(self, group: list[CollectionPlan]) -> Literal["created", "exists"]:
         try:

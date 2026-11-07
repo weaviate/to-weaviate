@@ -77,6 +77,10 @@ INDEX_DISTANCES: dict[str, tuple[str, ...]] = {"hfresh": ("cosine", "l2-squared"
 # The distances that target.schema maps to VectorDistances.
 DISTANCES = tuple(sorted(d.value for d in VectorDistances))
 KEEP_DISTANCES_WITHOUT_INDEX = (None, "cosine")
+EMBED_INSTEAD = (
+    "run to-weaviate inspect chroma --force --vectors embed --vectorizer MODULE"
+)
+NO_VECTORS_NOTE = f"the source has no vectors; {EMBED_INSTEAD}"
 MERGE_TAG = "tag:yaml.org,2002:merge"
 
 
@@ -357,6 +361,8 @@ def _draft_collection(
     else:
         drafted = [kept("source", False), embedded()]
 
+    if has_no_vectors(source) and any(v.mode == "keep" for v in drafted):
+        notes.append(NO_VECTORS_NOTE)
     return CollectionPlan(
         source=SourceRef(
             ref=source.ref,
@@ -372,6 +378,14 @@ def _draft_collection(
         ),
         notes=notes,
     )
+
+
+def has_no_vectors(source: SourceRef | SourceCollection) -> bool:
+    """Whether the source holds records but no vector.
+
+    Chroma sets the dimension of a collection with its first vector.
+    """
+    return source.count > 0 and source.dimension is None
 
 
 def draft_plan(

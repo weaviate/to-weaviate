@@ -1,11 +1,13 @@
 import io
 import re
+from dataclasses import replace
 
 import pytest
 import yaml
 from pydantic import ValidationError
 
 from to_weaviate.plan import (
+    NO_VECTORS_NOTE,
     CollectionPlan,
     IndexPlan,
     Plan,
@@ -553,3 +555,21 @@ def test_models_are_exported():
 )
 def test_quantizer_needs_training(quantizer, needed):
     assert quantizer.needs_training() is needed
+
+
+# (count, dimension, vectors mode, whether the draft notes that the source
+# has no vectors)
+NO_VECTOR_NOTES = [
+    (10, None, "keep", True),
+    (10, None, "both", True),
+    (0, None, "keep", False),
+    (10, 3, "keep", False),
+    (10, None, "embed", False),
+]
+
+
+@pytest.mark.parametrize(("count", "dimension", "vectors", "noted"), NO_VECTOR_NOTES)
+def test_draft_notes_a_source_without_vectors(count, dimension, vectors, noted):
+    source = replace(make(), count=count, dimension=dimension)
+    entry = draft_plan(SRC, [source], vectors).collections[0]
+    assert (NO_VECTORS_NOTE in entry.notes) is noted

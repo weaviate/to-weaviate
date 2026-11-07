@@ -1,7 +1,18 @@
 import re
 
+# The names that Weaviate 1.40.4 accepts. It stores a collection name with
+# its first letter in upper case and a property name with its first letter
+# in lower case, and compares the stored property name with SERVER_RESERVED.
+# The client refuses the property name vector.
+MAX_COLLECTION_NAME = 255
+MAX_PROPERTY_NAME = 231
+COLLECTION_NAME_RULE = f"^[A-Z][_0-9A-Za-z]{{0,{MAX_COLLECTION_NAME - 1}}}$"
+PROPERTY_NAME_RULE = f"^[_A-Za-z][_0-9A-Za-z]{{0,{MAX_PROPERTY_NAME - 1}}}$"
+SERVER_RESERVED = ("id", "_id", "_additional")
+CLIENT_RESERVED = ("vector",)
+# The draft uses document, source_id and uri itself.
 RESERVED_PROPERTIES = frozenset(
-    {"id", "_id", "_additional", "document", "source_id", "uri"}
+    {*SERVER_RESERVED, *CLIENT_RESERVED, "document", "source_id", "uri"}
 )
 
 # Weaviate refuses to create a property whose name ends in one of these:
@@ -23,6 +34,34 @@ SIDECAR_ROLE_WORDS = ("reindex", "ingest", "backup", "map")
 _DIGITS = "0123456789"
 
 _INVALID = re.compile(r"[^A-Za-z0-9_]")
+
+
+def collection_name_problem(name: str) -> str | None:
+    """Why Weaviate refuses the collection name `name`, or None."""
+    stored = name[:1].upper() + name[1:]
+    if re.fullmatch(COLLECTION_NAME_RULE, stored):
+        return None
+    return (
+        f"Weaviate accepts a collection name that matches {COLLECTION_NAME_RULE} "
+        "once its first letter is in upper case"
+    )
+
+
+def property_name_problem(name: str) -> str | None:
+    """Why Weaviate or its client refuses the property name `name`, or None."""
+    if not re.fullmatch(PROPERTY_NAME_RULE, name):
+        return f"Weaviate accepts a property name that matches {PROPERTY_NAME_RULE}"
+    stored = name[:1].lower() + name[1:]
+    if stored in SERVER_RESERVED or name in CLIENT_RESERVED:
+        return f"Weaviate reserves the property name {stored}"
+    # The plan would then name a property that the collection does not hold
+    # under that name.
+    if stored != name:
+        return (
+            "Weaviate stores a property name with its first letter in lower "
+            f"case, as {stored}; use that name"
+        )
+    return None
 
 
 def reserved_suffix(name: str) -> str | None:
@@ -66,12 +105,30 @@ def _unique(base: str, taken: set[str]) -> str:
     return f"{base}_{n}"
 
 
+def _numbered(base: str, taken: set[str]) -> str:
+    """`base_<n>` with the lowest n from 1 not in `taken` ignoring case."""
+    lowered = {name.lower() for name in taken}
+    n = 1
+    while f"{base}_{n}".lower() in lowered:
+        n += 1
+    return f"{base}_{n}"
+
+
 def collection_name(source_name: str, taken: set[str]) -> str:
-    """Return a valid collection name not in `taken`. Does not modify `taken`."""
+    """Return a valid collection name not in `taken`. Does not modify `taken`.
+
+    A name longer than MAX_COLLECTION_NAME is cut, so that it stays within
+    the limit with its `_<n>` suffix.
+    """
     name = _INVALID.sub("_", source_name)
     if not name or not ("A" <= name[0] <= "Z" or "a" <= name[0] <= "z"):
         name = "C_" + name
-    return _unique(name[0].upper() + name[1:], taken)
+    base = name[0].upper() + name[1:MAX_COLLECTION_NAME]
+    found = _unique(base, taken)
+    while len(found) > MAX_COLLECTION_NAME:
+        base = base[: len(base) - (len(found) - MAX_COLLECTION_NAME)]
+        found = _unique(base, taken)
+    return found
 
 
 def property_name(source_key: str, taken: set[str]) -> str:
@@ -83,4 +140,5 @@ def property_name(source_key: str, taken: set[str]) -> str:
     # "_meta" makes "meta" the last word, so the name is not sidecar-shaped.
     if name in RESERVED_PROPERTIES or reserved_suffix(name) or sidecar_word(name):
         name += "_meta"
-    return _unique(name, taken)
+    name = _unique(name, taken)
+    return name if len(name) <= MAX_PROPERTY_NAME else _numbered("key", taken)

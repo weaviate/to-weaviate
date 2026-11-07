@@ -55,7 +55,8 @@ vector settings. Review it before you run `check`.
 - `--vectors keep|embed|both`: keep the Chroma vectors (default), let a
   Weaviate vectorizer embed the documents, or both.
 - `--vectorizer MODULE`, `--vectorizer-option KEY=VALUE`: the Weaviate
-  vectorizer module and its options.
+  vectorizer module and its options. `plan.yaml` holds each value as text;
+  `copy` sends it as a number or a boolean where the module takes one.
 - `--index`, `--quantizer`, `--quantizer-bits`: the vector index type, the
   quantizer and the bits for `rq` (1, 4 or 8). `default` leaves the choice
   to the server. `hnsw` takes every quantizer, `flat` and `dynamic` take
@@ -74,9 +75,11 @@ vector settings. Review it before you run `check`.
 
 Checks `plan.yaml` against the Weaviate server: the plan itself, the
 vectorizer modules, and existing collections with other settings. It
-creates nothing. Plan entries that write into one collection, each into its
-own tenant, must have the same vectors and the same settings for each
-property that more than one of them has.
+creates nothing. A planned property that an existing collection lacks is
+the warning `missing_property`: `copy` adds it to the collection. Plan
+entries that write into one collection, each into its own tenant, must
+have the same vectors and the same settings for each property that more
+than one of them has.
 
 ### `copy`
 
@@ -88,6 +91,10 @@ Each record that the tool cannot convert or that Weaviate refuses goes to
 batch of more than one record, `copy` retries the batch as it retries a
 network error. When the retries are used up, it stops with
 `target_unreachable` and stores no reject. The next run starts at that page.
+
+When the target collection exists without a property that `plan.yaml`
+has, `copy` adds the property before it writes. Its JSON document lists
+each added property under `added_properties`.
 
 A quantizer that Weaviate trains on the vectors (`sq`, `pq`, and `rq` with
 `centering`) is enabled again after the last page of each plan entry, so
@@ -123,6 +130,14 @@ during a copy can make `copy` skip other records. Run a full `verify` after
 writes to the source have stopped. `verify --quick` skips the id comparison,
 so when the counts match it finds a missing record only if the sample holds
 that record.
+
+Weaviate stores an `int` property as a double, so an int above 2**53 in
+magnitude is stored rounded, and `verify` compares the rounded value. An
+int that rounds to 2**63 or above is a reject with the reason "int <v>
+cannot be stored: Weaviate keeps ints as doubles and refuses this value;
+type the property text", because whether the server takes such a value
+depends on its CPU. To keep every digit of such a value, type the property
+`text` in `plan.yaml`.
 
 - `--sample N`: records to compare per collection, 1 to 10000. Default: 300.
 - `--quick`: skip the comparison of the full id lists.
@@ -161,7 +176,7 @@ The exit code is the same with and without `--json`:
 |---|---|---|
 | 0 | success | |
 | 1 | rejected records or a failed verification | `rejects`, `verification_failed` |
-| 2 | usage error, invalid plan, or a state of another target | `usage`, `invalid_plan`, `plan_mismatch`, `target_rejected_schema`, `state_mismatch` |
+| 2 | usage error, invalid plan, a state of another target, or a state file that cannot be read | `usage`, `invalid_plan`, `plan_mismatch`, `target_rejected_schema`, `state_mismatch`, `invalid_state` |
 | 3 | missing credential or authentication failure | `missing_credential`, `auth_failed` |
 | 4 | source or target unreachable | `source_unreachable`, `target_unreachable` |
 | 5 | internal error | `internal_error` |
