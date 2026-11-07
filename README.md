@@ -109,7 +109,10 @@ run `copy` there; objects already in Weaviate are written again unchanged.
 When Weaviate refuses every object of a batch of more than one record,
 `copy` retries the batch as it retries a network error. When the retries
 are used up, it stops with `target_unreachable` and stores no reject. The
-next run starts at that page.
+next run starts at that page. A record that Weaviate refuses with an
+error about a node, a shard or a deadline, as it does while a node
+restarts, is not a reject either: `copy` sends it again up to six times,
+and when the error stays, stops the same way.
 
 When the target collection exists without a property that `plan.yaml`
 has, `copy` adds the property before it writes. Its JSON document lists
