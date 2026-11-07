@@ -1,9 +1,11 @@
+import pytest
 from chroma.seed import count
 from conftest import (
     read_plan,
     run,
     weaviate_config,
     weaviate_count,
+    weaviate_exists,
     weaviate_tenants,
     write_plan,
 )
@@ -50,3 +52,51 @@ def test_two_collections_copy_into_two_tenants_of_one_collection(seeded, tmp_pat
     assert r.exit_code == 0, r
     for source, tenant in TENANTS.items():
         assert weaviate_count(TARGET, tenant) == count(source), tenant
+
+
+def _position_as_text(entry: dict) -> None:
+    for prop in entry["target"]["properties"]:
+        if prop["name"] == "position":
+            prop["type"] = "text"
+            prop["tokenization"] = "field"
+            prop["range_filters"] = False
+
+
+# (source collections, change to the plan entry of the second one, code).
+# copy creates the collection from the first entry, so a second entry with
+# other vectors or other property settings would be written into a collection
+# that its plan does not describe.
+CONFLICTS = {
+    # tiny.l2 has l2 vectors and drafts hnsw with l2-squared.
+    "other-vectors": (["tenant-a", "tiny.l2"], None, "conflicting_vectors"),
+    "other-property-type": (
+        ["tenant-a", "tenant-b"],
+        _position_as_text,
+        "conflicting_property",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("sources", "change", "code"), CONFLICTS.values(), ids=CONFLICTS
+)
+def test_entries_of_one_collection_must_agree_on_its_settings(
+    seeded, tmp_path, sources, change, code
+):
+    names = [arg for source in sources for arg in ("--collection", source)]
+    r = run(["inspect", "chroma", *names], tmp_path)
+    assert r.exit_code == 0, r
+    plan = read_plan(tmp_path)
+    entries = {e["source"]["name"]: e for e in plan["collections"]}
+    for tenant, source in zip("ab", sources, strict=True):
+        entries[source]["target"]["name"] = TARGET
+        entries[source]["target"]["tenant"] = tenant
+    if change is not None:
+        change(entries[sources[1]])
+    plan["collections"] = [entries[source] for source in sources]
+    write_plan(tmp_path, plan)
+    for cmd in (["check"], ["copy"]):
+        r = run(cmd, tmp_path)
+        assert r.exit_code == 2 and r.data["code"] == "invalid_plan", r
+        assert [e["code"] for e in r.data["errors"]] == [code], r
+    assert not weaviate_exists(TARGET)
