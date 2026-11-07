@@ -76,9 +76,10 @@ vector settings. Review it before you run `check`.
 Checks `plan.yaml` against the Weaviate server: the plan itself, the
 vectorizer modules, and existing collections with other settings. It
 creates nothing. A planned property that an existing collection lacks is
-the warning `missing_property`: `copy` adds it to the collection. Plan entries that write into one collection, each into its
-own tenant, must have the same vectors and the same settings for each
-property that more than one of them has.
+the warning `missing_property`: `copy` adds it to the collection. Plan
+entries that write into one collection, each into its own tenant, must
+have the same vectors and the same settings for each property that more
+than one of them has.
 
 ### `copy`
 
@@ -90,6 +91,10 @@ Each record that the tool cannot convert or that Weaviate refuses goes to
 batch of more than one record, `copy` retries the batch as it retries a
 network error. When the retries are used up, it stops with
 `target_unreachable` and stores no reject. The next run starts at that page.
+
+When the target collection exists without a property that `plan.yaml`
+has, `copy` adds the property before it writes. Its JSON document lists
+each added property under `added_properties`.
 
 A quantizer that Weaviate trains on the vectors (`sq`, `pq`, and `rq` with
 `centering`) is enabled again after the last page of each plan entry, so
@@ -125,6 +130,10 @@ during a copy can make `copy` skip other records. Run a full `verify` after
 writes to the source have stopped. `verify --quick` skips the id comparison,
 so when the counts match it finds a missing record only if the sample holds
 that record.
+
+Weaviate stores an `int` property as a double, so an int above 2**53 in
+magnitude is stored rounded, and `verify` compares the rounded value. To
+keep every digit of such a value, type the property `text` in `plan.yaml`.
 
 - `--sample N`: records to compare per collection, 1 to 10000. Default: 300.
 - `--quick`: skip the comparison of the full id lists.

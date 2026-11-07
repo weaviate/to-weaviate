@@ -454,7 +454,7 @@ double); (3) the server may refuse `__` or `iD` at create, which exits 2
 is a rename rule in `property_name` or a comparison rule in `verify`; the
 implementer records the measured server behavior.
 
-*Implemented: `tests/acceptance/chroma/test_source_shapes.py::test_values_at_the_limits_of_their_type_are_copied`. Found two bugs: the property `vector` stopped check and copy with internal_error, and verify reported an int above 2**53, which the server returns rounded to a double. Measured: 2**63 - 1 and -(2**63) read back unchanged, `""` and `[]` read back as such, Chroma returns -0.0 as 0.0 and drops `tags: []`.*
+*Implemented: `tests/acceptance/chroma/test_source_shapes.py::test_values_at_the_limits_of_their_type_are_copied`. Found two bugs: the property `vector` stopped check and copy with internal_error, and verify reported an int above 2**53, which the server returns rounded to a double. Measured: Weaviate stores an `int` as a double. 2**53 + 1 reads back as 2**53; 2**63 - 2 reads back as 2**63 - 1 over gRPC (the double saturates to the int64 maximum) and as 9223372036854776000 over REST; 2**63 - 1 and -(2**63) read back equal over gRPC only for that reason. `""` and `[]` read back as such, Chroma returns -0.0 as 0.0 and drops `tags: []`. The README says that an int above 2**53 is stored rounded and that a `text` property keeps the digits (ruling R59).*
 
 **A-11 Collection names that need renaming.** Level A, risk R3, 8 s. Steps:
 `inspect --collection Mixed-Case --collection mixed-case --collection
@@ -621,8 +621,9 @@ the release job.
 **C-03 Inspect the whole cloud database.** Level C, risk R4. `inspect
 chroma` without `--collection` in a second directory (no copy). Expected:
 exit 0, an entry for `to-weaviate-ci` among the entries, `source.tenant`
-equal to `CHROMA_TENANT`. Covers the listing and the identity path against
-Chroma Cloud. Skips with the suite when the variables are missing.
+equal to `CHROMA_TENANT`. Covers the listing against Chroma Cloud; the
+release job sets `CHROMA_TENANT`, so the case sends no identity request.
+Skips with the suite when the variables are missing.
 
 *Implemented: `tests/cloud/chroma/test_cloud.py::test_inspect_of_the_whole_database`, with `--sample-pages 1`. Coverage; run against the local servers only.*
 
@@ -671,8 +672,11 @@ Chroma Cloud. Skips with the suite when the variables are missing.
   (`inspect` without `--sample-pages` reads every page; manual check: a
   1M-record copy with `--sample-pages 20`, timing of each command, and a
   kill and resume in the middle).
-- Provider vectorizers (`text2vec-openai` and the others): the CI server
-  has `text2vec-transformers` only. A-09 covers the module check; the
+- Provider vectorizers (`text2vec-openai` and the others): Weaviate
+  1.40.4 enables every API-based module by default, but the CI server has
+  no provider key and serves inference for `text2vec-transformers` only.
+  A-09 covers the module check with `text2vec-ollama`, which is not
+  enabled, after it asserts that `/v1/meta` does not list it; the
   mapping tests cover the options. Manual check before a release: one
   embed-mode copy with `text2vec-openai` and a real key, and a read of
   `rejects.jsonl` after a wrong key (the provider's message may echo part
