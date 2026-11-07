@@ -304,10 +304,15 @@ suite deletes the Weaviate collections that `SUITE_COLLECTIONS` in
 collection, also when the test Chroma holds collections that the seed does
 not make.
 
-One test is marked `xfail(strict=True)`: the copy of a dynamic index. It
-describes a finding that is not fixed and expects a Weaviate server without
-`ASYNC_INDEXING`, as in CI. Against a server with `ASYNC_INDEXING=true` it
-can pass, and strict mode then reports it as a failure.
+CI runs the suite twice, against a server without `ASYNC_INDEXING` and
+against one with it, and sets `WEAVIATE_ASYNC_INDEXING` to `false` or
+`true` for the tests whose outcome depends on it. The copy of a dynamic
+index passes with `ASYNC_INDEXING` and is an expected failure without it,
+with the server's message as the reason; it describes a finding that is
+not fixed. The compression of the tenants by a trained quantizer with the
+default `training_limit` passes without `ASYNC_INDEXING` and is an
+expected failure with it. With the variable unset, these tests decide from
+what the server does and say so in the reason.
 
 The `Makefile` starts the servers and sets the variables. `make` alone
 prints the targets. `make acceptance-up` and `make acceptance-down` call

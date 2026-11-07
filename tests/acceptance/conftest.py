@@ -36,13 +36,17 @@ from e2e import (
     weaviate_set_tenant_status,
     weaviate_tenants,
     weaviate_update_object,
+    weaviate_wait_indexed,
 )
 
 # The test modules import these names from this module.
 __all__ = [
-    "SUITE_COLLECTIONS",
+    "ASYNC_VARIABLE",
     "KnownFinding",
     "Result",
+    "SUITE_COLLECTIONS",
+    "async_indexing",
+    "compression_wait",
     "copy_and_verify",
     "create_target_collection",
     "read_plan",
@@ -64,6 +68,7 @@ __all__ = [
     "weaviate_set_tenant_status",
     "weaviate_tenants",
     "weaviate_update_object",
+    "weaviate_wait_indexed",
     "write_plan",
 ]
 
@@ -74,6 +79,9 @@ TEST_ENDPOINTS = {
     "WEAVIATE_API_KEY": "admin-key",
 }
 REQUIRE_VARIABLE = "TO_WEAVIATE_REQUIRE_ACCEPTANCE"
+# Whether the Weaviate server runs with ASYNC_INDEXING: "true" or "false",
+# as the CI matrix sets it. Unset, a test decides from what the server does.
+ASYNC_VARIABLE = "WEAVIATE_ASYNC_INDEXING"
 # The local Chroma needs none of these. A value from the shell would change
 # the tenant, the database or the key header that the command uses.
 CLEARED_VARIABLES = (
@@ -114,6 +122,25 @@ class KnownFinding(AssertionError):
 
     A test marked xfail(raises=KnownFinding) fails for any other assertion.
     """
+
+
+def async_indexing() -> bool | None:
+    """What ASYNC_VARIABLE says about the server, or None when it is unset."""
+    value = os.environ.get(ASYNC_VARIABLE, "").strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
+def compression_wait() -> float:
+    """Seconds to wait for a trained quantizer that copy enabled after the pages.
+
+    A server without ASYNC_INDEXING compresses at once. A server with it
+    indexes the queue first, which took up to 85 s on a 3-node cluster.
+    """
+    return 3.0 if async_indexing() is False else 180.0
 
 
 def endpoint_problems() -> list[str]:

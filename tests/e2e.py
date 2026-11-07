@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sysconfig
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -277,6 +278,33 @@ def weaviate_exists(name: str) -> bool:
 def weaviate_modules() -> set[str]:
     """The names of the modules that the target lists in /v1/meta."""
     return set(_weaviate().get_meta().get("modules") or {})
+
+
+def weaviate_wait_indexed(name: str, timeout: float = 120.0) -> None:
+    """Wait until every shard of `name` has indexed its vector queue.
+
+    A server with ASYNC_INDEXING indexes vectors after the insert answers, and
+    a vector search does not find a vector that is still in the queue. Without
+    it the queue is always empty.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        nodes = _weaviate().cluster.nodes(collection=name, output="verbose")
+        shards = [shard for node in nodes for shard in node.shards or []]
+        if shards and all(
+            shard.vector_queue_length == 0 and shard.vector_indexing_status == "READY"
+            for shard in shards
+        ):
+            return
+        if time.monotonic() > deadline:
+            raise AssertionError(
+                f"{name} still indexes vectors after {timeout:.0f} s: "
+                + ", ".join(
+                    f"{s.name} {s.vector_indexing_status} queue {s.vector_queue_length}"
+                    for s in shards
+                )
+            )
+        time.sleep(0.5)
 
 
 def weaviate_compressed(name: str) -> list[bool]:
