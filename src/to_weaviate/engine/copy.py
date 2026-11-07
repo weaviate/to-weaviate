@@ -2,7 +2,7 @@ import hashlib
 import json
 import math
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
@@ -103,35 +103,80 @@ def _ids_between(
     return ids[: stop - start]
 
 
+@dataclass(frozen=True)
+class _Mark:
+    """The source id of the last record a partition read, and of the one before."""
+
+    last_id: str
+    previous_id: str | None
+
+
+def _ids_backwards(
+    source: Source, collection: SourceCollection, below: int
+) -> Iterator[tuple[int, str]]:
+    """(offset, id) of each record below offset `below`, highest offset first.
+
+    The ids are read without a payload, one page of the source's page size
+    at a time, when the caller asks for them.
+    """
+    stop = below
+    while stop > 0:
+        start = max(0, stop - source.page_size)
+        ids = _ids_between(source, collection, start, stop)
+        for offset in reversed(range(start, start + len(ids))):
+            yield offset, ids[offset - start]
+        stop = start
+
+
 def _last_read(
-    source: Source, collection: SourceCollection, wanted: list[str], below: int
+    source: Source, collection: SourceCollection, wanted: list[_Mark], below: int
 ) -> tuple[int, int] | None:
     """(index in `wanted`, offset) of the first of `wanted` found below `below`.
 
-    `wanted` holds last ids, newest first. The ids are read backwards from
-    offset `below` in pages of the source's page size, until `wanted[0]` is
+    `wanted` holds marks, newest first. A last id counts as found only when the
+    id at the offset below it is the mark's previous id, or when the mark has
+    none. The ids are read backwards from offset `below` until `wanted[0]` is
     found or offset 0 is reached.
     """
     rank: dict[str, int] = {}
-    for place, record_id in enumerate(wanted):
-        rank.setdefault(record_id, place)
+    for place, mark in enumerate(wanted):
+        rank.setdefault(mark.last_id, place)
     best: tuple[int, int] | None = None
-    stop = below
-    while stop > 0 and (best is None or best[0] > 0):
-        start = max(0, stop - source.page_size)
-        ids = _ids_between(source, collection, start, stop)
-        for offset, record_id in enumerate(ids, start):
-            index = rank.get(record_id)
-            if index is not None and (best is None or index < best[0]):
+    # A last id found at an offset, whose previous id is checked next.
+    waiting: tuple[int, int] | None = None
+    for offset, record_id in _ids_backwards(source, collection, below):
+        if waiting is not None:
+            checked, found = waiting
+            waiting = None
+            if offset == found - 1 and record_id == wanted[checked].previous_id:
+                best = (checked, found)
+                if checked == 0:
+                    break
+        index = rank.get(record_id)
+        if index is not None and (best is None or index < best[0]):
+            if wanted[index].previous_id is not None:
+                waiting = (index, offset)
+            else:
                 best = (index, offset)
-        stop = start
+                if index == 0:
+                    break
     return best
+
+
+def _unshifted(
+    source: Source, collection: SourceCollection, mark: _Mark, covered: int
+) -> bool:
+    """Whether the ids that end at offset `covered` are the mark's. One read."""
+    if mark.previous_id is None or covered < 2:
+        return source.ids_at(collection, covered - 1, 1) == [mark.last_id]
+    ids = source.ids_at(collection, covered - 2, 2)
+    return ids == [mark.previous_id, mark.last_id]
 
 
 @dataclass(frozen=True)
 class _TailPlace:
     start: int
-    before: str | None  # the source id of the record at `start - 1`
+    mark: _Mark | None  # the records at `start - 1` and `start - 2`
     superseded: list[str]  # keys of the partitions whose records the tail reads
 
 
@@ -139,28 +184,30 @@ def _tail_place(
     source: Source,
     collection: SourceCollection,
     stored: list[Partition],
-    last_ids: dict[str, str],
+    marks: dict[str, _Mark],
     covered: int,
     count: int,
 ) -> _TailPlace:
-    """Where the next tail starts, found from the last ids of the partitions.
+    """Where the next tail starts, found from the marks of the partitions.
 
     A source orders its records by insertion: a deletion moves each later
     record one offset to the left, and an addition goes after the last one.
     So a stored last id is at or below the offset it was read at, the records
-    after it were not read, and the records before it were. One id read at
-    `covered - 1` shows that nothing shifted. Otherwise the last id of the
-    newest partition is searched, then those of the partitions before it,
-    newest first; the tail reads the partitions after the one found again.
-    When none is found, the tail starts at 0 and reads every partition again.
+    after it were not read, and the records before it were. A deleted record
+    that is added again goes after the last one too, so a last id counts only
+    with its previous id below it. One read of the ids that end at `covered`
+    shows that nothing shifted. Otherwise the mark of the newest partition is
+    searched, then those of the partitions before it, newest first; the tail
+    reads the partitions after the one found again. When none is found, the
+    tail starts at 0 and reads every partition again.
     """
     if covered == 0:
         return _TailPlace(0, None, [])
-    newest = last_ids.get(stored[-1].key)
-    if newest is not None and source.ids_at(collection, covered - 1, 1) == [newest]:
+    newest = marks.get(stored[-1].key)
+    if newest is not None and _unshifted(source, collection, newest, covered):
         return _TailPlace(covered, newest, [])
-    keys = [p.key for p in reversed(stored) if p.key in last_ids]
-    wanted = [last_ids[key] for key in keys]
+    keys = [p.key for p in reversed(stored) if p.key in marks]
+    wanted = [marks[key] for key in keys]
     found = (
         _last_read(source, collection, wanted, min(covered, count)) if wanted else None
     )
@@ -292,6 +339,7 @@ class _CollectionCopy:
             len(written),
             stop=end,
             last_id=page.records[-1].id if page.records else None,
+            previous_id=page.records[-2].id if len(page.records) > 1 else None,
         )
         with self._lock:
             self._copied += len(written)
@@ -341,9 +389,12 @@ def copy_collection(
     covered = _covered(stored)
     reread_from = None
     if covered is not None:
-        place = _tail_place(
-            source, collection, stored, state.last_ids(ref), covered, count
-        )
+        previous = state.previous_ids(ref)
+        marks = {
+            key: _Mark(last_id, previous.get(key))
+            for key, last_id in state.last_ids(ref).items()
+        }
+        place = _tail_place(source, collection, stored, marks, covered, count)
         shifted = place.start != covered
         if shifted:
             reread_from = place.start
@@ -353,7 +404,14 @@ def copy_collection(
                 warn(SOURCE_CHANGED)
         if shifted or count > covered:
             tail = _tail(stored, place.start)
-            state.add_partition(ref, tail, place.before, place.superseded)
+            mark = place.mark
+            state.add_partition(
+                ref,
+                tail,
+                mark.last_id if mark else None,
+                place.superseded,
+                previous_id=mark.previous_id if mark else None,
+            )
             # The superseded counts are 0 now; a new copy reads the count again.
             copy = _CollectionCopy(
                 source, writer, state, events, entry, collection, skip_unchanged

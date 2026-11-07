@@ -162,9 +162,10 @@ def test_a_count_that_fails_after_the_pages_resumes_without_pages(tmp_path):
     row = copied(fakes, "--parallelism", "3")
     assert (row["copied"], row["total"], row["done"]) == (2750, 2750, True)
     gets = [c for c in server.calls[before:] if c.kind == "get"]
-    # The id at offset 2699, read without a payload, shows that nothing shifted.
-    assert (gets[0].limit, gets[0].include) == (1, [])
-    assert [c.offset for c in gets] == [2699, 2700, 2750]
+    # The ids at offsets 2698 and 2699, the last two read, are read without a
+    # payload in one request and show that nothing shifted.
+    assert (gets[0].limit, gets[0].include) == (2, [])
+    assert [c.offset for c in gets] == [2698, 2700, 2750]
     assert len(fakes.writer.writes_per_uuid) == 2750
     assert set(fakes.writer.writes_per_uuid.values()) == {1}
 

@@ -316,6 +316,32 @@ def test_state_file_without_targets_opens_and_stores_a_target(tmp_path):
     }
 
 
+def test_advance_stores_the_id_before_the_last_one(tmp_path):
+    state = make_state(tmp_path)
+    state.init_collection(
+        REF, [Partition("0-5", "0", "5"), Partition("5-10", "5", "10")], 10
+    )
+    state.advance(REF, "0-5", "4", 4, last_id="r3", previous_id="r2")
+    # A page of one record makes the stored last id the previous one, and an
+    # empty page keeps both.
+    state.advance(REF, "0-5", "5", 1, last_id="r4")
+    state.advance(REF, "0-5", None, 0)
+    # The first page of a partition, with one record, has no previous id.
+    state.advance(REF, "5-10", "6", 1, last_id="r5")
+    state.add_partition(REF, Partition("10-", "10", None), "r9", previous_id="r8")
+    assert make_state(tmp_path).previous_ids(REF) == {"0-5": "r3", "10-": "r8"}
+    assert state.last_ids(REF) == {"0-5": "r4", "5-10": "r5", "10-": "r9"}
+
+
+def test_state_file_without_previous_ids_gets_the_column(tmp_path):
+    path = tmp_path / "state" / "state.sqlite"
+    old_state_file(path, REF, 10, Partition("0-10", "0", "10"), cursor="5", copied=5)
+    state = make_state(tmp_path)
+    assert state.previous_ids(REF) == {}
+    state.advance(REF, "0-10", None, 5, last_id="r9", previous_id="r8")
+    assert make_state(tmp_path).previous_ids(REF) == {"0-10": "r8"}
+
+
 def test_state_file_without_last_ids_gets_the_column(tmp_path):
     path = tmp_path / "state" / "state.sqlite"
     old_state_file(path, REF, 10, Partition("0-10", "0", "10"), cursor="5", copied=5)

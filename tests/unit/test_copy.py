@@ -360,6 +360,42 @@ def test_a_state_without_last_ids_reads_from_the_start(src, state, events, tmp_p
     assert [e["message"] for e in _warnings(tmp_path)] == [SOURCE_CHANGED]
 
 
+@pytest.mark.parametrize("deleted_below", [5, 3], ids=["scan", "probe"])
+def test_a_last_read_record_added_again_does_not_hide_the_records_before_it(
+    src, state, events, deleted_below
+):
+    writer = FakeWriter()
+    copy_collection(src, writer, state, events, ENTRY, C, 2)
+    last = src.records[999]
+    # id-999, the last record read, and records below it are deleted; 3
+    # records are added, then id-999 again, which goes after them. With 5
+    # deleted below it, id-999 is at offset 997; with 3, at offset 999.
+    gone = {last.id, *(f"id-{i}" for i in range(900, 900 + deleted_below))}
+    src.records = [r for r in src.records if r.id not in gone]
+    src.records.extend([*make_records(3, start=1000), last])
+    result = copy_collection(src, writer, state, events, ENTRY, C, 2)
+    assert {to_uuid(r.id) for r in src.records} <= set(writer.objects)
+    # The id before id-999 is not id-998, so the run reads from after id-499.
+    assert result.reread_from == 500
+
+
+def test_a_one_record_partition_has_no_previous_id_and_its_last_id_is_taken(
+    state, events, tmp_path
+):
+    src = FakeSource(make_records(2))
+    two = replace(C, count=2)
+    writer = FakeWriter()
+    copy_collection(src, writer, state, events, ENTRY, two, 2)
+    assert state.previous_ids(C.ref) == {}
+    del src.records[0]
+    src.records.extend(make_records(3, start=2))
+    copy_collection(src, writer, state, events, ENTRY, two, 2)
+    assert {to_uuid(r.id) for r in src.records} <= set(writer.objects)
+    # id-1, the last id of the partition 1-2, is at offset 0 now.
+    assert state.partitions(C.ref)[-1] == Partition("1-", "1", "4")
+    assert _warnings(tmp_path) == []
+
+
 def test_a_copy_in_progress_in_an_older_state_resumes_without_a_reread(
     src, state, events, tmp_path
 ):
