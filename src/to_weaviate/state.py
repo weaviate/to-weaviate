@@ -1,7 +1,8 @@
 import json
 import sqlite3
 import threading
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -59,6 +60,36 @@ class StateUnreadable(Exception):
         self.path = path
 
 
+class StateUnwritable(Exception):
+    """The state at `path` cannot be written.
+
+    `reason` says why: the disk is full, the file is read-only, or the
+    directory does not allow it.
+    """
+
+    def __init__(self, path: Path, reason: str) -> None:
+        super().__init__(f"{path.name} in {path.parent} cannot be written: {reason}.")
+        self.path = path
+        self.reason = reason
+
+
+# Python 3.10 gives no sqlite error code, only its message.
+UNWRITABLE_REASONS = (
+    ("database or disk is full", "the disk is full"),
+    ("attempt to write a readonly database", "the file is read-only"),
+    ("unable to open database file", "the directory does not allow it"),
+)
+
+
+def unwritable_reason(exc: sqlite3.Error) -> str | None:
+    """Why sqlite could not write, or None when `exc` says something else."""
+    text = str(exc)
+    for part, reason in UNWRITABLE_REASONS:
+        if part in text:
+            return reason
+    return None
+
+
 class StateInUse(Exception):
     """Another process holds a lock on the state at `path`."""
 
@@ -102,11 +133,18 @@ class State:
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        self._path = path
         self._rejects_path = path.parent / "rejects.jsonl"
         self._lock = threading.Lock()
-        self._db = sqlite3.connect(path, check_same_thread=False)
         try:
-            with self._lock, self._db:
+            self._db = sqlite3.connect(path, check_same_thread=False)
+        except sqlite3.OperationalError as exc:
+            reason = unwritable_reason(exc)
+            if reason is None:
+                raise
+            raise StateUnwritable(path, reason) from exc
+        try:
+            with self._transaction():
                 self._db.executescript(_SCHEMA)
                 columns = {
                     row[1] for row in self._db.execute("PRAGMA table_info(partitions)")
@@ -116,12 +154,29 @@ class State:
                         self._db.execute(
                             f"ALTER TABLE partitions ADD COLUMN {column} TEXT"
                         )
-        except sqlite3.DatabaseError as exc:
+        except (sqlite3.DatabaseError, StateUnwritable) as exc:
             self._db.close()
-            # Python 3.10 gives no sqlite error code, only its message.
+            if isinstance(exc, StateUnwritable):
+                raise
             if isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc):
                 raise StateInUse(path) from exc
             raise StateUnreadable(path) from exc
+
+    @contextmanager
+    def _transaction(self) -> Iterator[None]:
+        """The lock and one transaction.
+
+        A write that the disk, the file or the directory refuses raises
+        StateUnwritable instead of the sqlite error.
+        """
+        try:
+            with self._lock, self._db:
+                yield
+        except sqlite3.OperationalError as exc:
+            reason = unwritable_reason(exc)
+            if reason is None:
+                raise
+            raise StateUnwritable(self._path, reason) from exc
 
     def close(self) -> None:
         with self._lock:
@@ -134,7 +189,7 @@ class State:
 
         A stored total that is higher stays.
         """
-        with self._lock, self._db:
+        with self._transaction():
             self._db.execute(
                 "INSERT INTO collections (ref, total) VALUES (?, ?) "
                 "ON CONFLICT(ref) DO UPDATE SET total = MAX(total, excluded.total)",
@@ -184,7 +239,7 @@ class State:
         `previous_id` is the id of the record before it on the page; without
         one, the stored last id becomes the previous id.
         """
-        with self._lock, self._db:
+        with self._transaction():
             # SQLite computes every SET value from the row before the update.
             self._db.execute(
                 "UPDATE partitions SET cursor = ?, finished = ?, "
@@ -222,7 +277,7 @@ class State:
         of each partition key in `superseded` becomes 0 in the same commit,
         because the new partition reads those records again.
         """
-        with self._lock, self._db:
+        with self._transaction():
             cur = self._db.execute(
                 "INSERT OR IGNORE INTO partitions "
                 "(ref, key, start, stop, last_id, previous_id) "
@@ -265,7 +320,7 @@ class State:
 
     def raise_total(self, ref: str, total: int) -> None:
         """Store `total` for `ref` when it is above the stored total."""
-        with self._lock, self._db:
+        with self._transaction():
             self._db.execute(
                 "UPDATE collections SET total = MAX(total, ?) WHERE ref = ?",
                 (total, ref),
@@ -278,7 +333,7 @@ class State:
         between the two leaves a line without a row, and the retry writes that
         line again. A duplicate line is accepted, a missing line is not.
         """
-        with self._lock, self._db:
+        with self._transaction():
             added: list[Reject] = []
             for reject in rejects:
                 cur = self._db.execute(
@@ -317,13 +372,13 @@ class State:
 
     def expect_quantizer_update(self, ref: str) -> None:
         """Keep `ref` not done until `quantizers_updated(ref)` is called."""
-        with self._lock, self._db:
+        with self._transaction():
             self._db.execute(
                 "INSERT OR IGNORE INTO quantizer_updates (ref) VALUES (?)", (ref,)
             )
 
     def quantizers_updated(self, ref: str) -> None:
-        with self._lock, self._db:
+        with self._transaction():
             self._db.execute("DELETE FROM quantizer_updates WHERE ref = ?", (ref,))
 
     def has_progress(self, ref: str) -> bool:
@@ -345,7 +400,7 @@ class State:
         return {ref: Target(host, name, tenant) for ref, host, name, tenant in rows}
 
     def set_target(self, ref: str, target: Target) -> None:
-        with self._lock, self._db:
+        with self._transaction():
             self._db.execute(
                 "INSERT INTO targets (ref, host, name, tenant) VALUES (?, ?, ?, ?) "
                 "ON CONFLICT(ref) DO UPDATE SET host = excluded.host, "
@@ -354,12 +409,12 @@ class State:
             )
 
     def reset(self, ref: str) -> None:
-        with self._lock, self._db:
+        with self._transaction():
             self._db.execute("DELETE FROM partitions WHERE ref = ?", (ref,))
             self._db.execute("DELETE FROM rejects WHERE ref = ?", (ref,))
 
     def record_hashes(self, ref: str, hashes: list[tuple[str, bytes]]) -> None:
-        with self._lock, self._db:
+        with self._transaction():
             self._db.executemany(
                 "INSERT OR REPLACE INTO hashes (ref, source_id, hash) VALUES (?, ?, ?)",
                 [(ref, source_id, digest) for source_id, digest in hashes],
