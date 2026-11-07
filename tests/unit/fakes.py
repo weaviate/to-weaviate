@@ -555,7 +555,7 @@ def cli_env(**overrides: str | None) -> dict[str, str | None]:
             "CHROMA_TOKEN_HEADER": None,
             "CHROMA_API_KEY": "chroma-key",
             "WEAVIATE_URL": "http://localhost:8099",
-            "WEAVIATE_GRPC_URL": None,
+            "WEAVIATE_GRPC_URL": "http://localhost:50099",
             "WEAVIATE_API_KEY": "weaviate-key",
             "TO_WEAVIATE_DEBUG": None,
         }

@@ -807,7 +807,7 @@ def test_weaviate_schema_keeps_other_status_errors():
 @pytest.mark.parametrize(
     "url",
     [
-        "https://TOKEN@X.Weaviate.Cloud:8443",
+        "https://TOKEN@X.Weaviate.Cloud:443",
         "http://admin:pw@x.weaviate.cloud/",
         "x.weaviate.cloud",
     ],

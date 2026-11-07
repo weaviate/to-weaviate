@@ -260,19 +260,172 @@ def test_api_key_not_in_repr_or_error():
 
 
 def test_collections_reads_all_pages():
+    rows = [{"id": str(i)} for i in range(1003)]
     seen = []
 
     def handler(request):
         seen.append(request)
         offset = int(request.url.params["offset"])
-        n = 1000 if offset == 0 else 3
-        return httpx.Response(200, json=[{"id": str(offset + i)} for i in range(n)])
+        limit = int(request.url.params["limit"])
+        return httpx.Response(200, json=rows[offset : offset + limit])
 
     client, _ = make(handler)
-    assert len(client.collections("t", "d")) == 1003
-    assert [r.url.params["limit"] for r in seen] == ["1000", "1000"]
-    assert [r.url.params["offset"] for r in seen] == ["0", "1000"]
+    assert client.collections("t", "d") == rows
+    assert [r.url.params["limit"] for r in seen] == ["1000", "1000", "1000"]
+    assert [r.url.params["offset"] for r in seen] == ["0", "1000", "1003"]
     assert seen[0].url.path == "/api/v2/tenants/t/databases/d/collections"
+
+
+def collection_rows(total, cap):
+    """A handler that serves `total` collections, at most `cap` per page."""
+    rows = [{"id": str(i)} for i in range(total)]
+
+    def handler(request):
+        offset = int(request.url.params["offset"])
+        limit = int(request.url.params["limit"])
+        return httpx.Response(200, json=rows[offset : offset + min(limit, cap)])
+
+    return handler
+
+
+@pytest.mark.parametrize("total", [250, 200])
+def test_collections_advance_by_the_rows_received(total):
+    seen = []
+    serve = collection_rows(total, cap=100)
+
+    def handler(request):
+        seen.append(request)
+        return serve(request)
+
+    client, _ = make(handler)
+    found = client.collections("t", "d")
+    assert [row["id"] for row in found] == [str(i) for i in range(total)]
+    offsets = [str(offset) for offset in range(0, total, 100)] + [str(total)]
+    assert [r.url.params["offset"] for r in seen] == offsets
+    assert {r.url.params["limit"] for r in seen} == {"1000"}
+
+
+def test_collections_read_past_a_page_shorter_than_the_one_before():
+    rows = [{"id": str(i)} for i in range(250)]
+    sizes = [100, 50, 100, 100]
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        offset = int(request.url.params["offset"])
+        return httpx.Response(200, json=rows[offset : offset + sizes.pop(0)])
+
+    client, _ = make(handler)
+    assert client.collections("t", "d") == rows
+    assert [r.url.params["offset"] for r in seen] == ["0", "100", "150", "250"]
+
+
+def test_collections_page_over_the_limit_is_read_once():
+    rows = [{"id": str(i)} for i in range(2500)]
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        offset = int(request.url.params["offset"])
+        return httpx.Response(200, json=rows[offset : offset + 1200])
+
+    client, _ = make(handler)
+    assert client.collections("t", "d") == rows
+    offsets = ["0", "1200", "2400", "2500"]
+    assert [r.url.params["offset"] for r in seen] == offsets
+
+
+def test_collections_that_do_not_advance_raise_chroma_error():
+    rows = [{"id": str(i)} for i in range(3)]
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        if len(seen) > 5:
+            raise AssertionError("the listing did not stop")
+        return httpx.Response(200, json=rows)
+
+    client, sleeps = make(handler)
+    with pytest.raises(ChromaError) as e:
+        client.collections("t", "d")
+    assert e.value.message == "the collection list did not advance at offset 3"
+    assert [r.url.params["offset"] for r in seen] == ["0", "3"]
+    assert sleeps == []
+
+
+REDIRECT_HINT = "Set CHROMA_URL to the address the server redirects to."
+NOT_JSON_HINT = (
+    "Check that CHROMA_URL points at the Chroma API and not at a proxy or a web page."
+)
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "message"),
+    [
+        (
+            301,
+            {"Location": "https://user:MADE-UP@Chroma.Example:8443/v2?token=T#frag"},
+            "a redirect to https://chroma.example:8443",
+        ),
+        (302, {"Location": "/login?next=%2F"}, "a redirect to http://chroma.test"),
+        (300, {}, "a redirect without a Location header"),
+    ],
+)
+def test_redirect_raises_chroma_error_without_following_it(status, headers, message):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(status, headers=headers)
+
+    client, sleeps = make(handler)
+    with pytest.raises(ChromaError) as e:
+        client.identity()
+    assert e.value.status == status
+    assert str(e.value) == f"Chroma returned HTTP {status}: {message}"
+    assert e.value.hint == REDIRECT_HINT
+    assert len(calls) == 1 and sleeps == []
+
+
+def test_answer_that_is_not_json_raises_chroma_error():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, html="<html><body>Sign in</body></html>")
+
+    client, sleeps = make(handler)
+    with pytest.raises(ChromaError) as e:
+        client.identity()
+    assert e.value.status == 200
+    assert str(e.value) == (
+        "Chroma returned HTTP 200: the answer is not JSON "
+        "(Content-Type: text/html; charset=utf-8)"
+    )
+    assert e.value.hint == NOT_JSON_HINT
+    assert len(calls) == 1 and sleeps == []
+
+
+def test_answer_that_is_not_json_names_a_missing_content_type():
+    client, _ = make(lambda r: httpx.Response(204))
+    with pytest.raises(ChromaError) as e:
+        client.identity()
+    assert e.value.message == "the answer is not JSON (no Content-Type)"
+
+
+def test_content_type_of_an_answer_that_is_not_json_is_redacted_then_cut():
+    # A cut before the redaction would keep the first 15 characters of the key.
+    content_type = "text/html; x=" + "a" * 72 + CUT_KEY + "b" * 100
+    client, _ = make(
+        lambda r: httpx.Response(200, headers={"Content-Type": content_type}),
+        api_key=CUT_KEY,
+    )
+    with pytest.raises(ChromaError) as e:
+        client.identity()
+    shown = "text/html; x=" + "a" * 72 + "***" + "b" * 12
+    assert e.value.message == f"the answer is not JSON (Content-Type: {shown})"
+    slices = [CUT_KEY[i : i + 8] for i in range(len(CUT_KEY) - 7)]
+    assert not [s for s in slices if s in str(e.value)]
 
 
 def test_close_closes_the_http_client():

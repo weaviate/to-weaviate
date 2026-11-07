@@ -248,8 +248,8 @@ class WeaviateSettings:
     host read both. Without `grpc_url`, `connect` passes only `http.host` to
     `connect_to_weaviate_cloud`, which connects over TLS to port 443 whatever
     the scheme says, so `http` is secure and a URL without a port gets 443.
-    An explicit port stays in `http` and in the stored host, but the client
-    does not use it.
+    Without `grpc_url`, a `url` with an explicit port other than 443 is
+    refused.
     """
 
     url: str
@@ -268,7 +268,14 @@ class WeaviateSettings:
             )
             grpc = _endpoint(parts, "http")
         if grpc is None:
-            endpoint = Endpoint(http.hostname or "", http.port or 443, True)
+            if http.port not in (None, 443):
+                raise InvalidSetting(
+                    f"WEAVIATE_URL names port {http.port}, but without "
+                    "WEAVIATE_GRPC_URL the client connects to port 443.",
+                    "Set WEAVIATE_GRPC_URL for a Weaviate that is not on "
+                    "Weaviate Cloud.",
+                )
+            endpoint = Endpoint(http.hostname or "", 443, True)
         else:
             endpoint = _endpoint(http, "http")
         object.__setattr__(self, "http", endpoint)

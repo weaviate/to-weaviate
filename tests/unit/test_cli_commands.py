@@ -483,8 +483,24 @@ def test_copy_stops_when_the_target_refuses_the_schema():
     assert r.exit_code == 2
     d = json.loads(r.stdout)
     assert d["code"] == "target_rejected_schema" and M in d["message"]
-    assert "--index" in d["hint"]
+    assert "plan.yaml" in d["hint"]
     assert source.read_calls == 0
+
+
+def test_hint_of_a_refused_schema_tells_to_edit_the_plan():
+    refused = SchemaRejected("'_additional' is a reserved property name")
+    fakes = inspected(
+        FakeFactories(
+            FakeSource(cli_records(10)), schema=FakeSchema(ensure_error=refused)
+        )
+    )
+    code, error, _, hint = error_of(invoke(fakes, "copy", "--json"))
+    assert (code, error) == (2, "target_rejected_schema")
+    assert hint == (
+        "Read the server's message and edit plan.yaml. A free Weaviate Cloud "
+        "cluster accepts only the index type hfresh."
+    )
+    assert "--force" not in hint
 
 
 def test_copy_exits_1_when_rejects_exist():
@@ -1058,9 +1074,24 @@ def test_copy_refuses_two_entries_of_one_source(tmp_path, names):
 
 # (URL of the first run, URL of the resume, WEAVIATE_GRPC_URL, stored host)
 SAME_URLS = [
-    ("http://localhost:8099", "HTTP://LocalHost:8099", None, "localhost:8099"),
-    ("http://localhost:8099", "http://localhost:8099/", None, "localhost:8099"),
-    ("http://localhost:8099", "http://localhost.:8099", None, "localhost:8099"),
+    (
+        "http://localhost:8099",
+        "HTTP://LocalHost:8099",
+        "http://localhost:50099",
+        "localhost:8099",
+    ),
+    (
+        "http://localhost:8099",
+        "http://localhost:8099/",
+        "http://localhost:50099",
+        "localhost:8099",
+    ),
+    (
+        "http://localhost:8099",
+        "http://localhost.:8099",
+        "http://localhost:50099",
+        "localhost:8099",
+    ),
     (
         "http://weaviate.test",
         "http://weaviate.test:80",
