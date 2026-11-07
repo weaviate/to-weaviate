@@ -7,6 +7,7 @@ collections on both servers.
 """
 
 import os
+import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,7 @@ __all__ = [
     "Result",
     "read_plan",
     "run",
+    "start",
     "weaviate_by_source_id",
     "weaviate_compressed",
     "weaviate_config",
@@ -81,6 +83,7 @@ SUITE_COLLECTIONS = [
     "Rejects",
     "Tiny_l2_renamed",
     "Openai_proxy",
+    "Resume",
 ]
 
 
@@ -122,6 +125,14 @@ def run(args: list[str], workdir: Path, env: dict[str, str] | None = None) -> Re
     """
     cleared = dict.fromkeys(CLEARED_VARIABLES, "")
     return e2e.run(args, workdir, {**cleared, **(env or {})})
+
+
+def start(
+    args: list[str], workdir: Path, env: dict[str, str] | None = None
+) -> subprocess.Popen[bytes]:
+    """Start the installed to-weaviate as `run` does, without waiting for it."""
+    cleared = dict.fromkeys(CLEARED_VARIABLES, "")
+    return e2e.start(args, workdir, {**cleared, **(env or {})})
 
 
 @pytest.fixture(scope="session", autouse=True)

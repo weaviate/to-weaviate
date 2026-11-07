@@ -22,6 +22,10 @@ ADD_BATCH = 300
 # The records of one add when a collection is made. Chroma 1.5.9 accepts at
 # most 5461 (max_batch_size of /api/v2/pre-flight-checks).
 LARGE_ADD_BATCH = 5000
+# Records of the resume collection. A copy in both mode embeds about 300
+# records a second on a laptop CPU, so a full copy runs about 27 seconds.
+RESUME_COUNT = 8000
+TOPICS = ("rivers", "mountains", "cities", "forests", "deserts", "oceans")
 TEST_URL = "http://localhost:8001"
 # Every collection that `seed` makes, in the order it makes them.
 COLLECTIONS = (
@@ -33,6 +37,7 @@ COLLECTIONS = (
     "tenant-b",
     "rejects",
     "openai-proxy",
+    "resume",
 )
 CATEGORIES = ("guide", "reference", "tutorial")
 TAGS = ("red", "green", "blue", "small", "large")
@@ -173,6 +178,21 @@ def rejects(rng: random.Random) -> list[Record]:
     ]
 
 
+def resume(rng: random.Random) -> list[Record]:
+    """RESUME_COUNT records of 64 dimensions, each with a document."""
+    return [
+        Record(
+            id=f"res-{i:05d}",
+            embedding=_vector(rng, 64),
+            document=f"Record {i} of the resume collection is about "
+            f"{TOPICS[i % len(TOPICS)]}.",
+            metadata={"position": i},
+            uri=f"https://example.com/resume/{i}",
+        )
+        for i in range(RESUME_COUNT)
+    ]
+
+
 # Made-up secrets of the embedding function of openai-proxy. The tool must
 # neither store nor print them.
 PROXY_USER = "b8-proxy-user"
@@ -291,6 +311,7 @@ def seed() -> None:
         _recreate(
             http, "openai-proxy", "cosine", openai_proxy(rng), OPENAI_PROXY_FUNCTION
         )
+        _recreate(http, "resume", "cosine", resume(rng))
 
 
 def _extra_tiny_l2(start: int, count: int) -> list[Record]:
