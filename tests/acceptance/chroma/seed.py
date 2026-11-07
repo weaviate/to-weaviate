@@ -7,6 +7,7 @@ function here that sends a request reads CHROMA_URL and runs only when it is
 TEST_URL.
 """
 
+import math
 import os
 import random
 import sys
@@ -19,6 +20,8 @@ import httpx
 DATABASE_PATH = "/api/v2/tenants/default_tenant/databases/default_database"
 ADD_BATCH = 300
 TEST_URL = "http://localhost:8001"
+# Every collection that `seed` makes, in the order it makes them.
+COLLECTIONS = ("docs-cosine", "tiny.l2", "docs-rq", "docs-ip")
 CATEGORIES = ("guide", "reference", "tutorial")
 TAGS = ("red", "green", "blue", "small", "large")
 
@@ -92,6 +95,28 @@ def docs_rq(rng: random.Random) -> list[Record]:
     ]
 
 
+def docs_ip(rng: random.Random) -> list[Record]:
+    """40 records of 8 dimensions with unit length.
+
+    With unit vectors the largest inner product with a record's own vector is
+    that record's, so a nearest-neighbor query by its vector returns it first.
+    """
+    records = []
+    for i in range(40):
+        vector = _vector(rng, 8)
+        norm = math.sqrt(sum(x * x for x in vector))
+        records.append(
+            Record(
+                id=f"ip-{i:02d}",
+                embedding=[x / norm for x in vector],
+                document=f"Record {i} of the ip collection.",
+                metadata={"group": i % 4},
+                uri=f"https://example.com/ip/{i}",
+            )
+        )
+    return records
+
+
 def _recreate(
     http: httpx.Client, name: str, space: str | None, records: list[Record]
 ) -> None:
@@ -142,12 +167,13 @@ def _collection_id(http: httpx.Client, name: str) -> str:
 
 
 def seed() -> None:
-    """Delete and recreate docs-cosine, tiny.l2 and docs-rq on the test server."""
+    """Delete and recreate the COLLECTIONS on the test server."""
     rng = random.Random(0)
     with _test_server() as http:
         _recreate(http, "docs-cosine", "cosine", docs_cosine(rng))
         _recreate(http, "tiny.l2", None, tiny_l2(rng))
         _recreate(http, "docs-rq", "cosine", docs_rq(rng))
+        _recreate(http, "docs-ip", "ip", docs_ip(rng))
 
 
 def _extra_tiny_l2(start: int, count: int) -> list[Record]:
@@ -179,13 +205,42 @@ def delete_from_tiny_l2(ids: list[str]) -> None:
         deleted.raise_for_status()
 
 
-def tiny_l2_count() -> int:
-    """The number of records in tiny.l2."""
+def records(name: str, limit: int = 10) -> list[Record]:
+    """The first `limit` records of the collection `name`, read from the server."""
     with _test_server() as http:
-        collection_id = _collection_id(http, "tiny.l2")
+        found = http.post(
+            f"/collections/{_collection_id(http, name)}/get",
+            json={
+                "limit": limit,
+                "include": ["embeddings", "documents", "metadatas", "uris"],
+            },
+        )
+        found.raise_for_status()
+        rows = found.json()
+    return [
+        Record(
+            id=rows["ids"][i],
+            embedding=rows["embeddings"][i],
+            document=rows["documents"][i],
+            metadata=rows["metadatas"][i] or {},
+            uri=rows["uris"][i],
+        )
+        for i in range(len(rows["ids"]))
+    ]
+
+
+def count(name: str) -> int:
+    """The number of records in the collection `name`."""
+    with _test_server() as http:
+        collection_id = _collection_id(http, name)
         counted = http.get(f"/collections/{collection_id}/count")
         counted.raise_for_status()
         return int(counted.json())
+
+
+def tiny_l2_count() -> int:
+    """The number of records in tiny.l2."""
+    return count("tiny.l2")
 
 
 if __name__ == "__main__":
@@ -193,4 +248,4 @@ if __name__ == "__main__":
         seed()
     except (ValueError, httpx.HTTPError) as exc:
         sys.exit(f"seed.py: {exc}")
-    print("Seeded docs-cosine, tiny.l2 and docs-rq.")
+    print(f"Seeded {', '.join(COLLECTIONS)}.")

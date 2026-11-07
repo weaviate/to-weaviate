@@ -225,10 +225,13 @@ The commands it starts get empty values for `CHROMA_DATABASE`,
 `CHROMA_TENANT`, `CHROMA_API_KEY` and `CHROMA_TOKEN_HEADER`, so values from
 your shell do not reach them.
 
-The suite deletes and recreates the Chroma collections `docs-cosine`,
-`tiny.l2` and `docs-rq`. One test adds 10 records to `tiny.l2` and deletes
-them when it ends. Before each test the suite deletes the Weaviate
-collections `Docs_cosine`, `Tiny_l2` and `Docs_rq`.
+The suite deletes and recreates the Chroma collections that `COLLECTIONS`
+in `tests/acceptance/chroma/seed.py` lists. One test adds 10 records to
+`tiny.l2` and deletes them when it ends. Before and after each test the
+suite deletes the Weaviate collections that `SUITE_COLLECTIONS` in
+`tests/acceptance/conftest.py` lists. It writes to no other Weaviate
+collection, also when the test Chroma holds collections that the seed does
+not make.
 
 The `Makefile` starts the servers and sets the variables. `make` alone
 prints the targets. `make acceptance-up` and `make acceptance-down` call

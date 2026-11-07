@@ -9,21 +9,38 @@ collections on both servers.
 import os
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import e2e
 import pytest
+import yaml
 from chroma.seed import seed
 from e2e import (
     Result,
     close_weaviate,
     delete_target_collection,
+    weaviate_by_source_id,
     weaviate_config,
     weaviate_count,
+    weaviate_near_text,
+    weaviate_near_vector,
     weaviate_object,
 )
 
-# test_migration.py imports these names from this module.
-__all__ = ["Result", "run", "weaviate_config", "weaviate_count", "weaviate_object"]
+# The test modules import these names from this module.
+__all__ = [
+    "SUITE_COLLECTIONS",
+    "Result",
+    "read_plan",
+    "run",
+    "weaviate_by_source_id",
+    "weaviate_config",
+    "weaviate_count",
+    "weaviate_near_text",
+    "weaviate_near_vector",
+    "weaviate_object",
+    "write_plan",
+]
 
 TEST_ENDPOINTS = {
     "CHROMA_URL": "http://localhost:8001",
@@ -41,7 +58,7 @@ CLEARED_VARIABLES = (
     "CHROMA_TOKEN_HEADER",
 )
 # The target collections the suite creates. The suite touches no other one.
-SUITE_COLLECTIONS = ["Docs_cosine", "Tiny_l2", "Docs_rq"]
+SUITE_COLLECTIONS = ["Docs_cosine", "Tiny_l2", "Docs_rq", "Docs_ip"]
 
 
 def endpoint_problems() -> list[str]:
@@ -58,6 +75,20 @@ def endpoint_problems() -> list[str]:
             shown = "the test key" if name == "WEAVIATE_API_KEY" else expected
             problems.append(f"{name} is not {shown}")
     return problems
+
+
+def read_plan(workdir: Path) -> dict[str, Any]:
+    """The plan.yaml of `workdir` as plain data."""
+    data = yaml.safe_load((workdir / "plan.yaml").read_text(encoding="utf-8"))
+    assert isinstance(data, dict)
+    return data
+
+
+def write_plan(workdir: Path, plan: dict[str, Any]) -> None:
+    """Replace the plan.yaml of `workdir` with `plan`."""
+    (workdir / "plan.yaml").write_text(
+        yaml.safe_dump(plan, sort_keys=False, allow_unicode=True), encoding="utf-8"
+    )
 
 
 def run(args: list[str], workdir: Path, env: dict[str, str] | None = None) -> Result:
@@ -93,6 +124,9 @@ def seeded(_test_endpoints: None) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _delete_suite_collections(_test_endpoints: None) -> None:
+def _delete_suite_collections(_test_endpoints: None) -> Iterator[None]:
+    for name in SUITE_COLLECTIONS:
+        delete_target_collection(name)
+    yield
     for name in SUITE_COLLECTIONS:
         delete_target_collection(name)

@@ -1,10 +1,54 @@
 from chroma.seed import (
+    COLLECTIONS,
     add_to_tiny_l2,
+    count,
     delete_from_tiny_l2,
     extra_tiny_l2_ids,
     tiny_l2_count,
 )
-from conftest import run, weaviate_config, weaviate_count, weaviate_object
+from conftest import (
+    SUITE_COLLECTIONS,
+    read_plan,
+    run,
+    weaviate_config,
+    weaviate_count,
+    weaviate_object,
+    write_plan,
+)
+
+
+def test_every_seeded_collection_in_one_run(seeded, tmp_path):
+    r = run(["inspect", "chroma"], tmp_path)
+    assert r.exit_code == 0, r
+    targets = {row["source"]: row["target"] for row in r.data["collections"]}
+    assert set(COLLECTIONS) <= set(targets), r
+    assert {targets[name] for name in COLLECTIONS} <= set(SUITE_COLLECTIONS)
+    # The test server can hold collections that the seed does not make, and
+    # the suite writes only to its own target collections.
+    plan = read_plan(tmp_path)
+    plan["collections"] = [
+        e for e in plan["collections"] if e["source"]["name"] in COLLECTIONS
+    ]
+    write_plan(tmp_path, plan)
+    for cmd in (["check"], ["copy"], ["verify"]):
+        r = run(cmd, tmp_path)
+        assert r.exit_code == 0 and r.data["status"] == "success", r
+    checks = r.data["checks"]
+    assert len(checks) == 3 * len(COLLECTIONS) and all(c["passed"] for c in checks)
+    r = run(["status"], tmp_path)
+    assert r.exit_code == 0, r
+    rows = {row["target"]: row for row in r.data["collections"]}
+    assert len(rows) == len(COLLECTIONS), r
+    for name in COLLECTIONS:
+        expected = count(name)
+        row = rows[targets[name]]
+        assert (row["total"], row["copied"], row["rejects"], row["done"]) == (
+            expected,
+            expected,
+            0,
+            True,
+        ), row
+        assert weaviate_count(targets[name]) == expected, name
 
 
 def test_end_to_end(seeded, tmp_path):
