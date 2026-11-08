@@ -102,6 +102,9 @@ server's message.
 | Source: records deleted during a copy | no; deferred F4 (U-08 pins the documented limit) | no | no | unit |
 | Source: records added between runs (tail) | cov `test_copy::test_*tail*`, `cmd::test_every_copy_reads_the_records_added_since_the_last_run` | cov `acc/migration::test_each_copy_adds_the_records_that_the_source_gained` | no | acceptance API |
 | Source: compaction on distributed Chroma (wait for num_unindexed_ops 0, stop on a changed version or log_position, single-node HTTP 500) | cov `test_chroma_client::test_indexing_status_*`, `::test_another_500_on_indexing_status_is_retried`, `::test_collection_by_name_reads_the_collection_document`, `test_chroma_source::test_wait_compacted_*`, `::test_compaction_state_of_a_collection_created_again_names_inspect_force`, `test_copy::test_the_wait_comes_before_the_first_page_and_the_state_after_the_last_read`, `::test_a_changed_state_stops_the_copy_and_the_next_run_reads_from_the_start`, `::test_a_source_without_compaction_is_not_compared`, `::test_the_wait_writes_a_compaction_wait_event_per_change`, `::test_a_wait_that_ends_without_compaction_reads_no_page`, `test_verify::test_verify_waits_before_the_counts_and_reads_the_state_after_the_records`, `::test_verify_stops_with_source_compacting_and_writes_no_report`, `test_cli_chroma::test_copy_and_verify_wait_until_chroma_compacted`, `::test_a_single_node_chroma_gets_one_indexing_status_request_per_command` | cov `acc/source_order::test_copy_during_compaction` (cluster leg) | no | acceptance API |
+| Source: `indexing_status` answers HTTP 404, from Chroma before 1.4.1 or for a missing collection: no guard, one request, no retry (ruling R103) | cov `test_chroma_client::test_a_404_on_indexing_status_is_none_and_not_retried` | no (the compose Chroma has the route) | no | unit |
+| Source: `copy` and `verify` against a Chroma without the `indexing_status` route copy every record with one request per command (ruling R103) | cov `test_cli_chroma::test_a_chroma_without_the_indexing_status_route_copies_and_verifies_unguarded` | no (the compose Chroma has the route) | no | unit |
+| Source: a not-implemented answer after a successful first poll keeps the guard off (ruling R101) | cov `test_chroma_source::test_a_later_not_implemented_answer_keeps_the_guard_off` | no | no | unit |
 | Source: 5xx, 429 with Retry-After, transport error, redirect, non-JSON | cov `test_chroma_client` (client level only; U-02 adds the copy path) | no (A-04) | no | unit |
 | Source: 401/403, missing key, Chroma Cloud host rule, token header forms | cov `json::test_source_errors_map_to_codes`, `test_settings`, `test_chroma_client::test_sends_token_header` | part (no key on the local server) | cov | unit |
 | Source: tenant from `/auth/identity` (`_chroma_source`) | no (U-13) | cov (implicit) | cov | acceptance API |
@@ -727,8 +730,9 @@ addition, the 10 ids come last. Runs on both Chroma kinds.
 **U-18 The compaction guard.** Level unit, risk R1. The client sends
 `GET .../collections/{id}/indexing_status`. A 500 whose message holds "is
 not implemented", the answer of single-node Chroma 1.5.9, gives None
-without a retry; any other 500 is retried as before (ruling R99). The
-client reads the collection document by name, from sysdb. The source
+without a retry; any other 500 is retried as before (ruling R99). A 404,
+the answer of a server before Chroma 1.4.1, gives None too (ruling R103).
+The client reads the collection document by name, from sysdb. The source
 sends one `indexing_status` and returns None on single-node Chroma: one
 request, no wait. Otherwise each poll reads the collection's `version` and
 `log_position` first and `indexing_status` second, every 5 s, and returns

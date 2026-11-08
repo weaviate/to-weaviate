@@ -118,6 +118,8 @@ from the start; records read again are written again unchanged. A
 collection that is written to all the time does not reach 0 within 600 s,
 and `copy` then stops with `source_compacting` before its first page.
 Single-node Chroma has no compaction: the tool asks once and does not wait.
+A Chroma server without the `indexing_status` route, a version before
+1.4.1, answers 404, and the guard is off, as on single-node Chroma.
 
 Each record that the tool cannot convert or that Weaviate refuses goes to
 `rejects.jsonl` with the reason. Rejects are final for this directory. After
