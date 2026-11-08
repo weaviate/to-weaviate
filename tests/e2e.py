@@ -474,7 +474,12 @@ def weaviate_wait_indexed(name: str, timeout: float = 120.0) -> None:
 
 
 def weaviate_compressed(name: str) -> list[bool]:
-    """Whether each shard of the target collection `name` holds compressed vectors."""
+    """Whether each shard of `name` holds compressed vectors, one flag per node of it.
+
+    Weaviate gives a collection one shard per node of the cluster, and a tenant
+    one shard. Each shard is on as many nodes as the replication factor, and
+    each of them gives a flag.
+    """
     nodes = _weaviate().cluster.nodes(collection=name, output="verbose")
     return [shard.compressed for node in nodes for shard in node.shards or []]
 
