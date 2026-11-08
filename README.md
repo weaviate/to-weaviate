@@ -349,7 +349,8 @@ restart loop and waits until Chroma answers there.
 `chroma-k8s.sh down` stops the forward and deletes the namespace. The
 script runs on Linux amd64 only, because the Chroma service images exist
 for amd64 only. On any other machine it exits 2 before it runs any other
-command.
+command. It also exits 2 when `GITHUB_ACTIONS` is not `true`, so that
+`down` never deletes a namespace of a kind cluster on a developer machine.
 With `ACCEPTANCE_CHROMA=distributed`, the suite waits after the seed
 until Chroma has compacted every seeded collection, for at most 300 s.
 A compaction run of more than 5,000 records gives them new offsets in

@@ -2,9 +2,10 @@
 # Starts and stops the open-source distributed Chroma of the cluster leg of
 # .github/workflows/ci.yml, in namespace chroma of the kind cluster that the
 # current kubectl context names. Its HTTP API is forwarded to localhost:8001,
-# the CHROMA_URL of the acceptance suite. Runs only on Linux amd64, in that
-# leg after the weaviate-local-k8s action: the service images exist for amd64
-# only.
+# the CHROMA_URL of the acceptance suite. Runs only in that leg, after the
+# weaviate-local-k8s action. It refuses to run when GITHUB_ACTIONS is not true
+# or the machine is not Linux amd64. The service images exist for amd64 only.
+# down deletes the namespace chroma of the current kind cluster.
 #
 # Usage: chroma-k8s.sh up|down. up renders the Helm chart
 # k8s/distributed-chroma of the Chroma repository with helm template and
@@ -50,6 +51,12 @@ x86_64 | amd64) ;;
 esac
 if [ "$(uname -s)" != Linux ]; then
     echo "chroma-k8s.sh runs on Linux only; this leg runs in CI. Nothing was started or deleted." >&2
+    exit 2
+fi
+# up binds port 8001 and down deletes a namespace of the current kind
+# cluster, so neither runs on a developer machine.
+if [ "${GITHUB_ACTIONS:-}" != "true" ]; then
+    echo "GITHUB_ACTIONS is not true: chroma-k8s.sh runs only in CI. Nothing was started or deleted." >&2
     exit 2
 fi
 
@@ -217,9 +224,9 @@ answers() {
     [ "$status" -ne 7 ]
 }
 
-# forward: runs until the job ends. A kubectl port-forward to a service stays
-# on one pod and exits when that pod goes away; the loop then starts a new
-# one.
+# forward: runs until the CI job ends or chroma-k8s.sh down stops it. A
+# kubectl port-forward to a service stays on one pod and exits when that pod
+# goes away; the loop then starts a new one.
 forward() {
     while :; do
         echo "$(date +%T) starting $FORWARD_PATTERN $PORT:8000" >>"$FORWARD_LOG"
