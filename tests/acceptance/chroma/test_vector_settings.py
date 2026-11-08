@@ -118,29 +118,27 @@ UNSUPPORTED = {
         "quantizer": {"type": "pq", "segments": 5, "training_limit": 100},
     },
 }
-# docs-rq has 300 records, and a collection has one shard per node, so a
-# shard of a 3-node cluster holds about 100 of them (88, 120 and 92 in one
-# run). 100 // nodes() is below the records of every shard.
-TRAINING_LIMIT = 100 // nodes()
-# Quantizers that the server trains on the copied vectors. copy enables them
-# again after the pages; a server with ASYNC_INDEXING trains them on a shard
-# once the shard holds training_limit vectors.
+
+# Quantizers that the server trains on the copied vectors, without their
+# training_limit, which the test adds from training_limit(). copy enables
+# them again after the pages; a server with ASYNC_INDEXING trains them on a
+# shard once the shard holds training_limit vectors.
 TRAINED = {
-    "sq": {"type": "sq", "training_limit": TRAINING_LIMIT},
-    "pq": {
-        "type": "pq",
-        "segments": 8,
-        "centroids": 16,
-        "training_limit": TRAINING_LIMIT,
-    },
-    "rq-centering": {
-        "type": "rq",
-        "bits": 4,
-        "centering": True,
-        "training_limit": TRAINING_LIMIT,
-    },
+    "sq": {"type": "sq"},
+    "pq": {"type": "pq", "segments": 8, "centroids": 16},
+    "rq-centering": {"type": "rq", "bits": 4, "centering": True},
 }
 COMPRESSION_WAIT = compression_wait()
+
+
+def training_limit() -> int:
+    """A training limit below the records of every shard of docs-rq.
+
+    docs-rq has 300 records, and a collection has one shard per node, so a
+    shard of a 3-node cluster holds about 100 of them (88, 120 and 92 in one
+    run). nodes() can connect to the target, so only a test calls this.
+    """
+    return 100 // nodes()
 
 
 def test_chroma_distances_map_to_weaviate_distances(seeded, tmp_path):
@@ -291,10 +289,9 @@ def test_check_refuses_index_settings_that_the_server_does_not_create(
     assert not weaviate_exists("Docs_rq")
 
 
-@pytest.mark.parametrize("quantizer", TRAINED.values(), ids=TRAINED)
-def test_trained_quantizer_compresses_the_vectors(
-    docs_rq_inspection, tmp_path, quantizer
-):
+@pytest.mark.parametrize("name", TRAINED)
+def test_trained_quantizer_compresses_the_vectors(docs_rq_inspection, tmp_path, name):
+    quantizer = {**TRAINED[name], "training_limit": training_limit()}
     index = {"type": "hnsw", "quantizer": quantizer}
     _plan_with_index(docs_rq_inspection, tmp_path, index)
     copy_and_verify(tmp_path)

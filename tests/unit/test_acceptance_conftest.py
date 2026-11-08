@@ -5,10 +5,17 @@ directory, so these tests import e2e, which tests/acceptance/conftest.py
 re-exports.
 """
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import e2e
 import pytest
 
 pytest_plugins = ["pytester"]
+
+REPOSITORY = Path(__file__).resolve().parents[2]
 
 CLOUD_URL = "https://abc.c0.europe-west3.gcp.weaviate.cloud"
 MADE_UP_KEY = "made-up-cloud-key-t22"
@@ -402,3 +409,34 @@ def test_compaction_properties_of_a_copy_whose_page_0_kept_its_order():
     assert properties["crossed"] is False
     assert properties["changed_offsets"] == [5000]
     assert properties["state_after"] == STATE_BEFORE
+
+
+@pytest.mark.parametrize(
+    "variables", [{}, {"ACCEPTANCE_NODES": "three"}], ids=["unset", "malformed nodes"]
+)
+def test_the_acceptance_suite_collects_without_a_server(variables):
+    # endpoint_problems reports a missing or malformed variable at the setup
+    # of the first test, so collection must read no endpoint.
+    environment = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "")}
+    environment.update(variables)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "tests/acceptance",
+        ],
+        cwd=REPOSITORY,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "error during collection" not in output, output
+    assert "test_trained_quantizer_compresses_the_vectors[sq]" in output, output
