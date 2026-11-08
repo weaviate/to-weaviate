@@ -107,10 +107,23 @@ jobs:
       # Chroma forward.
       - if: failure()
         run: tail -n 200 /tmp/port-forward-*.log
-      # The label app of each Chroma workload is its name in the chart.
+      # The restart counts, the compactor pod (an OOM kill shows there), and
+      # the last log lines of each pod of five Chroma services; the previous
+      # log too for a pod that restarted. The label app of each workload is
+      # its name in the chart, so sts/query-service gives both of its pods.
       - if: failure() && matrix.chroma == 'distributed'
         run: |
-          for app in rust-frontend-service compaction-service rust-log-service query-service; do
-            echo "--- kubectl -n chroma logs -l app=$app"
-            kubectl -n chroma logs -l "app=$app" --all-containers --prefix --tail=200 || true
+          kubectl -n chroma get pods -o wide || true
+          kubectl -n chroma describe pod -l app=compaction-service || true
+          for workload in sts/compaction-service sts/rust-log-service \
+            deploy/rust-frontend-service sts/query-service deploy/sysdb; do
+            for pod in $(kubectl -n chroma get pods -l "app=${workload#*/}" -o name || true); do
+              echo "--- $workload: kubectl -n chroma logs $pod --tail=500"
+              kubectl -n chroma logs "$pod" --all-containers --tail=500 || true
+              restarts=$(kubectl -n chroma get "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}' || true)
+              if [ "${restarts:-0}" -gt 0 ]; then
+                echo "--- $workload: kubectl -n chroma logs $pod --previous --tail=500 ($restarts restarts)"
+                kubectl -n chroma logs "$pod" --all-containers --previous --tail=500 || true
+              fi
+            done
           done
