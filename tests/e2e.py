@@ -246,16 +246,7 @@ def _cloud_problems() -> list[str]:
     if not url:
         problems.append("WEAVIATE_URL is not set")
     else:
-        parts = urlsplit(url)
-        if parts.scheme != "https":
-            problems.append(
-                "WEAVIATE_URL does not use https (the cloud target needs TLS)"
-            )
-        if not (parts.hostname or "").endswith(CLOUD_HOST_SUFFIXES):
-            problems.append(
-                "the host of WEAVIATE_URL does not end with "
-                + " or ".join(CLOUD_HOST_SUFFIXES)
-            )
+        problems.extend(_cloud_url_problems(url))
     if not _variable("WEAVIATE_API_KEY"):
         problems.append("WEAVIATE_API_KEY is not set")
     # The tool reads an empty value as unset.
@@ -272,6 +263,34 @@ def _cloud_problems() -> list[str]:
             f"CHROMA_URL is not {local_chroma} (the source stays the local test Chroma)"
         )
     return problems
+
+
+def _cloud_url_problems(url: str) -> list[str]:
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+    except ValueError:
+        return ["WEAVIATE_URL is not a URL"]
+    problems = []
+    if parts.scheme != "https":
+        problems.append("WEAVIATE_URL does not use https (the cloud target needs TLS)")
+    if not host.endswith(CLOUD_HOST_SUFFIXES):
+        problems.append(
+            "the host of WEAVIATE_URL does not end with "
+            + " or ".join(CLOUD_HOST_SUFFIXES)
+        )
+    return problems
+
+
+def fail_infra_on_cloud(item: pytest.Item) -> None:
+    """Fail `item` when it is marked infra and target() is "cloud".
+
+    An infra test runs docker or kubectl, which reach only the local servers.
+    The acceptance conftest calls it from pytest_runtest_setup, so it runs
+    before any fixture of the item is set up.
+    """
+    if item.get_closest_marker("infra") is not None and target() == "cloud":
+        pytest.fail("infra tests run only against the local servers")
 
 
 def dedicated_cluster_problem(
@@ -411,12 +430,12 @@ def weaviate_modules() -> set[str]:
 
 
 def enabled_vectorizer() -> str:
-    """vectorizer(), after the test skips when the target does not enable it."""
+    """vectorizer(), after the test fails when the target does not enable it."""
     module = vectorizer()
     if not module_names(module) & weaviate_modules():
-        pytest.skip(
-            f"the target does not enable {module}; set {VECTORIZER_VARIABLE} "
-            "to a module that it enables"
+        pytest.fail(
+            f"/v1/meta of the target does not list {module}; set "
+            f"{VECTORIZER_VARIABLE} to a module that the target enables"
         )
     return module
 

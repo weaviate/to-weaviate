@@ -20,7 +20,6 @@ from conftest import (
     weaviate_wait_indexed,
     write_plan,
 )
-from conftest import target as acceptance_target
 from weaviate.collections.classes.config import (
     _BQConfig,
     _PQConfig,
@@ -132,8 +131,6 @@ TRAINED = {
     },
 }
 COMPRESSION_WAIT = compression_wait()
-# The index types that a Weaviate Cloud sandbox refuses; it accepts only hfresh.
-NOT_ON_A_SANDBOX = {"hnsw", "flat", "dynamic"}
 
 
 def test_chroma_distances_map_to_weaviate_distances(seeded, tmp_path):
@@ -193,37 +190,11 @@ def _docs_rq_index() -> Any:
     return weaviate_config("Docs_rq").vector_config["default"].vector_index_config
 
 
-def _skip_when_only_hfresh(r: Result, index_type: str) -> None:
-    """Skip the case when the cloud target refused `index_type` as a sandbox does.
-
-    The tool reports the refusal as target_rejected_schema with a hint that
-    names hfresh. The skip reason holds the server's message.
-    """
-    if (
-        acceptance_target() == "cloud"
-        and index_type in NOT_ON_A_SANDBOX
-        and r.data.get("code") == "target_rejected_schema"
-        and "hfresh" in str(r.data.get("hint"))
-    ):
-        pytest.skip(f"this cluster accepts only hfresh: {r.data['message']}")
-
-
-def _copy_and_verify_or_skip(workdir: Path, index_type: str) -> None:
-    """Run check, copy and verify like copy_and_verify, with _skip_when_only_hfresh."""
-    r = run(["check"], workdir)
-    assert r.exit_code == 0 and r.data["status"] == "success", r
-    r = run(["copy"], workdir)
-    _skip_when_only_hfresh(r, index_type)
-    assert r.exit_code == 0 and r.data["status"] == "success", r
-    r = run(["verify"], workdir)
-    assert r.exit_code == 0 and r.data["status"] == "success", r
-
-
 @pytest.mark.parametrize("quantizer", QUANTIZERS.values(), ids=QUANTIZERS)
 def test_quantizer_settings_reach_the_server(docs_rq_inspection, tmp_path, quantizer):
     index = {"type": "hnsw", "quantizer": quantizer}
     _plan_with_index(docs_rq_inspection, tmp_path, index)
-    _copy_and_verify_or_skip(tmp_path, index["type"])
+    copy_and_verify(tmp_path)
     # The collection that copy made matches the plan, so a later run resumes.
     r = run(["check"], tmp_path)
     assert r.exit_code == 0, r
@@ -269,7 +240,6 @@ def test_index_settings_reach_the_server(docs_rq_inspection, tmp_path, index):
     r = run(["copy"], tmp_path)
     if index["type"] == "dynamic":
         _expect_dynamic_outcome(r)
-    _skip_when_only_hfresh(r, index["type"])
     assert r.exit_code == 0 and r.data["status"] == "success", r
     r = run(["verify"], tmp_path)
     assert r.exit_code == 0 and r.data["status"] == "success", r
@@ -315,7 +285,7 @@ def test_trained_quantizer_compresses_the_vectors(
 ):
     index = {"type": "hnsw", "quantizer": quantizer}
     _plan_with_index(docs_rq_inspection, tmp_path, index)
-    _copy_and_verify_or_skip(tmp_path, index["type"])
+    copy_and_verify(tmp_path)
     deadline = time.monotonic() + COMPRESSION_WAIT
     while weaviate_compressed("Docs_rq") != [True] and time.monotonic() < deadline:
         time.sleep(0.5)

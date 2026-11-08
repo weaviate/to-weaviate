@@ -227,14 +227,11 @@ def _test_endpoints() -> Iterator[None]:
     close_weaviate()
 
 
-@pytest.fixture(autouse=True)
-def _infra_only_on_local_servers(request: pytest.FixtureRequest) -> None:
-    """Fails a test marked infra on the cloud target, before it runs a command.
-
-    An infra test runs docker or kubectl, which reach only the local servers.
-    """
-    if request.node.get_closest_marker("infra") and target() == "cloud":
-        pytest.fail("infra tests run only against the local servers")
+# tryfirst: the guard runs before the hook that sets up the fixtures of the
+# item, so a fixture of an infra test never runs on the cloud target.
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    e2e.fail_infra_on_cloud(item)
 
 
 @pytest.fixture(scope="session")

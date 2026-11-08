@@ -8,6 +8,8 @@ re-exports.
 import e2e
 import pytest
 
+pytest_plugins = ["pytester"]
+
 CLOUD_URL = "https://abc.c0.europe-west3.gcp.weaviate.cloud"
 MADE_UP_KEY = "made-up-cloud-key-t22"
 LOCAL_CHROMA = "http://localhost:8001"
@@ -134,11 +136,27 @@ CLOUD_REFUSED = {
         "the host of WEAVIATE_URL does not end with .weaviate.cloud or "
         ".weaviate.network",
     ),
-    "suffix inside the host": (
-        {"WEAVIATE_URL": "https://abc.weaviate.cloud.example.com"},
+    "suffix inside a longer host": (
+        {"WEAVIATE_URL": "https://abc.weaviate.cloud.evil.example"},
         "the host of WEAVIATE_URL does not end with .weaviate.cloud or "
         ".weaviate.network",
     ),
+    "suffix in the userinfo": (
+        {"WEAVIATE_URL": "https://abc.weaviate.cloud@evil.example"},
+        "the host of WEAVIATE_URL does not end with .weaviate.cloud or "
+        ".weaviate.network",
+    ),
+    "suffix in the query": (
+        {"WEAVIATE_URL": "https://evil.example/?h=.weaviate.cloud"},
+        "the host of WEAVIATE_URL does not end with .weaviate.cloud or "
+        ".weaviate.network",
+    ),
+    "suffix in the fragment": (
+        {"WEAVIATE_URL": "https://evil.example#.weaviate.cloud"},
+        "the host of WEAVIATE_URL does not end with .weaviate.cloud or "
+        ".weaviate.network",
+    ),
+    "not a url": ({"WEAVIATE_URL": "https://[abc"}, "WEAVIATE_URL is not a URL"),
     "no key": ({"WEAVIATE_API_KEY": None}, "WEAVIATE_API_KEY is not set"),
     "grpc url": (
         {"WEAVIATE_GRPC_URL": "https://grpc-abc.weaviate.cloud"},
@@ -180,3 +198,70 @@ def test_a_target_with_other_collections_is_not_dedicated():
         "the target holds collections the suite does not own: Alpha, Zeta; "
         "use a dedicated cluster"
     )
+
+
+@pytest.mark.parametrize(
+    "listed", [{"text2vec-transformers"}, {"a", "text2vec-transformers"}]
+)
+def test_enabled_vectorizer_is_the_vectorizer_that_the_target_lists(
+    env, monkeypatch, listed
+):
+    monkeypatch.setattr(e2e, "weaviate_modules", lambda: listed)
+    assert e2e.enabled_vectorizer() == "text2vec-transformers"
+
+
+def test_a_vectorizer_that_the_target_does_not_list_fails_the_test(env, monkeypatch):
+    env({"ACCEPTANCE_VECTORIZER": "text2vec-weaviate"})
+    monkeypatch.setattr(e2e, "weaviate_modules", lambda: {"text2vec-transformers"})
+    with pytest.raises(pytest.fail.Exception) as failure:
+        e2e.enabled_vectorizer()
+    assert str(failure.value) == (
+        "/v1/meta of the target does not list text2vec-weaviate; set "
+        "ACCEPTANCE_VECTORIZER to a module that the target enables"
+    )
+
+
+# A conftest and a test module like those of tests/acceptance: the hook runs
+# the guard, and the infra test requests a module-scoped fixture that stands
+# for one that runs docker or kubectl.
+GUARD_CONFTEST = """
+import e2e
+import pytest
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    e2e.fail_infra_on_cloud(item)
+"""
+INFRA_TEST = """
+import pytest
+
+
+@pytest.fixture(scope="module")
+def server():
+    open("fixture-ran", "w").close()
+
+
+@pytest.mark.infra
+def test_restarts_a_server(server):
+    pass
+"""
+
+
+@pytest.mark.parametrize(("target", "ran"), [("cloud", False), ("local", True)])
+def test_the_infra_guard_runs_before_the_fixtures_of_an_infra_test(
+    pytester, monkeypatch, target, ran
+):
+    monkeypatch.setenv("ACCEPTANCE_TARGET", target)
+    pytester.makeini("[pytest]\nmarkers =\n    infra: test marker\n")
+    pytester.makeconftest(GUARD_CONFTEST)
+    pytester.makepyfile(INFRA_TEST)
+    result = pytester.runpytest("-p", "no:cacheprovider", "--strict-markers")
+    if ran:
+        result.assert_outcomes(passed=1)
+    else:
+        result.assert_outcomes(errors=1)
+        result.stdout.fnmatch_lines(
+            ["*infra tests run only against the local servers*"]
+        )
+    assert (pytester.path / "fixture-ran").exists() == ran
