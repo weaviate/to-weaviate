@@ -4,8 +4,10 @@ Run it as a script, or call `seed()`. Each run deletes and recreates the
 collections, so every run sends the same data. On a distributed Chroma the
 suite then calls `wait_indexed`. `add_to_tiny_l2` and `delete_from_tiny_l2`
 add records to tiny.l2 and delete them again; `restore_tiny_l2` makes tiny.l2
-again from records read before. Every function here that sends a request
-reads CHROMA_URL and runs only when it is TEST_URL.
+again from records read before. `make_collection`, `add_records`,
+`delete_records` and `delete_collection` serve the cases that make their own
+collections. Every function here that sends a request reads CHROMA_URL and
+runs only when it is TEST_URL.
 """
 
 import math
@@ -60,6 +62,9 @@ BULK = "bulk"
 BULK_COUNT = 50_000
 # Every collection that `seed` makes.
 SEEDED = (*COLLECTIONS, EDGE, BULK)
+# The collection of the order case of test_source_order.py, which makes it.
+ORDER = "order"
+ORDER_COUNT = 1000
 # A distributed Chroma compacts every 10 s, at most 10,000 records of a
 # collection per run (compaction_interval_sec and max_compaction_size of
 # rust/worker/chroma_config.yaml in the Chroma repository), so bulk needs five
@@ -320,6 +325,25 @@ def renamed(rng: random.Random, name: str) -> list[Record]:
     ]
 
 
+def order_records(start: int, count: int) -> list[Record]:
+    """`count` records of 4 dimensions for ORDER, numbered from `start`.
+
+    Their ids are UUIDs, so the order of the ids differs from the order of
+    the records.
+    """
+    rng = random.Random(start)
+    return [
+        Record(
+            id=str(uuid.UUID(int=rng.getrandbits(128), version=4)),
+            embedding=_vector(rng, 4),
+            document=f"Record {i} of the order collection.",
+            metadata={"position": i},
+            uri=None,
+        )
+        for i in range(start, start + count)
+    ]
+
+
 # Made-up secrets of the embedding function of openai-proxy. The tool must
 # neither store nor print them.
 PROXY_USER = "b8-proxy-user"
@@ -370,13 +394,12 @@ def _recreate(
     space: str | None,
     records: list[Record],
     embedding_function: dict[str, Any] | None = None,
+    batch_size: int = LARGE_ADD_BATCH,
 ) -> None:
     # Chroma 1.5.9 keeps the array metadata rows of a deleted collection. A
     # record created later on the same server can then show an array key that
     # was never sent for it. A fresh container has no such rows.
-    deleted = http.delete(f"/collections/{name}")
-    if deleted.status_code != 404:
-        deleted.raise_for_status()
+    _delete_collection(http, name)
     body: dict[str, Any] = {"name": name}
     if space is not None:
         body["configuration"] = {"hnsw": {"space": space}}
@@ -384,7 +407,13 @@ def _recreate(
         body.setdefault("configuration", {})["embedding_function"] = embedding_function
     created = http.post("/collections", json=body)
     created.raise_for_status()
-    _add(http, created.json()["id"], records, LARGE_ADD_BATCH)
+    _add(http, created.json()["id"], records, batch_size)
+
+
+def _delete_collection(http: httpx.Client, name: str) -> None:
+    deleted = http.delete(f"/collections/{name}")
+    if deleted.status_code != 404:
+        deleted.raise_for_status()
 
 
 def _add(
@@ -508,22 +537,12 @@ def add_to_tiny_l2(
         replace(r, metadata={**r.metadata, **(metadata or {})})
         for r in _extra_tiny_l2(start, count)
     ]
-    with _test_server() as http:
-        _add(http, _collection_id(http, "tiny.l2"), added)
+    add_records("tiny.l2", added)
 
 
 def delete_from_tiny_l2(ids: list[str]) -> None:
-    """Delete the records with `ids` from tiny.l2. An id that is missing is no error.
-
-    Chroma answers 200 for ids that do not exist and 400 for an empty list,
-    so an empty list sends no request.
-    """
-    if not ids:
-        return
-    with _test_server() as http:
-        collection_id = _collection_id(http, "tiny.l2")
-        deleted = http.post(f"/collections/{collection_id}/delete", json={"ids": ids})
-        deleted.raise_for_status()
+    """Delete the records with `ids` from tiny.l2. An id that is missing is no error."""
+    delete_records("tiny.l2", ids)
 
 
 def restore_tiny_l2(records: list[Record]) -> None:
@@ -534,6 +553,54 @@ def restore_tiny_l2(records: list[Record]) -> None:
     """
     with _test_server() as http:
         _recreate(http, "tiny.l2", None, records)
+
+
+def make_collection(name: str, records: list[Record], batch_size: int) -> None:
+    """Delete the collection `name` and make it again with `records`, in their order.
+
+    The records go in adds of `batch_size`. The collection has Chroma's
+    default distance.
+    """
+    with _test_server() as http:
+        _recreate(http, name, None, records, batch_size=batch_size)
+
+
+def add_records(name: str, records: list[Record]) -> None:
+    """Add `records` to the collection `name`, in adds of ADD_BATCH."""
+    with _test_server() as http:
+        _add(http, _collection_id(http, name), records)
+
+
+def delete_records(name: str, ids: list[str]) -> None:
+    """Delete the records with `ids` from the collection `name`.
+
+    An id that is missing is no error: Chroma answers 200 for ids that do not
+    exist and 400 for an empty list, so an empty list sends no request.
+    """
+    if not ids:
+        return
+    with _test_server() as http:
+        collection_id = _collection_id(http, name)
+        deleted = http.post(f"/collections/{collection_id}/delete", json={"ids": ids})
+        deleted.raise_for_status()
+
+
+def delete_collection(name: str) -> None:
+    """Delete the collection `name`. A collection that does not exist is no error."""
+    with _test_server() as http:
+        _delete_collection(http, name)
+
+
+def page_ids(name: str, offset: int, limit: int) -> list[str]:
+    """The ids that `get` with `offset` and `limit` returns for collection `name`."""
+    with _test_server() as http:
+        found = http.post(
+            f"/collections/{_collection_id(http, name)}/get",
+            json={"offset": offset, "limit": limit, "include": []},
+        )
+        found.raise_for_status()
+        ids: list[str] = found.json()["ids"]
+        return ids
 
 
 def records(name: str, limit: int = 10) -> list[Record]:
