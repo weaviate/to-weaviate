@@ -9,11 +9,14 @@
 # still works, and every later command exits 4. A kubectl port-forward to a
 # service stays on one pod, so it exits when that pod goes away; the loop then
 # starts a new one.
+#
+# The ports are the action's weaviate-port and weaviate-grpc-port inputs in
+# ci.yml. The key is WEAVIATE_API_KEY of the job.
 set -eu
 
 HTTP_PORT=8099
 GRPC_PORT=50099
-KEY=admin-key
+KEY="${WEAVIATE_API_KEY:-admin-key}"
 HTTP_LOG=/tmp/port-forward-http.log
 GRPC_LOG=/tmp/port-forward-grpc.log
 READY_URL="http://localhost:$HTTP_PORT/v1/.well-known/ready"

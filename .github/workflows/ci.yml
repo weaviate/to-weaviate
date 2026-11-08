@@ -85,3 +85,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.13"}
       - run: pip install -e ".[test]" && pytest tests/acceptance -v
+      # The logs have a line for each start and exit of a forward, for a
+      # test that failed with exit 4.
+      - if: failure()
+        run: tail -n 200 /tmp/port-forward-http.log /tmp/port-forward-grpc.log
