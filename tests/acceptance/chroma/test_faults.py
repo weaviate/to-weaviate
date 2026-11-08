@@ -5,6 +5,7 @@ from chroma.seed import (
     tiny_l2_count,
 )
 from conftest import (
+    nodes,
     read_plan,
     run,
     weaviate_count,
@@ -15,6 +16,34 @@ from conftest import (
 
 TARGET = "Tiny_l2"
 BATCH_HINT = "Fix the cause and run to-weaviate copy again. It resumes at this page."
+READ_ONLY_PREFIX = "Weaviate refused every object of a batch of 5 in Tiny_l2: "
+
+
+def _assert_read_only_message(message: str) -> None:
+    """The server's text for a READONLY shard depends on the replication factor.
+
+    On one node the shard refuses the write itself. Above factor 1, the
+    coordinator of the write wraps the refusal of each replica. Both CI legs
+    set the factor to the node count. copy without --consistency writes with
+    the server's default, QUORUM.
+    """
+    if nodes() == 1:
+        expected = f"{READ_ONLY_PREFIX}store is read-only due to: manually set by user"
+        assert message == expected, (
+            f"expected the text of one node (replication factor 1): {expected!r}; "
+            f"got {message!r}"
+        )
+        return
+    quorum = nodes() // 2 + 1
+    prefix = (
+        f"{READ_ONLY_PREFIX}cannot reach enough replicas: required {quorum} "
+        "replicas, got 0"
+    )
+    assert message.startswith(prefix) and "read only" in message, (
+        "expected the text of a coordinator that wraps the refusal of each "
+        f"replica (replication factor {nodes()}): a start of {prefix!r} and "
+        f"'read only'; got {message!r}"
+    )
 
 
 def test_a_read_only_shard_stops_copy_and_the_next_copy_resumes(seeded, tmp_path):
@@ -30,10 +59,7 @@ def test_a_read_only_shard_stops_copy_and_the_next_copy_resumes(seeded, tmp_path
         # then stops before the page is advanced.
         r = run(["copy"], tmp_path)
         assert r.exit_code == 4 and r.data["code"] == "target_unreachable", r
-        assert r.data["message"] == (
-            "Weaviate refused every object of a batch of 5 in Tiny_l2: store is "
-            "read-only due to: manually set by user"
-        ), r
+        _assert_read_only_message(r.data["message"])
         assert r.data["hint"] == BATCH_HINT
         row = run(["status"], tmp_path).data["collections"][0]
         assert (row["copied"], row["rejects"], row["done"]) == (10, 0, False), row
