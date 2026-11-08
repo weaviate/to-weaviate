@@ -93,7 +93,14 @@ jobs:
         run: sh tests/acceptance/chroma-k8s.sh up
       - uses: actions/setup-python@v5
         with: {python-version: "3.13"}
-      - run: pip install -e ".[test]" && pytest tests/acceptance -v
+      - run: pip install -e ".[test]" && pytest tests/acceptance -v --junitxml=/tmp/acceptance-junit.xml
+      # The compaction case of test_source_order.py records its measurements
+      # as test properties, which only the XML holds on a pass.
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-junit-${{ matrix.name }}
+          path: /tmp/acceptance-junit.xml
       # The logs have a line for each start and exit of a forward, for a
       # test that failed with exit 4. The cluster leg also has the log of the
       # Chroma forward.

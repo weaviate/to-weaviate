@@ -525,3 +525,41 @@ def delete_target_collections(names: list[str]) -> None:
     for name in names:
         if name in existing:
             _weaviate().collections.delete(name)
+
+
+def compaction_properties(
+    pages_before: dict[int, list[str]],
+    pages_after: dict[int, list[str]],
+    state_before: dict[str, Any],
+    state_after: dict[str, Any],
+    times: dict[str, float],
+) -> list[tuple[str, object]]:
+    """The test properties that A-25 records about a copy during compaction.
+
+    `pages_before` and `pages_after` hold the ids of the source pages read
+    right before and right after the copy, by offset; offset 0 is one of
+    them. `crossed` is whether page 0 changed, and `changed_offsets` lists
+    each offset whose page changed. The states are the collection's
+    `version` and `log_position` at the same two moments. `times` holds the
+    monotonic clock at "created", "written", "copy_started" and
+    "copy_finished"; the properties give the durations in seconds.
+    """
+    return [
+        ("crossed", pages_before[0] != pages_after[0]),
+        (
+            "changed_offsets",
+            sorted(o for o in pages_before if pages_before[o] != pages_after.get(o)),
+        ),
+        ("state_before", state_before),
+        ("state_after", state_after),
+        ("write_seconds", round(times["written"] - times["created"], 2)),
+        (
+            "copy_started_after_create_seconds",
+            round(times["copy_started"] - times["created"], 2),
+        ),
+        (
+            "copy_finished_after_create_seconds",
+            round(times["copy_finished"] - times["created"], 2),
+        ),
+        ("copy_seconds", round(times["copy_finished"] - times["copy_started"], 2)),
+    ]

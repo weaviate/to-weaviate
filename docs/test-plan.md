@@ -719,19 +719,33 @@ addition, the 10 ids come last. Runs on both Chroma kinds.
 *Implemented: `tests/acceptance/chroma/test_source_order.py::test_get_pages_follow_the_insertion_order`. Coverage.*
 
 **A-25 `copy` while distributed Chroma compacts.** Level API, risk R1,
-distributed Chroma only. Steps: make `burst` with 12,000 records of 16
-dimensions in adds of 300; `inspect chroma --collection burst
---sample-pages 1`; `copy --parallelism 8` right after, without the wait
-for compaction; the full `verify`. Expected: `copy` exits 0, and `verify`
-gives `source count 12000, target count 12000` and `missing 0, extra 0`. A
-failure is a tool bug on distributed Chroma. Its fix goes to its own
-branch (ruling R70): `copy` waits for `num_unindexed_ops` 0 before the
-first page, and stops with a new error code when the collection's
-`version` or `log_position` changed before the last page. The assertion
-messages hold both values from before `inspect` and after `verify`. On the
-local single-node servers the copy ended 1.7 s after the last add. A copy
-that ends before the frontend's cache shows the compacted collection reads
-no new offsets, so a pass does not show that `copy` read across them.
+distributed Chroma only. A measuring case (ruling R86). Steps: make
+`burst` with 40,000 records of 16 dimensions in adds of 300; `inspect
+chroma --collection burst --sample-pages 1`; read the pages at offsets 0,
+5,000, ... 35,000 and the collection's `version` and `log_position`; `copy
+--parallelism 8` right after, without the wait for compaction; read the
+same pages and values again; the full `verify`. Expected: `copy` exits 0,
+and `verify` gives `source count 40000, target count 40000` and `missing
+0, extra 0`. The frontend serves `get` from a collection cache whose
+entries live 60 s, so a renumbering becomes visible at a cache expiry, not
+when the compaction run ends. The case records these test properties in
+the JUnit XML, which CI uploads as the artifact
+`acceptance-junit-cluster`: `crossed` (page 0 changed during the copy),
+`changed_offsets` (the read pages that changed), `state_before`,
+`state_after`, `write_seconds`, `copy_started_after_create_seconds`,
+`copy_finished_after_create_seconds` and `copy_seconds`. A pass with
+`crossed` false and `changed_offsets` empty shows nothing about
+compaction. An offset other than 0 in `changed_offsets` shows that a later
+compaction run's renumbering became visible during the copy; the first run
+then held page 0 and 5,000 records or fewer. A pass with `crossed` true,
+or such an offset, and a clean verify is evidence that the tool survives
+the renumbering. A failure with `crossed` true, or such an offset, is the
+bug that the compaction guard would fix, in its own branch (ruling R70):
+`copy` waits for `num_unindexed_ops` 0 before the first page, and stops
+with a new error code when the collection's `version` or `log_position`
+changed before the last page. The assertion messages hold the recorded
+properties. On the local single-node servers the adds took 11.8 s and the
+copy 2.9 s.
 
 *Implemented: `tests/acceptance/chroma/test_source_order.py::test_copy_during_compaction`. Coverage.*
 

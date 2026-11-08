@@ -66,7 +66,7 @@ SEEDED = (*COLLECTIONS, EDGE, BULK)
 ORDER = "order"
 ORDER_COUNT = 1000
 BURST = "burst"
-BURST_COUNT = 12_000
+BURST_COUNT = 40_000
 # A distributed Chroma compacts every 10 s, at most 10,000 records of a
 # collection per run (compaction_interval_sec and max_compaction_size of
 # rust/worker/chroma_config.yaml in the Chroma repository), so bulk needs five

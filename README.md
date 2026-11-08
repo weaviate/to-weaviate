@@ -357,7 +357,9 @@ another order. After the wait, the offsets stay as they are until the
 next write.
 `tests/acceptance/chroma/test_source_order.py` pins the order of `get`
 pages on both kinds of Chroma. Its compaction case runs on the `cluster`
-leg only. `tests/acceptance/chroma/test_chroma_restart.py` stops the
+leg only. It records whether the copy ran across a renumbering as test
+properties in the JUnit XML. Each leg uploads that file as the artifact
+`acceptance-junit-<leg>`. `tests/acceptance/chroma/test_chroma_restart.py` stops the
 compose Chroma for 3 s during a copy, on the `single` leg and locally. It
 skips on the `cluster` leg. `ACCEPTANCE_CHROMA` is `single` when unset.
 
