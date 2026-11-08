@@ -214,7 +214,7 @@ Level unit, risk R1. Preconditions: the fake Chroma server without a page
 cap, 2700 records, `--parallelism 3` (3 partitions of 900, 3 pages of 300
 each). Faults, one case each: `httpx.ReadError` on the second `/get` of
 partition 2; a 503 then a 429 with `Retry-After: 2` on that request; a 500
-on every attempt. Expected: the first two cases exit 0, every id is written once
+on all seven attempts. Expected: the first two cases exit 0, every id is written once
 (`FakeWriter.writes_per_uuid` all 1), the sleep list holds the backoff
 delays and `2.0` for the 429; the third exits 4 `source_unreachable` with
 `Chroma returned HTTP 500` in the message, the other two partitions
@@ -314,7 +314,7 @@ message starts `Weaviate refused every object of a batch of 5 in Tiny_l2`
 (or, if the server refuses the whole request instead of each object, the
 same code from `transient`'s retry exhaustion), hint is the resume hint;
 `status` shows copied 10, not done; the second `copy` exits 0, 15 objects;
-`verify` exits 0. Run time is the retry budget (about 8 to 15 s).
+`verify` exits 0. Run time is the retry budget (at least 15.75 s, at most 31.5 s).
 
 *Implemented: `tests/acceptance/chroma/test_faults.py::test_a_read_only_shard_stops_copy_and_the_next_copy_resumes`. Coverage; Weaviate 1.40.4 refuses each object with "store is read-only due to: manually set by user".*
 
@@ -338,8 +338,8 @@ Steps: `inspect chroma --collection tiny.l2` with `CHROMA_URL=
 http://localhost:1`; `check` (after a normal inspect) with
 `WEAVIATE_URL=http://localhost:1` and `WEAVIATE_GRPC_URL=http://localhost:2`.
 Expected: exit 4 `source_unreachable`, message starts `Chroma could not be
-reached: ConnectError`, hint names `CHROMA_URL`, after the six attempts
-(8 to 15 s); exit 4 `target_unreachable`, hint names `WEAVIATE_URL`, within
+reached: ConnectError`, hint names `CHROMA_URL`, after the seven attempts
+(at least 15.75 s, at most 31.5 s in total); exit 4 `target_unreachable`, hint names `WEAVIATE_URL`, within
 a few seconds; no file other than the inspection in the directory.
 
 *Implemented: `tests/acceptance/chroma/test_faults.py::test_an_unreachable_source_or_target_exits_4`. Coverage.*
@@ -349,7 +349,7 @@ Level API, risk R1, 15 s. Preconditions: a collection `big-doc` (seed) with 3
 records, one of them a 12 MiB ASCII document; Weaviate's default gRPC
 message limit is above 10 MiB, so adjust the size to the limit the server
 reports if the first run passes. Expected today: the twin of U-06, exit 4
-after about 10 s of retries, 2 objects written, a rerun exits 4 again.
+after the retries (at least 15.75 s), 2 objects written, a rerun exits 4 again.
 Expected after the U-06 fix: exit 1 with one reject. Skip when the Chroma
 server refuses the add (body size limit); then U-06 stands alone.
 

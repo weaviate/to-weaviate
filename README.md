@@ -109,12 +109,13 @@ Each record that the tool cannot convert or that Weaviate refuses goes to
 fixing the cause, copy `plan.yaml` and `inspect.json` to a new `--dir` and
 run `copy` there; objects already in Weaviate are written again unchanged.
 When Weaviate refuses every object of a batch of more than one record,
-`copy` retries the batch as it retries a network error. When the retries
-are used up, it stops with `target_unreachable` and stores no reject. The
-next run starts at that page. A record that Weaviate refuses with an
-error about a node, a shard or a deadline, as it does while a node
-restarts, is not a reject either: `copy` sends it again up to six times,
-and when the error stays, stops the same way.
+`copy` retries the batch as it retries a network error: it retries a
+transient error for at least 15 s and at most about 30 s in total before it
+gives up. When the retries are used up, it stops with `target_unreachable`
+and stores no reject. The next run starts at that page. A record that
+Weaviate refuses with an error about a node, a shard or a deadline, as it
+does while a node restarts, is not a reject either: `copy` sends it again
+under the same retry, and when the error stays, stops the same way.
 
 When the target collection exists without a property that `plan.yaml`
 has, `copy` adds the property before it writes. Its JSON document lists

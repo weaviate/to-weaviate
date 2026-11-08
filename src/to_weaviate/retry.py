@@ -6,7 +6,7 @@ from typing import TypeVar
 T = TypeVar("T")
 
 MAX_DELAY_SECONDS = 30.0
-ATTEMPTS = 6
+ATTEMPTS = 7
 
 
 def with_retry(
@@ -20,6 +20,10 @@ def with_retry(
     `transient(exc)` returns None for an error that must not be retried, else
     the minimum delay in seconds. Every delay is capped at 30 seconds. The last
     exception is re-raised when the attempts are used up.
+
+    There are 7 attempts and 6 delays. A full retry waits between 15.75 s and
+    31.5 s, so a restart of a source or a target that lasts a few seconds does
+    not use up the attempts (acceptance case A-23).
     """
     for attempt in range(attempts):
         try:
@@ -35,8 +39,12 @@ def with_retry(
 def backoff_delay(attempt: int, minimum: float = 0.0) -> float:
     """The delay after failed attempt number `attempt`, counted from 0.
 
-    Random up to 0.5 * 2**attempt seconds, at least `minimum` and at most
-    MAX_DELAY_SECONDS.
+    Random between half of `backoff` and `backoff`, where `backoff` is
+    0.5 * 2**attempt seconds capped at MAX_DELAY_SECONDS; at least `minimum`
+    and at most MAX_DELAY_SECONDS. The floor of half the backoff keeps a run of
+    short delays from giving up inside an outage of a few seconds (A-23).
     """
-    backoff = min(MAX_DELAY_SECONDS, 0.5 * 2**attempt)
-    return min(MAX_DELAY_SECONDS, max(minimum, random.uniform(0, backoff)))
+    backoff: float = min(MAX_DELAY_SECONDS, 0.5 * 2**attempt)
+    return min(
+        MAX_DELAY_SECONDS, max(minimum, backoff / 2 + random.uniform(0, backoff / 2))
+    )

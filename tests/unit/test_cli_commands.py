@@ -768,7 +768,7 @@ def test_copy_stops_when_weaviate_refuses_every_object_of_a_batch(tmp_path):
         f"Weaviate refused every object of a batch of 10 in Docs: {REFUSED}; key ***"
     )
     assert "SENTINEL-K" not in r.output
-    assert client.calls == 6
+    assert client.calls == 7
     state = State(tmp_path / DIR / "state.sqlite")
     try:
         assert state.pending(FakeSource.REF) == [(Partition("0-10", "0", "10"), None)]
