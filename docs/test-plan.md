@@ -691,8 +691,9 @@ so the case cannot show that one ran.
 
 `copy` reads by offset: the partitions, the resume and the shift detection
 (rulings R61 and R65) need `get` with `offset` and `limit` to return the
-records in insertion order. These cases pin that order. The `cluster` leg
-of CI runs them against the open-source distributed Chroma, which
+records in insertion order. A-24 pins that order. A-25 measures a copy
+across a renumbering; it lands with the compaction guard. The `cluster`
+leg of CI runs the suite against the open-source distributed Chroma, which
 `tests/acceptance/chroma-k8s.sh` starts in its kind cluster, with
 `ACCEPTANCE_CHROMA=distributed`. On that leg the seed waits until
 `indexing_status` reports `num_unindexed_ops` 0 for each seeded
@@ -719,35 +720,29 @@ addition, the 10 ids come last. Runs on both Chroma kinds.
 *Implemented: `tests/acceptance/chroma/test_source_order.py::test_get_pages_follow_the_insertion_order`. Coverage.*
 
 **A-25 `copy` while distributed Chroma compacts.** Level API, risk R1,
-distributed Chroma only. A measuring case (ruling R86). Steps: make
-`burst` with 40,000 records of 16 dimensions in adds of 300; `inspect
-chroma --collection burst --sample-pages 1`; read the pages at offsets 0,
-5,000, ... 35,000 and the collection's `version` and `log_position`; `copy
---parallelism 8` right after, without the wait for compaction; read the
-same pages and values again; the full `verify`. Expected: `copy` exits 0,
-and `verify` gives `source count 40000, target count 40000` and `missing
-0, extra 0`. The frontend serves `get` from a collection cache whose
-entries live 60 s, so a renumbering becomes visible at a cache expiry, not
-when the compaction run ends. The case records these test properties in
-the JUnit XML, which CI uploads as the artifact
-`acceptance-junit-cluster`: `crossed` (page 0 changed during the copy),
-`changed_offsets` (the read pages that changed), `state_before`,
-`state_after`, `write_seconds`, `copy_started_after_create_seconds`,
-`copy_finished_after_create_seconds` and `copy_seconds`. A pass with
-`crossed` false and `changed_offsets` empty shows nothing about
-compaction. An offset other than 0 in `changed_offsets` shows that a later
-compaction run's renumbering became visible during the copy; the first run
-then held page 0 and 5,000 records or fewer. A pass with `crossed` true,
-or such an offset, and a clean verify is evidence that the tool survives
-the renumbering. A failure with `crossed` true, or such an offset, is the
-bug that the compaction guard would fix, in its own branch (ruling R70):
-`copy` waits for `num_unindexed_ops` 0 before the first page, and stops
-with a new error code when the collection's `version` or `log_position`
-changed before the last page. The assertion messages hold the recorded
-properties. On the local single-node servers the adds took 11.8 s and the
-copy 2.9 s.
+distributed Chroma only. The case lands with the compaction guard, in the
+next PR (ruling R92). Steps: make `burst` with 40,000 records of 16
+dimensions in adds of 300; `inspect chroma --collection burst
+--sample-pages 1`; read the pages at offsets 0, 5,000, ... 35,000 and the
+collection's `version` and `log_position`; `copy --parallelism 8` right
+after, without the wait for compaction; read the same pages and values
+again; the full `verify`. Expected: `copy` exits 0, and `verify` gives
+`source count 40000, target count 40000` and `missing 0, extra 0`. The
+frontend serves `get` from a collection cache whose entries live 60 s, so
+a renumbering becomes visible at a cache expiry, not when the compaction
+run ends. The case records `crossed` (page 0 changed during the copy),
+`changed_offsets` (the read pages that changed), both states and the
+durations as test properties in the JUnit XML. On PR #34 CI run 2, with
+the compactor at 200m CPU, the copy had `crossed` true and
+`changed_offsets` [0, 5000]. `version` went from 0 to 1 and `log_position`
+from 0 to 10000 during the copy. `verify` found `source count 40000,
+target count 38631` and `missing 1369, extra 0`. So a copy across a
+renumbering skips records, the tool bug of ruling R70. Its fix: `copy`
+waits for `num_unindexed_ops` 0 before the first page, and stops with a
+new error code when the collection's `version` or `log_position` changed
+before the last page.
 
-*Implemented: `tests/acceptance/chroma/test_source_order.py::test_copy_during_compaction`. Coverage.*
+*Not in this branch: `tests/acceptance/chroma/test_source_order.py::test_copy_during_compaction` comes back with the fix. `tests/e2e.py::compaction_properties` and the seed helpers `burst_records` and `collection_state` stay for it.*
 
 ### Cloud
 
@@ -771,8 +766,8 @@ and C-03, because no Chroma Cloud source exists.
 
 - Chroma Cloud: no Chroma Cloud account exists, so no test reads from it.
   The unit tests cover the tool's side with fakes, and L-01 covers the
-  Weaviate Cloud side. A-24 and A-25 cover the read order of the
-  open-source distributed Chroma. These stay unverified:
+  Weaviate Cloud side. A-24 covers the read order of the open-source
+  distributed Chroma. These stay unverified:
   - The read order of a sharded collection. Distributed Chroma reads it
     shard by shard, which is not insertion order. Sharding is off by
     default and turned on per tenant pattern (`compaction_manager.rs`), so

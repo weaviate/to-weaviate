@@ -312,9 +312,9 @@ there with the server's message.
 
 The suite deletes and recreates the Chroma collections that `COLLECTIONS`
 in `tests/acceptance/chroma/seed.py` lists. One test adds 10 records to
-`tiny.l2` and deletes them when it ends. The cases of
-`tests/acceptance/chroma/test_source_order.py` make the collections `order`
-and `burst` and delete them when they end. Before and after each test the
+`tiny.l2` and deletes them when it ends. The case of
+`tests/acceptance/chroma/test_source_order.py` makes the collection `order`
+and deletes it when it ends. Before and after each test the
 suite deletes the Weaviate collections that `SUITE_COLLECTIONS` in
 `tests/acceptance/conftest.py` lists. It writes to no other Weaviate
 collection, also when the test Chroma holds collections that the seed does
@@ -357,12 +357,11 @@ A compaction run of more than 5,000 records gives them new offsets in
 another order. After the wait, the offsets stay as they are until the
 next write.
 `tests/acceptance/chroma/test_source_order.py` pins the order of `get`
-pages on both kinds of Chroma. Its compaction case runs on the `cluster`
-leg only. It records whether the copy ran across a renumbering as test
-properties in the JUnit XML. Each leg uploads that file as the artifact
-`acceptance-junit-<leg>`. `tests/acceptance/chroma/test_chroma_restart.py` stops the
-compose Chroma for 3 s during a copy, on the `single` leg and locally. It
-skips on the `cluster` leg. `ACCEPTANCE_CHROMA` is `single` when unset.
+pages on both kinds of Chroma. `tests/acceptance/chroma/test_chroma_restart.py`
+stops the compose Chroma for 3 s during a copy, on the `single` leg and
+locally. It skips on the `cluster` leg. `ACCEPTANCE_CHROMA` is `single`
+when unset. Each leg uploads the JUnit XML of its run as the artifact
+`acceptance-junit-<leg>`, with the test properties that a case records.
 
 With `ASYNC_INDEXING`, the copy of a dynamic index passes, and the
 compression of the tenants by a trained quantizer with the default

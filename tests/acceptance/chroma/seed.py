@@ -62,7 +62,8 @@ BULK = "bulk"
 BULK_COUNT = 50_000
 # Every collection that `seed` makes.
 SEEDED = (*COLLECTIONS, EDGE, BULK)
-# The collections of the cases of test_source_order.py, which make them.
+# The collections that a case makes: order for test_source_order.py, burst
+# for the compaction case A-25 of docs/test-plan.md.
 ORDER = "order"
 ORDER_COUNT = 1000
 BURST = "burst"
