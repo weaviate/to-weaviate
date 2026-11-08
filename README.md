@@ -298,13 +298,16 @@ your shell do not reach them.
 
 The suite has two levels. An API-level test reaches the servers only
 through the `to-weaviate` command and the Chroma and Weaviate APIs. An
-`infra` test also restarts or deletes a server through docker or kubectl,
-and carries the pytest marker `infra`, which `pyproject.toml` declares.
-`pytest -m "not infra"` runs the API-level tests only. With
+`infra` test also restarts or deletes a server through docker or kubectl.
+Each `infra` test carries the pytest marker `infra`, which `pyproject.toml`
+declares. `pytest -m "not infra"` runs the API-level tests only. With
 `ACCEPTANCE_TARGET=cloud`, the suite runs against a Weaviate Cloud cluster
-and the local test Chroma (the rules are `endpoint_problems` in
-`tests/e2e.py`), and an `infra` test fails, because docker and kubectl
-reach only the local servers.
+and the local test Chroma. `endpoint_problems` in `tests/e2e.py` holds the
+rules of both targets. On the cloud target, an `infra` test fails before
+its fixtures run, because docker and kubectl reach only the local servers.
+The cloud target must be a serverless cluster. A sandbox cluster refuses
+`hnsw`, `flat`, `dynamic` and the quantizer settings, so those cases fail
+there with the server's message.
 
 The suite deletes and recreates the Chroma collections that `COLLECTIONS`
 in `tests/acceptance/chroma/seed.py` lists. One test adds 10 records to

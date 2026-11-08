@@ -41,8 +41,9 @@ commands of later milestones, and Weaviate versions other than 1.40.4.
 
 ## 2. Coverage matrix
 
-Levels: U unit (`tests/unit`, fakes), A acceptance (`tests/acceptance`,
-local servers), C cloud (`tests/cloud`). Cells: `cov` covered, `part`
+Columns: U the unit tests (`tests/unit`, fakes), A the acceptance tests
+(`tests/acceptance`, both acceptance levels), C the cloud suite
+(`tests/cloud`). Cells: `cov` covered, `part`
 partly, `no` not covered, with the tests that cover it. Prefixes: `cmd` =
 `test_cli_commands.py`, `json` = `test_cli_json.py`, `acc/x` =
 `tests/acceptance/chroma/test_x.py`. A row marked `deferred Fn` is judged in
@@ -54,7 +55,11 @@ through the command and the server APIs, so it also runs with
 `ACCEPTANCE_TARGET=cloud`. `acceptance infra`: it restarts or deletes a
 server through docker or kubectl (marker `infra`, local servers only).
 `local cloud run`: it needs a Weaviate Cloud cluster, which the API-level
-tests reach with `ACCEPTANCE_TARGET=cloud` from a laptop.
+tests reach with `ACCEPTANCE_TARGET=cloud` from a laptop. A row with no
+acceptance case, such as a deferred one, is `unit`. The local cloud run
+needs a serverless cluster. A sandbox cluster refuses `hnsw`, `flat`,
+`dynamic` and the quantizer settings, so those cases fail there with the
+server's message.
 
 | Feature or behavior | U | A | C | Level |
 |---|---|---|---|---|
@@ -94,16 +99,16 @@ tests reach with `ACCEPTANCE_TARGET=cloud` from a laptop.
 | Source: a page shorter than the limit | part `test_chroma_source::test_read_open_ended_partition_stops_on_short_page` asserts the stop; the loss it can cause is not covered (U-01) | no | no | unit |
 | Source: records deleted during a copy | no; deferred F4 (U-08 pins the documented limit) | no | no | unit |
 | Source: records added between runs (tail) | cov `test_copy::test_*tail*`, `cmd::test_every_copy_reads_the_records_added_since_the_last_run` | cov `acc/migration::test_each_copy_adds_the_records_that_the_source_gained` | no | acceptance API |
-| Source: 5xx, 429 with Retry-After, transport error, redirect, non-JSON | cov `test_chroma_client` (client level only; U-02 adds the copy path) | no (A-04) | no | acceptance infra |
+| Source: 5xx, 429 with Retry-After, transport error, redirect, non-JSON | cov `test_chroma_client` (client level only; U-02 adds the copy path) | no (A-04) | no | unit |
 | Source: 401/403, missing key, Chroma Cloud host rule, token header forms | cov `json::test_source_errors_map_to_codes`, `test_settings`, `test_chroma_client::test_sends_token_header` | part (no key on the local server) | cov | unit |
 | Source: tenant from `/auth/identity` (`_chroma_source`) | no (U-13) | cov (implicit) | cov | acceptance API |
 | Target: new collection, tenants, properties union | cov `test_schema::test_ensure_collection_*` | cov | cov | acceptance API |
 | Target: existing collection with differences, with extra items, with multi-tenancy | cov `test_schema::test_differences_*` (16 tests), `json::test_copy_stops_when_the_collection_exists_with_other_settings` | no (A-12) | no | acceptance API |
-| Target: existing name that differs only in case | no; deferred (ledger Task 10 minor) | no | no | acceptance API |
+| Target: existing name that differs only in case | no; deferred (ledger Task 10 minor) | no | no | unit |
 | Target: index types, quantizers, trained quantizers, dynamic | cov `test_schema`, `cmd::test_copy_enables_*` | cov `acc/vector_settings`, `acc/multi_tenant` (dynamic is a strict xfail) | no | acceptance API |
 | Target: module not enabled | cov `cmd::test_check_refuses_module_not_enabled_on_target` | no (A-09) | no | acceptance API |
 | Target: 401, 403 at connect | cov `json::test_target_errors_map_to_codes` | cov `acc/migration::test_wrong_or_missing_api_key_exits_3` | no | acceptance API |
-| Target: 403 at create or at insert (RBAC without write rights) | no (U-04) | no (needs a second key, section 5) | no | acceptance API |
+| Target: 403 at create or at insert (RBAC without write rights) | no (U-04) | no (needs a second key, section 5) | no | unit |
 | Target: writes refused (READONLY shard, inactive tenant, every object refused) | cov `cmd::test_copy_stops_when_weaviate_refuses_every_object_of_a_batch` (fake) | no (A-02, A-06) | no | acceptance API |
 | Target: per-object refusal with the server's message | cov `test_writer::test_writer_inserts_and_maps_errors` (writer level; U-05 adds the copy path) | no (not producible from Chroma) | no | unit |
 | Target: 429/503/5xx, gRPC UNAVAILABLE, WeaviateRetryError, timeouts | cov `test_schema::test_transient_*`, `test_writer::test_writer_retries_*`, `json::test_copy_retries_a_retry_error_and_then_reports_target_unreachable` | no (A-04 covers unreachable only) | no | acceptance infra |
@@ -155,11 +160,12 @@ Ranked by what a person loses when the risk is real.
 ## 4. Test cases to add
 
 Order: by risk, then cheapest first. Ids: `U-` unit, `A-` acceptance,
-`C-` cloud. Each case names its level: `unit`, `API` (acceptance API),
-`infra` (acceptance infra) or `cloud` (`tests/cloud`). Acceptance
-estimates are local seconds; CI runs about 1.9 times slower; the acceptance additions have about 8 CI minutes (about 250
-local seconds). The cases marked "optional" come last; stop before them
-when the budget is used.
+`C-` cloud suite. Each case names its level: `unit`, `API` (acceptance
+API), `infra` (acceptance infra) or `cloud suite` (`tests/cloud`).
+Acceptance estimates are local seconds; CI runs about 1.9 times slower;
+the acceptance additions have about 8 CI minutes (about 250 local
+seconds). The cases marked "optional" come last; stop before them when
+the budget is used.
 
 Shared data (added once, in `tests/acceptance/chroma/seed.py`): the
 collections `empty` (0 records), `no-vectors` (12 records with documents
@@ -619,7 +625,7 @@ text and propose the new one; small, last.
 
 ### Cloud
 
-**C-02 A second run against the cloud.** Level cloud, risk R1. Test change to
+**C-02 A second run against the cloud.** Level cloud suite, risk R1. Test change to
 `test_cloud::test_chroma_cloud_to_weaviate_cloud`: after `verify`, run
 `copy` again, `status`, and `verify --quick --sample 50`. Expected: exit 0
 each, 2000 objects, `status` done with copied 2000. About 20 s more on
@@ -627,7 +633,7 @@ the release job.
 
 *Implemented: change to `tests/cloud/chroma/test_cloud.py::test_chroma_cloud_to_weaviate_cloud`. Coverage; run against the local servers only.*
 
-**C-03 Inspect the whole cloud database.** Level cloud, risk R4. `inspect
+**C-03 Inspect the whole cloud database.** Level cloud suite, risk R4. `inspect
 chroma` without `--collection` in a second directory (no copy). Expected:
 exit 0, an entry for `to-weaviate-ci` among the entries, `source.tenant`
 equal to `CHROMA_TENANT`. Covers the listing against Chroma Cloud; the
