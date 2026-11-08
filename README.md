@@ -424,6 +424,7 @@ with these variables:
 | `WEAVIATE_ASYNC_INDEXING` | `true` |
 | `ACCEPTANCE_VECTORIZER` | `text2vec-weaviate` |
 | `WEAVIATE_GRPC_URL` | empty, so the tool connects to port 443 of the cluster |
+| `TO_WEAVIATE_REQUIRE_ACCEPTANCE` | `1`, so a target that breaks a rule fails the run |
 
 It reads `WEAVIATE_URL` and `WEAVIATE_API_KEY` from the environment.
 `WEAVIATE_URL` is `https://` followed by the cluster host, which ends with
@@ -458,8 +459,9 @@ Every API-level test runs. The target deselects the `infra` tests,
 because docker and kubectl reach only the local servers. The
 compression of the tenants by a trained quantizer is an expected failure,
 as on every server with `ASYNC_INDEXING`. When `WEAVIATE_URL` does not use
-`https` or its host has another suffix, every test skips and pytest exits 0.
-`PYTEST_ADDOPTS=-rs make acceptance-cloud` prints the reason.
+`https` or its host has another suffix, every test fails before it starts.
+The failure text names the broken rule, for example `WEAVIATE_URL does not
+use https (the cloud target needs TLS)`. The target then exits non-zero.
 
 ### Releases
 

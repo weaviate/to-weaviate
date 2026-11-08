@@ -55,6 +55,9 @@ acceptance-cloud: export CHROMA_URL := http://localhost:8001
 acceptance-cloud: export WEAVIATE_ASYNC_INDEXING := true
 acceptance-cloud: export ACCEPTANCE_VECTORIZER := text2vec-weaviate
 acceptance-cloud: export WEAVIATE_GRPC_URL :=
+# A release gate: a target that breaks a cloud rule fails the run instead of
+# skipping every test.
+acceptance-cloud: export TO_WEAVIATE_REQUIRE_ACCEPTANCE := 1
 acceptance-cloud:
 	@if [ -z "$$WEAVIATE_URL" ] || [ -z "$$WEAVIATE_API_KEY" ] \
 		|| [ "$(origin WEAVIATE_URL)" = "command line" ] \
