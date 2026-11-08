@@ -319,15 +319,33 @@ not make. With `ACCEPTANCE_TARGET=cloud`, the suite fails before its first
 test when the cluster holds a collection that `SUITE_COLLECTIONS` does not
 list, so the target must be a dedicated cluster.
 
-CI runs the suite twice, against a server without `ASYNC_INDEXING` and
-against one with it, and sets `WEAVIATE_ASYNC_INDEXING` to `false` or
-`true` for the tests whose outcome depends on it. The copy of a dynamic
-index passes with `ASYNC_INDEXING` and is an expected failure without it,
-with the server's message as the reason; it describes a finding that is
-not fixed. The compression of the tenants by a trained quantizer with the
-default `training_limit` passes without `ASYNC_INDEXING` and is an
-expected failure with it. With the variable unset, these tests decide from
-what the server does and say so in the reason.
+CI runs the suite in two legs, each on its own kind cluster. Both run
+Weaviate with `ASYNC_INDEXING`, as every Weaviate Cloud instance does, and
+set `WEAVIATE_ASYNC_INDEXING=true` for the tests whose outcome depends on
+it.
+The `single` leg runs one Weaviate node. The `cluster` leg runs three
+nodes with `REPLICATION_MINIMUM_FACTOR=3` and sets `ACCEPTANCE_NODES=3`.
+The cases of `tests/acceptance/chroma/test_cluster.py` run there only: they
+delete a Weaviate pod during `copy` and during `verify`, and copy at each
+consistency level. They skip when `ACCEPTANCE_NODES` is below 3.
+`tests/acceptance/chroma/test_chroma_restart.py` restarts the compose
+Chroma during a copy, on both legs and locally. Right after the
+weaviate-local-k8s action, the job runs `tests/acceptance/port-forward.sh`.
+It replaces the action's `kubectl-relay` forwards on ports 8099 and 50099
+with `kubectl port-forward` processes that a loop starts again when they
+exit, and waits until Weaviate answers on both ports. It refuses to run
+when `GITHUB_ACTIONS` is not `true`.
+
+With `ASYNC_INDEXING`, the copy of a dynamic index passes, and the
+compression of the tenants by a trained quantizer with the default
+`training_limit` is an expected failure. Without it, the dynamic index is
+an expected failure with the server's message as the reason; it describes
+a finding that is not fixed. The compression of the tenants passes there.
+CI does not run that server. Unit tests cover the tool's side, and the
+suite runs against it locally with `ASYNC=0 make weaviate-up`, then
+`WEAVIATE_ASYNC_INDEXING=false make acceptance`. With
+`WEAVIATE_ASYNC_INDEXING` unset, these tests decide from what the server
+does and say so in the reason.
 
 The `Makefile` starts the servers and sets the variables. `make` alone
 prints the targets. `make acceptance-up` and `make acceptance-down` call
