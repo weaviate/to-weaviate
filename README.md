@@ -352,7 +352,7 @@ for amd64 only. On any other machine it exits 2 before it runs any other
 command. It also exits 2 when `GITHUB_ACTIONS` is not `true`, so that
 `down` never deletes a namespace of a kind cluster on a developer machine.
 With `ACCEPTANCE_CHROMA=distributed`, the suite waits after the seed
-until Chroma has compacted every seeded collection, for at most 300 s.
+until Chroma has compacted every seeded collection, for at most 600 s.
 A compaction run of more than 5,000 records gives them new offsets in
 another order. After the wait, the offsets stay as they are until the
 next write.

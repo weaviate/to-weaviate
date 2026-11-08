@@ -72,9 +72,10 @@ BURST_COUNT = 40_000
 # rust/worker/chroma_config.yaml in the Chroma repository), so bulk needs five
 # runs. Its frontend keeps a collection, with the log position that
 # indexing_status reads, for 60 s (cache_ttl_secs of
-# rust/frontend/sample_configs/distributed.yaml), so the status shows a
-# finished run up to 60 s late.
-INDEXING_TIMEOUT = 300.0
+# rust/frontend/sample_configs/distributed.yaml), so the status moves in steps
+# of 60 s. On PR #34 CI run 2, with the compactor at 200m CPU, bulk read
+# 40000, 30000 and 20000 uncompacted at 119 s, 180 s and 301 s.
+INDEXING_TIMEOUT = 600.0
 INDEXING_POLL = 2.0
 CATEGORIES = ("guide", "reference", "tutorial")
 TAGS = ("red", "green", "blue", "small", "large")
