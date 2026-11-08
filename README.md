@@ -312,7 +312,9 @@ there with the server's message.
 
 The suite deletes and recreates the Chroma collections that `COLLECTIONS`
 in `tests/acceptance/chroma/seed.py` lists. One test adds 10 records to
-`tiny.l2` and deletes them when it ends. Before and after each test the
+`tiny.l2` and deletes them when it ends. The cases of
+`tests/acceptance/chroma/test_source_order.py` make the collections `order`
+and `burst` and delete them when they end. Before and after each test the
 suite deletes the Weaviate collections that `SUITE_COLLECTIONS` in
 `tests/acceptance/conftest.py` lists. It writes to no other Weaviate
 collection, also when the test Chroma holds collections that the seed does
@@ -329,13 +331,35 @@ nodes with `REPLICATION_MINIMUM_FACTOR=3` and sets `ACCEPTANCE_NODES=3`.
 The cases of `tests/acceptance/chroma/test_cluster.py` run there only: they
 delete a Weaviate pod during `copy` and during `verify`, and copy at each
 consistency level. They skip when `ACCEPTANCE_NODES` is below 3.
-`tests/acceptance/chroma/test_chroma_restart.py` stops the compose Chroma
-for 3 s during a copy, on both legs and locally. Right after the
-weaviate-local-k8s action, the job runs `tests/acceptance/port-forward.sh`.
-It replaces the action's `kubectl-relay` forwards on ports 8099 and 50099
-with `kubectl port-forward` processes. A loop starts each of them again
-when it exits. The script then waits until Weaviate answers on both
-ports. It refuses to run when `GITHUB_ACTIONS` is not `true`.
+Right after the weaviate-local-k8s action, the job runs
+`tests/acceptance/port-forward.sh`. It replaces the action's
+`kubectl-relay` forwards on ports 8099 and 50099 with `kubectl
+port-forward` processes. A loop starts each of them again when it exits.
+The script then waits until Weaviate answers on both ports. It refuses to
+run when `GITHUB_ACTIONS` is not `true`.
+
+The `single` leg reads the compose Chroma of
+`tests/acceptance/chroma/docker-compose.yml`. The `cluster` leg reads the
+open-source distributed Chroma instead and sets
+`ACCEPTANCE_CHROMA=distributed`. `tests/acceptance/chroma-k8s.sh up`
+starts it in namespace `chroma` of the leg's kind cluster, from the Helm
+chart of the Chroma repository at the release that the script pins. It
+forwards the HTTP API to port 8001 through `kubectl port-forward` in a
+restart loop and waits until Chroma answers there.
+`chroma-k8s.sh down` stops the forward and deletes the namespace. The
+script runs on Linux amd64 only, because the Chroma service images exist
+for amd64 only. On any other machine it exits 2 before it runs any other
+command.
+With `ACCEPTANCE_CHROMA=distributed`, the suite waits after the seed
+until Chroma has compacted every seeded collection, for at most 300 s.
+A compaction run of more than 5,000 records gives them new offsets in
+another order. After the wait, the offsets stay as they are until the
+next write.
+`tests/acceptance/chroma/test_source_order.py` pins the order of `get`
+pages on both kinds of Chroma. Its compaction case runs on the `cluster`
+leg only. `tests/acceptance/chroma/test_chroma_restart.py` stops the
+compose Chroma for 3 s during a copy, on the `single` leg and locally. It
+skips on the `cluster` leg. `ACCEPTANCE_CHROMA` is `single` when unset.
 
 With `ASYNC_INDEXING`, the copy of a dynamic index passes, and the
 compression of the tenants by a trained quantizer with the default
