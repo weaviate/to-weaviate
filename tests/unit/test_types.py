@@ -38,6 +38,8 @@ COERCE = [
     ([1, True], "text[]", ["1", "true"]),
     (2.0, "int", 2),
     ("x", "text", "x"),
+    (2**53, "number", float(2**53)),
+    (SPARSE, "sparse_vector", SPARSE),
 ]
 
 
@@ -59,7 +61,22 @@ def test_coerce(value, target, expected):
 
 @pytest.mark.parametrize(
     ("value", "target"),
-    [("x", "int"), ("x", "number"), (2.5, "int"), (True, "int"), ("x", "boolean")],
+    [
+        ("x", "int"),
+        ("x", "number"),
+        (2.5, "int"),
+        (True, "int"),
+        ("x", "boolean"),
+        (2**53 + 1, "number"),
+        (10**400, "number"),
+        (2**53 + 1, "number[]"),
+        (SPARSE, "text"),
+        (SPARSE, "text[]"),
+        ([SPARSE], "text[]"),
+        ([[1]], "text[]"),
+        ({"a": 1}, "sparse_vector"),
+        ("x", "sparse_vector"),
+    ],
 )
 def test_coerce_refuses_lossy(value, target):
     with pytest.raises(ValueError):

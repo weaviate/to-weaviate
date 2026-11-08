@@ -44,7 +44,19 @@ def resolve_type(counts: dict[str, int]) -> tuple[str, list[str]]:
     return target, sorted(observed - {target})
 
 
+def _to_float(value: int | float) -> float:
+    try:
+        result = float(value)
+    except OverflowError:
+        raise ValueError(f"int value {value!r} is too large for number") from None
+    if result != value:
+        raise ValueError(f"int value {value!r} loses precision as number")
+    return result
+
+
 def _coerce_scalar(value: Any, target: str) -> Any:
+    if isinstance(value, list | dict):
+        raise ValueError(f"cannot convert {value_type(value)} value to {target}")
     kind = _scalar_type(value)
     if target == "text":
         if kind == "boolean":
@@ -53,7 +65,7 @@ def _coerce_scalar(value: Any, target: str) -> Any:
             return value
         return str(value)
     if target == "number" and kind in ("int", "number"):
-        return float(value)
+        return _to_float(value)
     if target == "int" and kind == "int":
         return value
     if target == "int" and kind == "number" and value.is_integer():
@@ -67,6 +79,10 @@ def _coerce_scalar(value: Any, target: str) -> Any:
 
 def coerce(value: Any, target_type: str) -> Any:
     """Convert a value to `target_type`. Raises ValueError if data would be lost."""
+    if target_type == SPARSE_VECTOR:
+        if value_type(value) == SPARSE_VECTOR:
+            return value
+        raise ValueError(f"cannot convert {value_type(value)} value to {target_type}")
     if target_type.endswith("[]"):
         element_type = target_type.removesuffix("[]")
         items = value if isinstance(value, list) else [value]
