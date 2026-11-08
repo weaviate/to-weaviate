@@ -254,12 +254,15 @@ class ChromaSource:
     def filter_equal(
         self, collection: SourceCollection, key: str, value: Any, limit: int
     ) -> list[str]:
-        response = self._get(
-            collection,
-            limit=limit,
-            offset=0,
-            include=[],
-            where={key: {"$eq": value}},
-        )
-        ids: list[str] = response["ids"]
+        where = {key: {"$eq": value}}
+        ids: list[str] = []
+        while len(ids) < limit:
+            page = min(CHROMA_MAX_PAGE, limit - len(ids))
+            response = self._get(
+                collection, limit=page, offset=len(ids), include=[], where=where
+            )
+            got: list[str] = response["ids"]
+            ids.extend(got)
+            if len(got) < page:
+                break
         return ids

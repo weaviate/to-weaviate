@@ -264,6 +264,21 @@ def test_filter_equal(source, fake_client, inspected):
     assert fake_client.calls[-1].include == []
 
 
+def test_filter_equal_pages_above_chroma_max(source, fake_client, inspected):
+    fake_client.calls.clear()
+    ids = source.filter_equal(inspected, "tags", ["a", "b"], 1000)
+    assert ids == [f"id{i}" for i in range(0, 650, 2)]
+    assert [(c.limit, c.offset) for c in fake_client.calls] == [(300, 0), (300, 300)]
+    assert all(c.where == {"tags": {"$eq": ["a", "b"]}} for c in fake_client.calls)
+
+
+def test_filter_equal_stops_at_limit(source, fake_client, inspected):
+    fake_client.calls.clear()
+    ids = source.filter_equal(inspected, "tags", ["a", "b"], 310)
+    assert len(ids) == 310
+    assert [(c.limit, c.offset) for c in fake_client.calls] == [(300, 0), (10, 300)]
+
+
 def test_capabilities():
     assert ChromaSource.name == "chroma"
     assert ChromaSource.capabilities == frozenset(
