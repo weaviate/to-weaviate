@@ -58,11 +58,18 @@ def _kubectl(*args: str, timeout: float = 30) -> subprocess.CompletedProcess[str
 
 
 def _pod_uid() -> str | None:
-    """The uid of POD, or None while the pod does not exist."""
+    """The uid of POD, or None while the pod does not exist.
+
+    Any other kubectl failure fails the test with the stderr of kubectl.
+    """
     completed = _kubectl("get", "pod", POD, "-o", "jsonpath={.metadata.uid}")
     if completed.returncode != 0:
-        return None
-    return completed.stdout.strip() or None
+        if "(NotFound)" in completed.stderr:
+            return None
+        pytest.fail(f"kubectl get pod {POD} -n {NAMESPACE}: {completed.stderr}")
+    uid = completed.stdout.strip()
+    assert uid, f"kubectl get pod {POD} -n {NAMESPACE} printed no uid"
+    return uid
 
 
 def _delete_pod() -> str:
@@ -186,12 +193,12 @@ def test_a_pod_deleted_during_copy_leaves_no_reject(seeded, tmp_path, level):
     ), row
     _assert_replicated(TARGET)
     assert weaviate_count(TARGET) == total
-    # The next copy writes no page.
+    # The next copy reaches the collection and writes no page.
     before = len(_events(tmp_path))
     r = run(["copy", "--consistency", level], tmp_path)
     assert r.exit_code == 0 and r.data["status"] == "success", r
     added = _events(tmp_path)[before:]
-    assert "progress" not in added, added
+    assert "collection_finished" in added and "progress" not in added, added
     assert weaviate_count(TARGET) == total
     r = run(["verify"], tmp_path)
     assert r.exit_code == 0 and r.data["status"] == "success", r
