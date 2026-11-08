@@ -88,7 +88,8 @@ jobs:
       - run: sh tests/acceptance/port-forward.sh
       - if: matrix.chroma == 'single'
         run: docker compose -f tests/acceptance/chroma/docker-compose.yml up -d --wait
-      # Forwards the frontend of distributed Chroma to port 8001.
+      # Deploys distributed Chroma in the kind cluster and forwards its
+      # frontend to port 8001.
       - if: matrix.chroma == 'distributed'
         run: sh tests/acceptance/chroma-k8s.sh up
       - uses: actions/setup-python@v5
@@ -106,3 +107,10 @@ jobs:
       # Chroma forward.
       - if: failure()
         run: tail -n 200 /tmp/port-forward-*.log
+      # The label app of each Chroma workload is its name in the chart.
+      - if: failure() && matrix.chroma == 'distributed'
+        run: |
+          for app in rust-frontend-service compaction-service rust-log-service query-service; do
+            echo "--- kubectl -n chroma logs -l app=$app"
+            kubectl -n chroma logs -l "app=$app" --all-containers --prefix --tail=200 || true
+          done
