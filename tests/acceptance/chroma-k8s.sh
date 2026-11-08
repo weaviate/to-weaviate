@@ -101,8 +101,38 @@ pull_failures() {
         grep -E '^[^ ]+ (ErrImagePull|ImagePullBackOff|InvalidImageName) ' || true
 }
 
+# exit_codes: the last exit code of each pod of the namespace that is not
+# ready and has not succeeded. On some runners query-service and
+# compaction-service exit with 132 and empty logs, and a rerun on another
+# runner passes.
+exit_codes() {
+    echo "--- the last exit codes of the pods of namespace $NAMESPACE that are not ready"
+    pods=$(kubectl -n "$NAMESPACE" get pods -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{" "}{.status.containerStatuses[*].ready}{"\n"}{end}' 2>/dev/null) || pods=
+    sigill=
+    while read -r pod phase ready; do
+        if [ -z "$pod" ] || [ "$phase" = Succeeded ]; then
+            continue
+        fi
+        case "$ready" in
+        *false* | "") ;;
+        *) continue ;;
+        esac
+        codes=$(kubectl -n "$NAMESPACE" get pod "$pod" -o jsonpath='{.status.containerStatuses[*].lastState.terminated.exitCode}' 2>/dev/null) || codes=
+        echo "$pod: last exit code ${codes:-none}"
+        case " $codes " in
+        *" 132 "*) sigill=yes ;;
+        esac
+    done <<PODS
+$pods
+PODS
+    if [ -n "$sigill" ]; then
+        echo "exit code 132 is SIGILL: the runner's CPU lacks an instruction set the image uses; rerun the job (gh run rerun <id> --failed) to get another runner"
+    fi
+}
+
 # diagnose [RESOURCE]: prints the pods and the last events of the namespace,
-# and the last log lines of RESOURCE.
+# the last log lines of RESOURCE, the CPU of the runner, and the last exit
+# codes of the pods that are not ready.
 diagnose() {
     {
         echo "--- kubectl -n $NAMESPACE get pods"
@@ -113,6 +143,9 @@ diagnose() {
             echo "--- kubectl -n $NAMESPACE logs $1"
             kubectl -n "$NAMESPACE" logs "$1" --all-containers --tail=50 || true
         fi
+        echo "--- the CPU of the runner"
+        lscpu || head -n 30 /proc/cpuinfo || true
+        exit_codes
     } >&2
 }
 

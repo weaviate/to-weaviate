@@ -703,7 +703,11 @@ records in insertion order. A-24 pins that order. A-25 copies right after
 a burst of writes, and the compaction guard (U-18) makes the copy wait.
 The `cluster` leg of CI runs the suite against the open-source distributed
 Chroma, which `tests/acceptance/chroma-k8s.sh` starts in its kind cluster,
-with `ACCEPTANCE_CHROMA=distributed`. On that leg the seed waits until
+with `ACCEPTANCE_CHROMA=distributed`. When a rollout fails, the script
+prints the runner's CPU and the last exit code of each pod that is not
+ready; exit code 132 (SIGILL) means that the runner's CPU lacks an
+instruction set of the query and compaction images, and a rerun of the
+failed job on another runner passes. On that leg the seed waits until
 `indexing_status` reports `num_unindexed_ops` 0 for each seeded
 collection, so the other cases read compacted collections. Distributed
 Chroma compacts every 10 s and takes at most 10,000 records of a
