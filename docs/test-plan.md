@@ -327,7 +327,8 @@ keep mode: `inspect` exits 0; `copy` exits 1 `rejects` with 12 rejects
 the records detail ending `every sampled record is rejected at copy time;
 read rejects.jsonl`. Then in a new directory with `--vectors embed
 --vectorizer text2vec-transformers`: `copy` and `verify` exit 0, 12
-objects, `near_text` with one document returns its record first.
+objects, `near_vector` with the stored vector returns its record first and `near_text`
+with one document returns a record.
 Suspected (R5, see U-16): the keep-mode draft gives no note that the
 source has no vectors.
 
@@ -398,7 +399,7 @@ exit 2 `invalid_plan` with one error `module_not_enabled` whose message
 lists `text2vec-transformers` among the enabled modules, the made-up key in
 no output (A-08); exit 2 `module_not_enabled` for `text2vec-weaviate`.
 
-*Implemented: `tests/acceptance/chroma/test_check.py::test_check_needs_the_provider_key_and_an_enabled_module`. Coverage. Weaviate 1.40.4 enables every API-based module by default, text2vec-openai and text2vec-weaviate among them, so check with the made-up key exits 0 and the module case uses text2vec-ollama.*
+*Implemented: `tests/acceptance/chroma/test_check.py::test_check_needs_the_provider_key_and_an_enabled_module`. Coverage. Weaviate 1.40.4 enables every API-based module by default, text2vec-openai and text2vec-weaviate among them, so check with the made-up key exits 0. The module case picks the first of `CANDIDATE_MODULES` that `/v1/meta` does not list (`text2vec-ollama` on CI, `text2vec-transformers` on Weaviate Cloud).*
 
 ### R3: schema and data fidelity
 
@@ -629,8 +630,10 @@ text and propose the new one; small, last.
 
 These cases carry the marker `infra`: they need servers that the suite
 owns. A-20 to A-22 need the `cluster` leg of CI: 3 Weaviate nodes,
-`REPLICATION_MINIMUM_FACTOR=3` and `ACCEPTANCE_NODES=3`. They skip when
-`ACCEPTANCE_NODES` is below 3, so they do not run locally. A-20 and A-22
+`REPLICATION_MINIMUM_FACTOR=3`. The suite reads the node count from the
+server; CI sets `ACCEPTANCE_NODES=3` to document the leg, and the suite
+reports a value that differs from the server's count. The cases skip when
+the cluster has fewer than 3 nodes, so they do not run locally. A-20 and A-22
 delete a pod. A-23 stops the compose Chroma. After each pod deletion the case waits until
 `weaviate-1` is replaced, then for `kubectl rollout status sts/weaviate -n
 weaviate --timeout=60s`, then until a client connects through the
@@ -836,8 +839,8 @@ and C-03, because no Chroma Cloud source exists.
 - Provider vectorizers (`text2vec-openai` and the others): Weaviate
   1.40.4 enables every API-based module by default, but the CI server has
   no provider key and serves inference for `text2vec-transformers` only.
-  A-09 covers the module check with `text2vec-ollama`, which is not
-  enabled, after it asserts that `/v1/meta` does not list it; the
+  A-09 covers the module check with the first of `CANDIDATE_MODULES`
+  that `/v1/meta` does not list; the
   mapping tests cover the options. Manual check before a release: one
   embed-mode copy with `text2vec-openai` and a real key, and a read of
   `rejects.jsonl` after a wrong key (the provider's message may echo part

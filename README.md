@@ -327,10 +327,12 @@ Weaviate with `ASYNC_INDEXING`, as every Weaviate Cloud instance does, and
 set `WEAVIATE_ASYNC_INDEXING=true` for the tests whose outcome depends on
 it.
 The `single` leg runs one Weaviate node. The `cluster` leg runs three
-nodes with `REPLICATION_MINIMUM_FACTOR=3` and sets `ACCEPTANCE_NODES=3`.
+nodes with `REPLICATION_MINIMUM_FACTOR=3`. The suite reads the node count
+from the server; CI sets `ACCEPTANCE_NODES=3` to document the leg, and the
+suite reports a value that differs from the server's count.
 The cases of `tests/acceptance/chroma/test_cluster.py` run there only: they
 delete a Weaviate pod during `copy` and during `verify`, and copy at each
-consistency level. They skip when `ACCEPTANCE_NODES` is below 3.
+consistency level. They skip when the cluster has fewer than 3 nodes.
 Right after the weaviate-local-k8s action, the job runs
 `tests/acceptance/port-forward.sh`. It replaces the action's
 `kubectl-relay` forwards on ports 8099 and 50099 with `kubectl
@@ -471,6 +473,7 @@ with these variables:
 | `ACCEPTANCE_VECTORIZER` | `text2vec-weaviate` |
 | `WEAVIATE_GRPC_URL` | empty, so the tool connects to port 443 of the cluster |
 | `TO_WEAVIATE_REQUIRE_ACCEPTANCE` | `1`, so a target that breaks a rule fails the run |
+| `ACCEPTANCE_NODES` | unset: the suite reads the node count from the cluster; set it only to document a leg |
 
 It reads `WEAVIATE_URL` and `WEAVIATE_API_KEY` from the environment.
 `WEAVIATE_URL` is `https://` followed by the cluster host, which ends with
@@ -498,9 +501,10 @@ deletes the collections that `SUITE_COLLECTIONS` in
 the cluster holds a collection that `SUITE_COLLECTIONS` does not list. A
 sandbox cluster refuses `hnsw`, `flat`, `dynamic` and the quantizer
 settings, so those cases fail there with the server's message.
-`/v1/meta` of the cluster must list `text2vec-weaviate`. When it does not,
-the tests that embed documents and the module check of `test_check.py`
-fail.
+`/v1/meta` of the cluster must list `text2vec-weaviate` (the tests that
+embed documents fail without it) and must leave one of the
+`CANDIDATE_MODULES` of `test_check.py` disabled (the serverless cluster of
+2026-11-08 left `text2vec-transformers` disabled).
 
 Every API-level test runs. The target deselects the `infra` tests,
 because docker and kubectl reach only the local servers. The
