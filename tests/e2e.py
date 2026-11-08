@@ -262,11 +262,14 @@ def _with_nodes_problems(problems: list[str]) -> list[str]:
 
 
 def _nodes_problems() -> list[str]:
-    value = _variable(NODES_VARIABLE)
-    if not value or not value.isdecimal() or int(value) < 1:
+    if not _variable(NODES_VARIABLE):
         return []
+    try:
+        value = nodes()
+    except ValueError as error:
+        return [str(error)]
     count = _server_nodes()
-    if int(value) == count:
+    if value == count:
         return []
     plural = "s" if count != 1 else ""
     return [f"{NODES_VARIABLE} is {value} but the cluster has {count} node{plural}"]

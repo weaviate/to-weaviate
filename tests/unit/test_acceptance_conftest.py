@@ -114,6 +114,17 @@ def test_nodes_is_the_variable_when_it_is_set(env, server):
     assert fake.calls == 0
 
 
+@pytest.mark.parametrize("value", ["0", "three"])
+def test_a_malformed_node_count_is_a_problem(env, server, value):
+    env(LOCAL)
+    env({"ACCEPTANCE_NODES": value})
+    fake = server(3)
+    assert e2e.endpoint_problems() == [
+        "ACCEPTANCE_NODES is not a whole number of at least 1"
+    ]
+    assert fake.calls == 0
+
+
 @pytest.mark.parametrize(
     ("variable", "count", "problems"),
     [
