@@ -627,10 +627,11 @@ text and propose the new one; small, last.
 
 ### Infra
 
-These cases restart or delete a server. A-20 to A-22 need the `cluster`
-leg of CI: 3 Weaviate nodes, `REPLICATION_MINIMUM_FACTOR=3` and
-`ACCEPTANCE_NODES=3`. They skip when `ACCEPTANCE_NODES` is below 3, so
-they do not run locally. After each pod deletion the case waits until
+These cases carry the marker `infra`: they need servers that the suite
+owns. A-20 to A-22 need the `cluster` leg of CI: 3 Weaviate nodes,
+`REPLICATION_MINIMUM_FACTOR=3` and `ACCEPTANCE_NODES=3`. They skip when
+`ACCEPTANCE_NODES` is below 3, so they do not run locally. A-20 and A-22
+delete a pod. A-23 stops the compose Chroma. After each pod deletion the case waits until
 `weaviate-1` is replaced, then for `kubectl rollout status sts/weaviate -n
 weaviate --timeout=60s`, then until a client connects through the
 forwards, before the next command. Each fault case fails when the command
@@ -643,10 +644,15 @@ copy of 8,000 records still runs after 3 s; `copy --consistency <level>`;
 3 s in, `kubectl delete pod weaviate-1 -n weaviate --wait=false`; `copy
 --consistency <level>` again; `verify`. Expected: the first `copy` exits
 0 with `copied 8000, rejects 0, done`; `Resume` has replication factor 3;
-the second `copy` exits 0 and writes no page (no `progress` event in
-`events.jsonl`); 8,000 objects; the full `verify` exits 0 with the
-`count`, `ids` and `records` checks. Pins PR 25, which sends a partly
-refused batch again.
+the second `copy` exits 0 and writes no page (a `collection_finished`
+event and no `progress` event in `events.jsonl`); 8,000 objects; the full
+`verify` exits 0 with the `count`, `ids` and `records` checks. With
+QUORUM, each object still gets two acks while one of the three replicas
+is gone, so the QUORUM case may see no refused object. With ALL, a write
+needs all three replicas. So the ALL case is the one that reaches the
+re-send of refused objects, which PR 25 extended to a batch refused in
+part. The tool writes no event for a re-send. The CI run shows that both
+cases pass, not which path ran.
 
 *Implemented: `tests/acceptance/chroma/test_cluster.py::test_a_pod_deleted_during_copy_leaves_no_reject`. Coverage.*
 
@@ -661,9 +667,9 @@ factor 3; 8,000 objects; `verify` exits 0.
 **A-22 A Weaviate pod deleted during `verify`.** Level infra, risk R1.
 Steps: `inspect chroma --collection bulk --sample-pages 5`; `copy
 --parallelism 8`; `verify`; 3 s in, `kubectl delete pod weaviate-1 -n
-weaviate --wait=false`. A full `verify` of 50,000 records takes about 10 s
-on one local node, so it still runs at 3 s. Expected: `verify` exits 0
-with the `count`, `ids` and `records` checks passed.
+weaviate --wait=false`. A full `verify` of 50,000 records took 4.96 s and
+4.15 s on one local node, so it still runs at 3 s there. Expected:
+`verify` exits 0 with the `count`, `ids` and `records` checks passed.
 
 *Implemented: `tests/acceptance/chroma/test_cluster.py::test_verify_passes_while_a_pod_is_deleted`. Coverage.*
 

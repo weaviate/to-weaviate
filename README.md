@@ -332,17 +332,17 @@ consistency level. They skip when `ACCEPTANCE_NODES` is below 3.
 for 3 s during a copy, on both legs and locally. Right after the
 weaviate-local-k8s action, the job runs `tests/acceptance/port-forward.sh`.
 It replaces the action's `kubectl-relay` forwards on ports 8099 and 50099
-with `kubectl port-forward` processes that a loop starts again when they
-exit, and waits until Weaviate answers on both ports. It refuses to run
-when `GITHUB_ACTIONS` is not `true`.
+with `kubectl port-forward` processes. A loop starts each of them again
+when it exits. The script then waits until Weaviate answers on both
+ports. It refuses to run when `GITHUB_ACTIONS` is not `true`.
 
 With `ASYNC_INDEXING`, the copy of a dynamic index passes, and the
 compression of the tenants by a trained quantizer with the default
 `training_limit` is an expected failure. Without it, the dynamic index is
 an expected failure with the server's message as the reason; it describes
 a finding that is not fixed. The compression of the tenants passes there.
-CI does not run that server. Unit tests cover the tool's side, and the
-suite runs against it locally with `ASYNC=0 make weaviate-up`, then
+CI does not run that server. Unit tests cover the tool's side. The suite
+runs against such a server locally with `ASYNC=0 make weaviate-up`, then
 `WEAVIATE_ASYNC_INDEXING=false make acceptance`. With
 `WEAVIATE_ASYNC_INDEXING` unset, these tests decide from what the server
 does and say so in the reason.
