@@ -30,8 +30,9 @@ The goals, in the tool's own terms:
    continues at a page whose earlier pages are all written, in the same
    directory, against the same target.
 5. Exit codes a script can trust. 0 success, 1 rejects or a failed
-   verification, 2 usage or plan, 3 credential, 4 unreachable, 5 internal,
-   the same with and without `--json`, and one JSON document on stdout.
+   verification, 2 usage or plan, 3 credential, 4 unreachable or a source
+   collection compacted during the read, 5 internal, the same with and
+   without `--json`, and one JSON document on stdout.
 6. A plan a person can edit. Every allowed edit is applied by `copy`;
    every disallowed edit is refused by `check` and `copy` before anything
    is written, with a message that names the field.
@@ -100,6 +101,7 @@ server's message.
 | Source: a page shorter than the limit | part `test_chroma_source::test_read_open_ended_partition_stops_on_short_page` asserts the stop; the loss it can cause is not covered (U-01) | no | no | unit |
 | Source: records deleted during a copy | no; deferred F4 (U-08 pins the documented limit) | no | no | unit |
 | Source: records added between runs (tail) | cov `test_copy::test_*tail*`, `cmd::test_every_copy_reads_the_records_added_since_the_last_run` | cov `acc/migration::test_each_copy_adds_the_records_that_the_source_gained` | no | acceptance API |
+| Source: compaction on distributed Chroma (wait for num_unindexed_ops 0, stop on a changed version or log_position, single-node HTTP 500) | cov `test_chroma_client::test_indexing_status_*`, `::test_another_500_on_indexing_status_is_retried`, `::test_collection_by_name_reads_the_collection_document`, `test_chroma_source::test_wait_compacted_*`, `::test_compaction_state_of_a_collection_created_again_names_inspect_force`, `test_copy::test_the_wait_comes_before_the_first_page_and_the_state_after_the_last_read`, `::test_a_changed_state_stops_the_copy_and_the_next_run_reads_from_the_start`, `::test_a_source_without_compaction_is_not_compared`, `::test_the_wait_writes_a_compaction_wait_event_per_change`, `::test_a_wait_that_ends_without_compaction_reads_no_page`, `test_verify::test_verify_waits_before_the_counts_and_reads_the_state_after_the_records`, `::test_verify_stops_with_source_compacting_and_writes_no_report`, `test_cli_chroma::test_copy_and_verify_wait_until_chroma_compacted`, `::test_a_single_node_chroma_gets_one_indexing_status_request_per_command` | cov `acc/source_order::test_copy_during_compaction` (cluster leg) | no | acceptance API |
 | Source: 5xx, 429 with Retry-After, transport error, redirect, non-JSON | cov `test_chroma_client` (client level only; U-02 adds the copy path) | no (A-04) | no | unit |
 | Source: 401/403, missing key, Chroma Cloud host rule, token header forms | cov `json::test_source_errors_map_to_codes`, `test_settings`, `test_chroma_client::test_sends_token_header` | part (no key on the local server) | cov | unit |
 | Source: tenant from `/auth/identity` (`_chroma_source`) | no (U-13) | cov (implicit) | cov | acceptance API |
@@ -116,7 +118,7 @@ server's message.
 | Target: one object above the gRPC message limit | no (U-06, A-05) | no | no | unit |
 | Target: cloud connect (port 443, no gRPC URL), explicit port refused | cov `test_schema::test_connect_cloud*`, `test_settings::test_weaviate_url_port_other_than_443_needs_a_grpc_url` | no | cov | local cloud run |
 | Error codes 0, 1, 2, 3 | cov `json::test_error_exit_covers_every_code` and per-code tests | cov | cov (0) | acceptance API |
-| Error codes 4, 5 | cov `json::test_source_errors_map_to_codes`, `::test_unexpected_error_gives_an_internal_error_document` | no (A-04 for 4; 5 by design not provoked) | no | acceptance API |
+| Error codes 4, 5 | cov `json::test_source_errors_map_to_codes`, `::test_a_compaction_during_copy_is_source_compacting_exit_4`, `::test_a_collection_that_chroma_does_not_compact_is_source_compacting_exit_4`, `::test_unexpected_error_gives_an_internal_error_document` | no (A-04 for 4; 5 by design not provoked) | no | acceptance API |
 | JSON document shape under every error (`status`, `code`, `message`, `hint`, fields) | cov `json::test_json_error_document`, `::test_json_stdout_is_one_document` | part (`e2e.run` checks one document; not the keys, A-17) | part | acceptance API |
 | Resume: killed process, lock release | cov `test_lock` | cov `acc/resume` | no | acceptance API |
 | Resume: refused batch, refused schema, refused quantizer update | cov `cmd::test_copy_resumes_at_the_refused_page_and_writes_each_object_once`, `::test_a_refused_quantizer_update_stops_copy_and_resumes_without_pages` | part (`acc/vector_settings` resume after check) | no | acceptance API |
@@ -694,11 +696,11 @@ so the case cannot show that one ran.
 
 `copy` reads by offset: the partitions, the resume and the shift detection
 (rulings R61 and R65) need `get` with `offset` and `limit` to return the
-records in insertion order. A-24 pins that order. A-25 measures a copy
-across a renumbering; it lands with the compaction guard. The `cluster`
-leg of CI runs the suite against the open-source distributed Chroma, which
-`tests/acceptance/chroma-k8s.sh` starts in its kind cluster, with
-`ACCEPTANCE_CHROMA=distributed`. On that leg the seed waits until
+records in insertion order. A-24 pins that order. A-25 copies right after
+a burst of writes, and the compaction guard (U-18) makes the copy wait.
+The `cluster` leg of CI runs the suite against the open-source distributed
+Chroma, which `tests/acceptance/chroma-k8s.sh` starts in its kind cluster,
+with `ACCEPTANCE_CHROMA=distributed`. On that leg the seed waits until
 `indexing_status` reports `num_unindexed_ops` 0 for each seeded
 collection, so the other cases read compacted collections. Distributed
 Chroma compacts every 10 s and takes at most 10,000 records of a
@@ -722,15 +724,37 @@ addition, the 10 ids come last. Runs on both Chroma kinds.
 
 *Implemented: `tests/acceptance/chroma/test_source_order.py::test_get_pages_follow_the_insertion_order`. Coverage.*
 
+**U-18 The compaction guard.** Level unit, risk R1. The client sends
+`GET .../collections/{id}/indexing_status`. A 500 whose message holds "is
+not implemented", the answer of single-node Chroma 1.5.9, gives None
+without a retry; any other 500 is retried as before (ruling R99). The
+client reads the collection document by name, from sysdb. The source
+sends one `indexing_status` and returns None on single-node Chroma: one
+request, no wait. Otherwise each poll reads the collection's `version` and
+`log_position` first and `indexing_status` second, every 5 s, and returns
+the state read before the first 0. It reports each change of
+`num_unindexed_ops` and raises `SourceNotCompacted` after 600 s (ruling
+R97). A collection document with another id than the inspected one gives
+the hint of a collection created again. The engine waits before
+`init_collection`, writes the event `compaction_wait` for each report, and
+reads the state again after the last read. A changed state adds a tail
+from offset 0 that supersedes every stored partition and raises
+`SourceChanged`, so the next run reads the collection again; a source
+without compaction is not compared. `verify` waits before its counts and
+compares after its records, and a stop writes no report. Both stops are
+`source_compacting`, exit 4, with their own message and hint (ruling R98).
+
+*Implemented: `tests/unit/test_chroma_client.py::test_indexing_status_returns_the_counts`, `::test_indexing_status_of_a_single_node_server_is_none_and_not_retried`, `::test_another_500_on_indexing_status_is_retried`, `::test_collection_by_name_reads_the_collection_document`; `tests/unit/test_chroma_source.py::test_wait_compacted_returns_the_state_when_nothing_waits`, `::test_wait_compacted_polls_until_nothing_waits`, `::test_wait_compacted_raises_after_600_seconds`, `::test_wait_compacted_on_single_node_sends_one_request`, `::test_compaction_state_of_a_collection_created_again_names_inspect_force`; `tests/unit/test_copy.py::test_the_wait_comes_before_the_first_page_and_the_state_after_the_last_read`, `::test_a_changed_state_stops_the_copy_and_the_next_run_reads_from_the_start`, `::test_a_source_without_compaction_is_not_compared`, `::test_the_wait_writes_a_compaction_wait_event_per_change`, `::test_a_wait_that_ends_without_compaction_reads_no_page`; `tests/unit/test_verify.py::test_verify_waits_before_the_counts_and_reads_the_state_after_the_records`, `::test_verify_stops_with_source_compacting_and_writes_no_report`; `tests/unit/test_cli_json.py::test_a_compaction_during_copy_is_source_compacting_exit_4`, `::test_a_collection_that_chroma_does_not_compact_is_source_compacting_exit_4`; `tests/unit/test_cli_chroma.py::test_copy_and_verify_wait_until_chroma_compacted`, `::test_a_single_node_chroma_gets_one_indexing_status_request_per_command`. Found by A-25; ruling R70.*
+
 **A-25 `copy` while distributed Chroma compacts.** Level API, risk R1,
-distributed Chroma only. The case lands with the compaction guard, in the
-next PR (ruling R92). Steps: make `burst` with 40,000 records of 16
+distributed Chroma only. Steps: make `burst` with 40,000 records of 16
 dimensions in adds of 300; `inspect chroma --collection burst
 --sample-pages 1`; read the pages at offsets 0, 5,000, ... 35,000 and the
 collection's `version` and `log_position`; `copy --parallelism 8` right
-after, without the wait for compaction; read the same pages and values
-again; the full `verify`. Expected: `copy` exits 0, and `verify` gives
-`source count 40000, target count 40000` and `missing 0, extra 0`. The
+after, without the suite's wait for compaction; read the same pages and
+values again; the full `verify`. Expected: `copy` first waits for
+`num_unindexed_ops` 0, then exits 0, and `verify` gives `source count
+40000, target count 40000` and `missing 0, extra 0`. The
 frontend serves `get` from a collection cache whose entries live 60 s, so
 a renumbering becomes visible at a cache expiry, not when the compaction
 run ends. The case records `crossed` (page 0 changed during the copy),
@@ -740,12 +764,12 @@ the compactor at 200m CPU, the copy had `crossed` true and
 `changed_offsets` [0, 5000]. `version` went from 0 to 1 and `log_position`
 from 0 to 10000 during the copy. `verify` found `source count 40000,
 target count 38631` and `missing 1369, extra 0`. So a copy across a
-renumbering skips records, the tool bug of ruling R70. Its fix: `copy`
-waits for `num_unindexed_ops` 0 before the first page, and stops with a
-new error code when the collection's `version` or `log_position` changed
-before the last page.
+renumbering skips records, the tool bug of ruling R70. Its fix (U-18):
+`copy` waits for `num_unindexed_ops` 0 before the first page, and stops
+with `source_compacting` when the collection's `version` or
+`log_position` changed before the last page.
 
-*Not in this branch: `tests/acceptance/chroma/test_source_order.py::test_copy_during_compaction` comes back with the fix. `tests/e2e.py::compaction_properties` and the seed helpers `burst_records` and `collection_state` stay for it.*
+*Implemented: `tests/acceptance/chroma/test_source_order.py::test_copy_during_compaction`. Found the bug on PR #34 CI run 2; the guard of ruling R70 fixes it (U-18).*
 
 ### Cloud
 
@@ -769,8 +793,8 @@ and C-03, because no Chroma Cloud source exists.
 
 - Chroma Cloud: no Chroma Cloud account exists, so no test reads from it.
   The unit tests cover the tool's side with fakes, and L-01 covers the
-  Weaviate Cloud side. A-24 covers the read order of the open-source
-  distributed Chroma. These stay unverified:
+  Weaviate Cloud side. A-24 and A-25 cover the read order and the
+  compaction of the open-source distributed Chroma. These stay unverified:
   - The read order of a sharded collection. Distributed Chroma reads it
     shard by shard, which is not insertion order. Sharding is off by
     default and turned on per tenant pattern (`compaction_manager.rs`), so
@@ -778,6 +802,12 @@ and C-03, because no Chroma Cloud source exists.
   - The `max_partition_size` of Chroma Cloud. The open-source worker config
     sets 5,000, the run size above which compaction gives records new
     offsets.
+  - Whether Chroma Cloud answers `indexing_status` as the open-source
+    frontend does, and how long its compaction takes. The 600 s bound of
+    the compaction guard comes from the CI cluster.
+  - A compaction between two runs. `copy` compares the state only within
+    a run (follow-up: store the start state in `state.sqlite`). Until then
+    the full `verify` after the last copy finds the skipped records.
   - Quotas and the 429 behavior: the page cap of 300 results per request
     (whether a request above 300 records is refused or cut, which decides
     whether U-01 is a loss in practice), the limit of 10 concurrent reads
