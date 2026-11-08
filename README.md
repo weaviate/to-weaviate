@@ -296,13 +296,25 @@ The commands it starts get empty values for `CHROMA_DATABASE`,
 `CHROMA_TENANT`, `CHROMA_API_KEY` and `CHROMA_TOKEN_HEADER`, so values from
 your shell do not reach them.
 
+The suite has two levels. An API-level test reaches the servers only
+through the `to-weaviate` command and the Chroma and Weaviate APIs. An
+`infra` test also restarts or deletes a server through docker or kubectl,
+and carries the pytest marker `infra`, which `pyproject.toml` declares.
+`pytest -m "not infra"` runs the API-level tests only. With
+`ACCEPTANCE_TARGET=cloud`, the suite runs against a Weaviate Cloud cluster
+and the local test Chroma (the rules are `endpoint_problems` in
+`tests/e2e.py`), and an `infra` test fails, because docker and kubectl
+reach only the local servers.
+
 The suite deletes and recreates the Chroma collections that `COLLECTIONS`
 in `tests/acceptance/chroma/seed.py` lists. One test adds 10 records to
 `tiny.l2` and deletes them when it ends. Before and after each test the
 suite deletes the Weaviate collections that `SUITE_COLLECTIONS` in
 `tests/acceptance/conftest.py` lists. It writes to no other Weaviate
 collection, also when the test Chroma holds collections that the seed does
-not make.
+not make. With `ACCEPTANCE_TARGET=cloud`, the suite fails before its first
+test when the cluster holds a collection that `SUITE_COLLECTIONS` does not
+list, so the target must be a dedicated cluster.
 
 CI runs the suite twice, against a server without `ASYNC_INDEXING` and
 against one with it, and sets `WEAVIATE_ASYNC_INDEXING` to `false` or
