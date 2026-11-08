@@ -70,6 +70,9 @@ jobs:
           values-override: |
             env:
               ASYNC_INDEXING: "${{ matrix.async_indexing }}"
+      # The kubectl-relay forwards of the action can stop forwarding gRPC
+      # after the SIGKILL resume test; the script replaces them.
+      - run: sh tests/acceptance/port-forward.sh
       - run: docker compose -f tests/acceptance/chroma/docker-compose.yml up -d --wait
       - uses: actions/setup-python@v5
         with: {python-version: "3.13"}
