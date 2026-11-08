@@ -271,7 +271,7 @@ class ChromaClient:
     def indexing_status(
         self, tenant: str, database: str, collection_id: str
     ) -> dict[str, Any] | None:
-        """The compaction counts of a collection; None on single-node Chroma.
+        """The compaction counts of a collection; None when the server has none.
 
         Single-node Chroma 1.5.9 answers HTTP 500 "Method scout_logs is not
         implemented", which is not retried. Any other 500 is retried, so a
@@ -279,13 +279,17 @@ class ChromaClient:
         """
         path = self._collection_path(tenant, database, collection_id)
         try:
-            result: dict[str, Any] = self._collection_request(
+            result: dict[str, Any] = self._request(
                 "GET",
                 path + "/indexing_status",
                 transient=_transient_unless_not_implemented,
             )
         except ChromaError as exc:
-            if _not_implemented(exc):
+            # The route exists since Chroma 1.4.1. Older servers answer 404
+            # with an empty body for every collection, and a missing
+            # collection also answers 404. The next request of the command
+            # reports a missing collection with COLLECTION_GONE_HINT.
+            if exc.status == 404 or _not_implemented(exc):
                 return None
             raise
         return result

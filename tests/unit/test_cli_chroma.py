@@ -366,3 +366,21 @@ def test_a_single_node_chroma_gets_one_indexing_status_request_per_command():
         assert kinds.count("indexing_status") == 1, command
         assert "collection" not in kinds, command
     assert fakes.sleeps == []
+
+
+def test_a_chroma_without_the_indexing_status_route_copies_and_verifies_unguarded():
+    # Chroma before 1.4.1 answers 404 with an empty body on this route.
+    server = ChromaServer(records(0, 10))
+    fakes = inspected(server)
+    for command in ("copy", "verify"):
+        server.faults["indexing_status"] = [httpx.Response(404)]
+        start = len(server.calls)
+        r = invoke(fakes, command, "--json")
+        assert r.exit_code == 0, (command, r.output)
+        kinds = kinds_of(server, start)
+        assert kinds.count("indexing_status") == 1, command
+        assert "collection" not in kinds, command
+    assert len(fakes.writer.objects) == 10
+    checks = {c["name"]: c["detail"] for c in json.loads(r.stdout)["checks"]}
+    assert checks["ids"] == "missing 0, extra 0"
+    assert fakes.sleeps == []

@@ -361,6 +361,7 @@ class ChromaSource:
         moves them into the collection. A run of more than 5,000 records gives
         them new offsets in another order, so a read by offset across it skips
         records. Single-node Chroma has no compaction: one request, then None.
+        A server before Chroma 1.4.1 has no indexing_status route: the same.
 
         Each poll reads the state first and the status second, and a 0 returns
         the state read just before it. The 0 comes from the frontend's cache,

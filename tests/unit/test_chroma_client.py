@@ -533,6 +533,32 @@ def test_indexing_status_of_a_single_node_server_is_none_and_not_retried():
     assert len(calls) == 1 and sleeps == []
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx.Response(404),
+        httpx.Response(
+            404,
+            json={
+                "error": "NotFoundError",
+                "message": "Collection [c] does not exist.",
+            },
+        ),
+    ],
+    ids=["no route", "missing collection"],
+)
+def test_a_404_on_indexing_status_is_none_and_not_retried(answer):
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return answer
+
+    client, sleeps = make(handler)
+    assert client.indexing_status("t", "d", "c") is None
+    assert len(calls) == 1 and sleeps == []
+
+
 def test_another_500_on_indexing_status_is_retried():
     responses = [
         httpx.Response(500, json={"error": "InternalError", "message": "boom"}),
