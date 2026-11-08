@@ -3,7 +3,7 @@ import time
 
 import pytest
 from chroma.seed import count
-from conftest import run, start, weaviate_count
+from conftest import enabled_vectorizer, run, start, weaviate_count
 
 TARGET = "Resume"
 # The copy is killed once it has copied this part of the records.
@@ -23,7 +23,7 @@ def _progress(workdir) -> dict:
 def test_copy_resumes_after_the_process_is_killed(seeded, tmp_path):
     # Both mode embeds every document, which makes the copy slow enough to
     # kill in the middle without a large source.
-    args = ["--vectors", "both", "--vectorizer", "text2vec-transformers"]
+    args = ["--vectors", "both", "--vectorizer", enabled_vectorizer()]
     r = run(["inspect", "chroma", "--collection", "resume", *args], tmp_path)
     assert r.exit_code == 0, r
     r = run(["check"], tmp_path)

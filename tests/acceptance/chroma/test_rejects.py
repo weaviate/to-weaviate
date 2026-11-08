@@ -2,14 +2,14 @@ import json
 
 import pytest
 from chroma.seed import count
-from conftest import run, weaviate_by_source_id, weaviate_count
+from conftest import enabled_vectorizer, run, weaviate_by_source_id, weaviate_count
 
 from to_weaviate.engine.verify import MISSING_IDS
 
 TARGET = "Rejects"
 # (inspect options, rejected source id, reason). Chroma accepts both records:
 # a float under a key that holds ints elsewhere, and a record without a
-# document.
+# document. The test adds the vectorizer to the options of the embed mode.
 REJECTS = {
     "type-after-the-sampled-page": (
         ["--sample-pages", "1"],
@@ -17,7 +17,7 @@ REJECTS = {
         "rank: cannot convert number value 300.5 to int without losing data",
     ),
     "no-document-to-embed": (
-        ["--vectors", "embed", "--vectorizer", "text2vec-transformers"],
+        ["--vectors", "embed"],
         "rej-005",
         "no document to embed",
     ),
@@ -28,6 +28,8 @@ REJECTS = {
 def test_a_record_that_cannot_be_written_is_a_reject(
     seeded, tmp_path, args, source_id, reason
 ):
+    if "embed" in args:
+        args = [*args, "--vectorizer", enabled_vectorizer()]
     r = run(["inspect", "chroma", "--collection", "rejects", *args], tmp_path)
     assert r.exit_code == 0, r
     r = run(["check"], tmp_path)

@@ -35,6 +35,8 @@ where = ["src"]
 testpaths = ["tests"]
 # tests/e2e.py holds the code that tests/acceptance and tests/cloud share.
 pythonpath = ["tests"]
+addopts = ["--strict-markers"]
+markers = ["infra: restarts or deletes a server through docker or kubectl; runs only where the suite owns the servers"]
 filterwarnings = ["ignore::authlib.deprecate.AuthlibDeprecationWarning"]
 
 [tool.ruff]
