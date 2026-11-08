@@ -635,7 +635,8 @@ Cloud cluster whose `/v1/meta` lists `text2vec-weaviate`, and
 Steps: `make acceptance-cloud`. It runs every API-level test of
 `tests/acceptance` against the cluster, with `ACCEPTANCE_TARGET=cloud`,
 `WEAVIATE_ASYNC_INDEXING=true` and `ACCEPTANCE_VECTORIZER=text2vec-weaviate`.
-Expected: the results of the CI run with `ASYNC_INDEXING`. The release
+Expected: the results of the CI run with `ASYNC_INDEXING`, without the
+`infra` tests, which the cloud run deselects. The release
 notes record the passed, skipped and failed tests, with the reasons. L-01
 replaces the deleted Chroma Cloud suite `tests/cloud` and its cases C-02
 and C-03, because no Chroma Cloud source exists.
@@ -658,10 +659,12 @@ and C-03, because no Chroma Cloud source exists.
     SPANN collection's `configuration_json`.
   - Chroma Cloud authentication, live: the API key, the scope of a
     database-scoped key and the `identity` answer.
-- A Weaviate Cloud sandbox: the `SCHEMA_HINT` says a free cluster accepts
-  only hfresh; the release cluster is not free, so the claim is unverified.
-  Manual check: `inspect --index hfresh --quantizer rq --quantizer-bits 1`,
-  `check`, `copy` against a sandbox.
+- A Weaviate Cloud sandbox: the cloud run (L-01) uses a serverless
+  cluster. A sandbox refuses `hnsw`, `flat`, `dynamic` and the quantizer
+  settings, so those cases fail there with the server's message. No test
+  runs a copy that a sandbox accepts. Manual check of the `SCHEMA_HINT`
+  advice (hfresh): `inspect --index hfresh --quantizer rq
+  --quantizer-bits 1`, `check`, `copy` against a sandbox.
 - Other Weaviate versions: the rules of B8 bugs 1 to 3 and 8, the reserved
   suffixes and the sidecar shape are 1.40.4 behavior (older servers accept
   more, so `check` refuses plans they would take). `tests/acceptance/

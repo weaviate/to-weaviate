@@ -8,7 +8,8 @@
 # as every Weaviate Cloud instance does; ASYNC=0 turns it off.
 set -eu
 
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+# With CDPATH set, cd prints the directory, and ROOT would get two lines.
+ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
 VERSION_FILE="$ROOT/tests/acceptance/weaviate-version"
 # The model of the CI action: 384 dimensions.
 TRANSFORMERS_IMAGE=semitechnologies/transformers-inference:baai-bge-small-en-v1.5-onnx
@@ -19,6 +20,15 @@ KEY=admin-key
 READY_URL=http://localhost:8099/v1/.well-known/ready
 READY_TRIES=60
 READY_INTERVAL=2
+
+# exists reads every failed inspect as "does not exist", so the daemon is
+# checked first.
+require_docker() {
+    if ! docker info >/dev/null 2>&1; then
+        echo "docker info failed, so Docker is not running or not reachable. Nothing was $1." >&2
+        exit 1
+    fi
+}
 
 exists() {
     docker "$1" inspect "$2" >/dev/null 2>&1
@@ -40,6 +50,7 @@ up() {
         echo "$VERSION_FILE holds no Weaviate version. Nothing was started." >&2
         exit 1
     fi
+    require_docker started
     found=""
     exists container "$WEAVIATE" && found="$found $WEAVIATE"
     exists container "$TRANSFORMERS" && found="$found $TRANSFORMERS"
@@ -74,7 +85,7 @@ up() {
         -H "Authorization: Bearer $KEY" "$READY_URL"; do
         tries=$((tries + 1))
         if [ "$tries" -ge "$READY_TRIES" ]; then
-            echo "Weaviate is not ready after $((READY_TRIES * READY_INTERVAL)) s." \
+            echo "Weaviate is not ready after $READY_TRIES tries, $READY_INTERVAL s apart." \
                 "Read docker logs $WEAVIATE, then run make weaviate-down." >&2
             exit 1
         fi
@@ -85,6 +96,7 @@ up() {
 }
 
 down() {
+    require_docker removed
     removed=""
     for name in "$WEAVIATE" "$TRANSFORMERS"; do
         if exists container "$name"; then

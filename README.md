@@ -398,8 +398,9 @@ make chroma-down     # stops Chroma
 `tests/acceptance/weaviate-version`. `to-weaviate-t2v` serves the
 `text2vec-transformers` model of CI. Weaviate listens on `127.0.0.1`
 only. It accepts the API key `admin-key` and has RBAC on with the root
-user `admin-user`. The script waits up to 120 seconds for
-`/v1/.well-known/ready`. When one of the two containers or the network
+user `admin-user`. The script asks `/v1/.well-known/ready` up to 60
+times, 2 seconds apart. When Docker does not answer, it stops with a
+message. When one of the two containers or the network
 exists, it starts nothing and asks for `make weaviate-down` first.
 
 Weaviate runs with `ASYNC_INDEXING=true`, as every Weaviate Cloud
@@ -429,8 +430,8 @@ with these variables:
 It reads `WEAVIATE_URL` and `WEAVIATE_API_KEY` from the environment.
 `WEAVIATE_URL` is `https://` followed by the cluster host, which ends with
 `.weaviate.cloud` or `.weaviate.network`. `WEAVIATE_API_KEY` is an admin
-key of the cluster. Export both, or put the two `export` lines in a shell
-file outside the repository and `source` it:
+key of the cluster. Put the two `export` lines in a shell file outside the
+repository and `source` it:
 
 ```bash
 make chroma-up
@@ -439,8 +440,9 @@ source .venv/bin/activate
 make acceptance-cloud
 ```
 
-Never set them on the make command line. A value there stays in the shell
-history, and make passes it to every child process in `MAKEFLAGS`. When
+A value typed at the prompt, in an `export` or on the make command line,
+stays in the shell history. Never set them on the make command line:
+make also passes such a value to every child process in `MAKEFLAGS`. When
 either variable is empty or set on the make command line, the target
 prints `set WEAVIATE_URL and WEAVIATE_API_KEY in the environment (not on
 the make command line)` and exits 2. It prints no value.
