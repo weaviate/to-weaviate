@@ -374,6 +374,42 @@ kubectl context is current, so select your previous context again with
 accepts the API key `admin-key`. The Weaviate version of CI is in
 `tests/acceptance/weaviate-version`.
 
+#### Run the suite locally with Docker
+
+`make acceptance-up` stops when the machine already has a kind cluster
+named `weaviate-k8s`. On such a machine, or on one without kind, start
+the servers in Docker instead:
+
+```bash
+make chroma-up       # Chroma on port 8001
+make weaviate-up     # Weaviate and text2vec-transformers on ports 8099 and 50099
+source .venv/bin/activate
+WEAVIATE_ASYNC_INDEXING=true make acceptance
+make weaviate-down   # removes the two containers and their network
+make chroma-down     # stops Chroma
+```
+
+`make chroma-up` and `make chroma-down` run `docker compose` with
+`tests/acceptance/chroma/docker-compose.yml`. `make weaviate-up` and
+`make weaviate-down` run `tests/acceptance/weaviate-docker.sh`.
+
+`make weaviate-up` starts two containers on the network
+`to-weaviate-dev-net`. `to-weaviate-dev` runs the Weaviate version in
+`tests/acceptance/weaviate-version`. `to-weaviate-t2v` serves the
+`text2vec-transformers` model of CI. Weaviate listens on `127.0.0.1`
+only. It accepts the API key `admin-key` and has RBAC on with the root
+user `admin-user`. The script waits up to 120 seconds for
+`/v1/.well-known/ready`. When one of the two containers or the network
+exists, it starts nothing and asks for `make weaviate-down` first.
+
+Weaviate runs with `ASYNC_INDEXING=true`, as every Weaviate Cloud
+instance does. `ASYNC=0 make weaviate-up` starts it without async
+indexing. Against that server, run the suite with
+`WEAVIATE_ASYNC_INDEXING=false make acceptance`.
+
+`make weaviate-down` removes the two containers and the network. It
+skips a name that does not exist.
+
 ### Cloud suite and releases
 
 `tests/cloud` runs the installed `to-weaviate` command against Chroma Cloud
