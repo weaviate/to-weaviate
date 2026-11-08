@@ -60,7 +60,11 @@ from to_weaviate.engine.check import (
     target_groups,
     userinfo_only,
 )
-from to_weaviate.engine.copy import REJECTS_ARE_FINAL, copy_collection
+from to_weaviate.engine.copy import (
+    REJECTS_ARE_FINAL,
+    copy_collection,
+    raise_if_compacted,
+)
 from to_weaviate.engine.verify import (
     REPORT_MD,
     Check,
@@ -106,7 +110,13 @@ from to_weaviate.settings import (
     weaviate_settings,
     without_userinfo,
 )
-from to_weaviate.sources.base import FieldStats, Source, SourceCollection
+from to_weaviate.sources.base import (
+    FieldStats,
+    Source,
+    SourceChanged,
+    SourceCollection,
+    SourceNotCompacted,
+)
 from to_weaviate.sources.chroma.client import ChromaClient, ChromaError
 from to_weaviate.sources.chroma.mapping import stored_embedding, vectorizer_for
 from to_weaviate.sources.chroma.source import ChromaSource
@@ -170,6 +180,11 @@ UTF8_HINT = (
     "it again."
 )
 CHROMA_HINT = "Check CHROMA_URL and that the Chroma server is running."
+CHANGED_HINT = "Stop the writes to the collection, then run the command again."
+NOT_COMPACTED_HINT = (
+    "Stop the writes to the collection and run the command again once Chroma "
+    "has compacted them."
+)
 NO_COLLECTION_HINT = "Check --database, CHROMA_DATABASE and CHROMA_TENANT."
 WEAVIATE_HINT = (
     "Check WEAVIATE_URL, WEAVIATE_GRPC_URL and that the Weaviate server is running."
@@ -291,6 +306,29 @@ def _as_cli_error(exc: Exception) -> CliError:
             "directory_unwritable",
             f"{where} cannot be written: {os.strerror(exc.errno)}.",
             UNWRITABLE_ERRNOS[exc.errno],
+        )
+    if isinstance(exc, SourceChanged):
+        changes = ", ".join(
+            f"{key} {value} to {exc.after.get(key)}"
+            for key, value in exc.before.items()
+            if exc.after.get(key) != value
+        )
+        return CliError(
+            "source_compacting",
+            f"Chroma compacted the collection {exc.collection} while it was read "
+            f"({changes}), so a page can have skipped records. Run the command "
+            "again.",
+            CHANGED_HINT,
+            fields={"collection": exc.collection},
+        )
+    if isinstance(exc, SourceNotCompacted):
+        return CliError(
+            "source_compacting",
+            f"Chroma has not compacted every write to the collection "
+            f"{exc.collection} after {exc.seconds:.0f} s: {exc.unindexed} of "
+            f"{exc.total} operations are not compacted. Run the command again.",
+            NOT_COMPACTED_HINT,
+            fields={"collection": exc.collection},
         )
     if isinstance(exc, ChromaError):
         if exc.status in (401, 403):
@@ -938,6 +976,19 @@ def _warning(name: str) -> Callable[[str], None]:
     return warn
 
 
+def _waiting(json_output: bool, name: str) -> Callable[[int, int], None]:
+    """A function that prints the wait for Chroma's compaction of `name`."""
+
+    def waiting(unindexed: int, total: int) -> None:
+        info(
+            json_output,
+            f"Waiting for Chroma to compact {name}: {unindexed} of {total} "
+            "operations not compacted",
+        )
+
+    return waiting
+
+
 def _select(entries: list[CollectionPlan], names: list[str]) -> list[CollectionPlan]:
     if not names:
         return entries
@@ -1035,6 +1086,7 @@ def _copy(
                     inspected[ref],
                     parallelism,
                     warn=_warning(entry.source.name),
+                    waiting=_waiting(json_output, entry.source.name),
                 )
                 if result.reread_from is not None:
                     rereads[ref] = result.reread_from
@@ -1114,11 +1166,15 @@ def _verify(
         if missing is not None:
             checks.append(missing)
             continue
+        before = source.wait_compacted(
+            collection, _waiting(json_output, entry.source.name)
+        )
         checks.append(verify_counts(source, reader, entry, collection))
         if not quick:
             diff = diff_ids(source, reader, entry, collection, directory)
             checks.append(verify_ids(diff, entry))
         checks.append(verify_records(source, reader, entry, collection, sample, rng))
+        raise_if_compacted(source, collection, before)
     write_report(checks, directory)
     report = directory / REPORT_MD
     document = {

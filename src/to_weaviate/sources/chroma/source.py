@@ -1,8 +1,9 @@
 import math
 import random
 import threading
+import time
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any, ClassVar
 
 from to_weaviate.sources.base import (
@@ -11,8 +12,14 @@ from to_weaviate.sources.base import (
     Partition,
     Record,
     SourceCollection,
+    SourceNotCompacted,
 )
-from to_weaviate.sources.chroma.client import CHROMA_MAX_PAGE, ChromaClient, ChromaError
+from to_weaviate.sources.chroma.client import (
+    CHROMA_MAX_PAGE,
+    COLLECTION_GONE_HINT,
+    ChromaClient,
+    ChromaError,
+)
 from to_weaviate.sources.chroma.config import (
     distance_of,
     embedding_of,
@@ -23,6 +30,11 @@ from to_weaviate.types import SPARSE_VECTOR, value_type
 DOCUMENT_SAMPLE_PAGES = 10
 SAMPLE_PLACES = 10
 READ_INCLUDE = ["documents", "metadatas", "uris"]
+# The INDEXING_TIMEOUT of the acceptance seed: on CI, with the compactor at
+# 200m CPU, 50,000 records needed more than 300 s to compact.
+COMPACTION_WAIT_SECONDS = 600.0
+# indexing_status moves in the 60 s steps of the frontend's collection cache.
+COMPACTION_POLL_SECONDS = 5.0
 
 
 def _page_count(count: int) -> int:
@@ -104,9 +116,17 @@ class ChromaSource:
         {"vectors", "vector_search", "filter"}
     )
 
-    def __init__(self, client: ChromaClient, tenant: str) -> None:
+    def __init__(
+        self,
+        client: ChromaClient,
+        tenant: str,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._client = client
         self._tenant = tenant
+        self._sleep = sleep
+        self._clock = clock
         # The offset and the ids of the last page read, by (ref, partition key).
         # Workers read other partitions at the same time.
         self._last_pages: dict[tuple[str, str], tuple[int, set[str]]] = {}
@@ -326,6 +346,70 @@ class ChromaSource:
 
     def count(self, collection: SourceCollection) -> int:
         return self._client.count(self._tenant, collection.namespace, collection.ref)
+
+    def _indexing_status(self, collection: SourceCollection) -> dict[str, Any] | None:
+        return self._client.indexing_status(
+            self._tenant, collection.namespace, collection.ref
+        )
+
+    def wait_compacted(
+        self, collection: SourceCollection, waiting: Callable[[int, int], None]
+    ) -> dict[str, int] | None:
+        """Wait until indexing_status counts no write left to compact.
+
+        Distributed Chroma serves new writes from a log until a compaction run
+        moves them into the collection. A run of more than 5,000 records gives
+        them new offsets in another order, so a read by offset across it skips
+        records. Single-node Chroma has no compaction: one request, then None.
+
+        Each poll reads the state first and the status second, and a 0 returns
+        the state read just before it. The 0 comes from the frontend's cache,
+        which then holds every write, so a compaction that commits after the
+        state read changes the state that the caller reads after its last
+        page. A state read after the 0 could take a version that the cache
+        serves only later, in the middle of the pages.
+
+        `waiting(unindexed, total)` is called each time the count changes.
+        Raises SourceNotCompacted after COMPACTION_WAIT_SECONDS.
+        """
+        started = self._clock()
+        if self._indexing_status(collection) is None:
+            return None
+        reported: int | None = None
+        while True:
+            state = self.compaction_state(collection)
+            status = self._indexing_status(collection)
+            if status is None:
+                return None
+            unindexed, total = status["num_unindexed_ops"], status["total_ops"]
+            if unindexed == 0:
+                return state
+            if unindexed != reported:
+                waiting(unindexed, total)
+                reported = unindexed
+            if self._clock() - started >= COMPACTION_WAIT_SECONDS:
+                raise SourceNotCompacted(
+                    collection.name, unindexed, total, COMPACTION_WAIT_SECONDS
+                )
+            self._sleep(COMPACTION_POLL_SECONDS)
+
+    def compaction_state(self, collection: SourceCollection) -> dict[str, int]:
+        """The `version` and `log_position` of the collection document.
+
+        Each compaction run raises them. A distributed answer without them
+        raises KeyError, an internal error, instead of switching the guard off.
+        """
+        raw = self._client.collection_by_name(
+            self._tenant, collection.namespace, collection.name
+        )
+        if raw["id"] != collection.ref:
+            raise ChromaError(
+                200,
+                f"the collection {collection.name} has another id than the "
+                "inspected one",
+                hint=COLLECTION_GONE_HINT,
+            )
+        return {"version": raw["version"], "log_position": raw["log_position"]}
 
     def sample(
         self,

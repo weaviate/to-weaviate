@@ -26,6 +26,9 @@ COLLECTION_GONE_HINT = (
     "The collection is gone from Chroma, or it was created again with a new id. "
     "Run to-weaviate inspect chroma --force to inspect it again."
 )
+# Single-node Chroma 1.5.9 answers indexing_status with HTTP 500 and
+# "Method scout_logs is not implemented".
+NOT_IMPLEMENTED = "is not implemented"
 
 
 class ChromaError(Exception):
@@ -105,6 +108,21 @@ def _transient(exc: Exception) -> float | None:
     return None
 
 
+def _not_implemented(exc: ChromaError) -> bool:
+    return exc.status == 500 and NOT_IMPLEMENTED in exc.message
+
+
+def _transient_unless_not_implemented(exc: Exception) -> float | None:
+    """`_transient`, except that a 500 of a route the server lacks is final.
+
+    A retry of that 500 would cost 15.75 s to 31.5 s per collection and
+    command on single-node Chroma.
+    """
+    if isinstance(exc, ChromaError) and _not_implemented(exc):
+        return None
+    return _transient(exc)
+
+
 def _seg(value: str) -> str:
     return quote(value, safe="")
 
@@ -141,7 +159,13 @@ class ChromaClient:
     def close(self) -> None:
         self._http.close()
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        transient: Callable[[Exception], float | None] = _transient,
+        **kwargs: Any,
+    ) -> Any:
         def call() -> Any:
             response = self._http.request(method, path, **kwargs)
             if response.status_code >= 400:
@@ -166,7 +190,7 @@ class ChromaClient:
                 ) from None
 
         try:
-            return with_retry(call, _transient, sleep=self._sleep)
+            return with_retry(call, transient, sleep=self._sleep)
         except httpx.TransportError as exc:
             raise ChromaError(None, f"{type(exc).__name__}: {exc}") from exc
 
@@ -177,19 +201,33 @@ class ChromaClient:
         )
 
     def _hinted_request(
-        self, status: int, hint: str, method: str, path: str, **kwargs: Any
+        self,
+        status: int,
+        hint: str,
+        method: str,
+        path: str,
+        transient: Callable[[Exception], float | None] = _transient,
+        **kwargs: Any,
     ) -> Any:
         """`_request`, whose ChromaError of HTTP `status` carries `hint`."""
         try:
-            return self._request(method, path, **kwargs)
+            return self._request(method, path, transient, **kwargs)
         except ChromaError as exc:
             if exc.status != status:
                 raise
             raise ChromaError(status, exc.message, hint=hint) from exc
 
-    def _collection_request(self, method: str, path: str, **kwargs: Any) -> Any:
+    def _collection_request(
+        self,
+        method: str,
+        path: str,
+        transient: Callable[[Exception], float | None] = _transient,
+        **kwargs: Any,
+    ) -> Any:
         """`_request` on a collection path. A 404 means the collection id is gone."""
-        return self._hinted_request(404, COLLECTION_GONE_HINT, method, path, **kwargs)
+        return self._hinted_request(
+            404, COLLECTION_GONE_HINT, method, path, transient, **kwargs
+        )
 
     def identity(self) -> dict[str, Any]:
         result: dict[str, Any] = self._request("GET", "/api/v2/auth/identity")
@@ -229,6 +267,43 @@ class ChromaClient:
     def count(self, tenant: str, database: str, collection_id: str) -> int:
         path = self._collection_path(tenant, database, collection_id) + "/count"
         return int(self._collection_request("GET", path))
+
+    def indexing_status(
+        self, tenant: str, database: str, collection_id: str
+    ) -> dict[str, Any] | None:
+        """The compaction counts of a collection; None on single-node Chroma.
+
+        Single-node Chroma 1.5.9 answers HTTP 500 "Method scout_logs is not
+        implemented", which is not retried. Any other 500 is retried, so a
+        transient 500 of a distributed frontend does not switch the guard off.
+        """
+        path = self._collection_path(tenant, database, collection_id)
+        try:
+            result: dict[str, Any] = self._collection_request(
+                "GET",
+                path + "/indexing_status",
+                transient=_transient_unless_not_implemented,
+            )
+        except ChromaError as exc:
+            if _not_implemented(exc):
+                return None
+            raise
+        return result
+
+    def collection_by_name(
+        self, tenant: str, database: str, name: str
+    ) -> dict[str, Any]:
+        """The collection document, with `id`, `version` and `log_position`.
+
+        The frontend reads it from sysdb, not from its collection cache, so a
+        compaction shows here before `get` serves the new order.
+        """
+        path = (
+            f"/api/v2/tenants/{_seg(tenant)}/databases/{_seg(database)}"
+            f"/collections/{_seg(name)}"
+        )
+        result: dict[str, Any] = self._collection_request("GET", path)
+        return result
 
     def get(
         self,

@@ -495,3 +495,69 @@ def test_other_answers_keep_the_general_hint():
     with pytest.raises(ChromaError) as info:
         client.count("t", "d", "c")
     assert info.value.hint is None
+
+
+NOT_IMPLEMENTED_ANSWER = {
+    "error": "InternalError",
+    "message": "Method scout_logs is not implemented",
+}
+
+
+def test_indexing_status_returns_the_counts():
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={"num_unindexed_ops": 5, "total_ops": 9})
+
+    client, _ = make(handler)
+    assert client.indexing_status("t", "d", "c") == {
+        "num_unindexed_ops": 5,
+        "total_ops": 9,
+    }
+    assert (seen[0].method, seen[0].url.path) == (
+        "GET",
+        "/api/v2/tenants/t/databases/d/collections/c/indexing_status",
+    )
+
+
+def test_indexing_status_of_a_single_node_server_is_none_and_not_retried():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(500, json=NOT_IMPLEMENTED_ANSWER)
+
+    client, sleeps = make(handler)
+    assert client.indexing_status("t", "d", "c") is None
+    assert len(calls) == 1 and sleeps == []
+
+
+def test_another_500_on_indexing_status_is_retried():
+    responses = [
+        httpx.Response(500, json={"error": "InternalError", "message": "boom"}),
+        httpx.Response(200, json={"num_unindexed_ops": 0, "total_ops": 9}),
+    ]
+    client, sleeps = make(lambda r: responses.pop(0))
+    assert client.indexing_status("t", "d", "c") == {
+        "num_unindexed_ops": 0,
+        "total_ops": 9,
+    }
+    assert sleeps == [0.25]
+
+
+def test_collection_by_name_reads_the_collection_document():
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        document = {"id": "c-1", "name": "my docs", "version": 3, "log_position": 650}
+        return httpx.Response(200, json=document)
+
+    client, _ = make(handler)
+    assert client.collection_by_name("t", "d", "my docs")["log_position"] == 650
+    assert seen[0].method == "GET"
+    assert (
+        seen[0].url.raw_path.decode()
+        == "/api/v2/tenants/t/databases/d/collections/my%20docs"
+    )

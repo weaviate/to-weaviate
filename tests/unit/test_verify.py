@@ -699,3 +699,32 @@ def test_failed_verify_leaves_no_old_report(in_tmp):
     assert not (DIR / "report.md").exists()
     assert not (DIR / "report.json").exists()
     assert list(DIR.glob("verify-*")) == []
+
+
+def test_verify_waits_before_the_counts_and_reads_the_state_after_the_records(in_tmp):
+    fakes = copied()
+    fakes.source.calls.clear()
+    fakes.source.waits = [(5, 10)]
+    fakes.source.compaction = [{"version": 2, "log_position": 10}]
+    r = invoke(fakes, "verify", "--json")
+    assert r.exit_code == 0, r.output
+    calls = fakes.source.calls
+    assert calls[0] == "wait_compacted" and calls[-1] == "compaction_state"
+    assert {"count", "ids", "sample"} <= set(calls)
+    assert (
+        "Waiting for Chroma to compact docs: 5 of 10 operations not compacted"
+        in r.stderr
+    )
+
+
+def test_verify_stops_with_source_compacting_and_writes_no_report(in_tmp):
+    fakes = copied()
+    fakes.source.compaction = [
+        {"version": 1, "log_position": 10},
+        {"version": 2, "log_position": 10},
+    ]
+    r = invoke(fakes, "verify", "--json")
+    assert r.exit_code == 4, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["collection"]) == ("source_compacting", "docs")
+    assert not (DIR / "report.md").exists() and not (DIR / "report.json").exists()

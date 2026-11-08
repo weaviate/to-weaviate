@@ -820,6 +820,10 @@ class ChromaRows:
     def count(self, tenant: str, database: str, ref: str) -> int:
         return len(self.rows)
 
+    def indexing_status(self, tenant: str, database: str, ref: str) -> None:
+        """The answer of the client for single-node Chroma, which has no compaction."""
+        return None
+
     def get(
         self,
         tenant: str,
