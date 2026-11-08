@@ -505,21 +505,35 @@ def wait_indexed(names: Iterable[str], timeout: float = INDEXING_TIMEOUT) -> Non
     the next write. A single-node Chroma answers indexing_status with HTTP
     500, so the suite calls this on distributed Chroma only. After `timeout`
     s, raises TimeoutError with the collections that still have such writes.
+
+    It prints a line each time the uncompacted count of a collection
+    changes, and the last status of every collection before the
+    TimeoutError. pytest shows them with the error of the fixture that
+    called it.
     """
     with _test_server() as http:
         ids = {name: _collection_id(http, name) for name in names}
-        deadline = time.monotonic() + timeout
+        started = time.monotonic()
+        last: dict[str, dict[str, Any]] = {}
         while True:
+            elapsed = time.monotonic() - started
             pending = {}
             for name, collection_id in ids.items():
                 found = http.get(f"/collections/{collection_id}/indexing_status")
                 found.raise_for_status()
                 status = found.json()
+                if name not in last or (
+                    status["num_unindexed_ops"] != last[name]["num_unindexed_ops"]
+                ):
+                    print(f"wait_indexed: {_progress(name, status)} at {elapsed:.0f}s")
+                last[name] = status
                 if status["num_unindexed_ops"] > 0:
                     pending[name] = status
             if not pending:
                 return
-            if time.monotonic() > deadline:
+            if elapsed > timeout:
+                for name, status in last.items():
+                    print(f"wait_indexed: final {_progress(name, status)}")
                 raise TimeoutError(
                     "distributed Chroma has not compacted every write after "
                     f"{timeout:.0f} s: "
@@ -532,6 +546,10 @@ def wait_indexed(names: Iterable[str], timeout: float = INDEXING_TIMEOUT) -> Non
             # A compacted collection stays compacted while nothing writes.
             ids = {name: ids[name] for name in pending}
             time.sleep(INDEXING_POLL)
+
+
+def _progress(name: str, status: dict[str, Any]) -> str:
+    return f"{name} {status['num_unindexed_ops']}/{status['total_ops']}"
 
 
 def _extra_tiny_l2(start: int, count: int) -> list[Record]:
