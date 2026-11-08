@@ -615,6 +615,22 @@ def test_wait_compacted_on_single_node_sends_one_request(fake_client, inspected)
     assert clock.sleeps == [] and seen == []
 
 
+def test_a_later_not_implemented_answer_keeps_the_guard_off(fake_client, inspected):
+    clock, seen = Clock(), []
+    source = ChromaSource(fake_client, tenant="t", sleep=clock.sleep, clock=clock)
+    waiting = {"num_unindexed_ops": 5, "total_ops": 9}
+    fake_client.statuses = [waiting, waiting, None]
+    assert source.wait_compacted(inspected, lambda u, t: seen.append((u, t))) is None
+    assert fake_client.compaction_calls == [
+        "indexing_status",
+        "collection_by_name",
+        "indexing_status",
+        "collection_by_name",
+        "indexing_status",
+    ]
+    assert clock.sleeps == [5.0] and seen == [(5, 9)]
+
+
 def test_compaction_state_of_a_collection_created_again_names_inspect_force(
     source, fake_client, inspected
 ):
