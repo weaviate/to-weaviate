@@ -34,6 +34,8 @@ FORWARD_PATTERN="kubectl port-forward -n $NAMESPACE svc/rust-frontend-service"
 # read of the suite.
 QUERY_CPU_LIMIT=1000m
 QUERY_CPU_REQUEST=250m
+# At the dev values' 200m, one compaction run of 10,000 records took 60-120 s.
+COMPACTION_CPU_LIMIT=1000m
 WAIT_TIMEOUT=600
 PULL_GRACE=60
 POLL_INTERVAL=5
@@ -191,6 +193,7 @@ render() {
         --set rustSysdbService.replicaCount=0 \
         --set queryService.resources.limits.cpu="$QUERY_CPU_LIMIT" \
         --set queryService.resources.requests.cpu="$QUERY_CPU_REQUEST" \
+        --set compactionService.resources.limits.cpu="$COMPACTION_CPU_LIMIT" \
         --set-string rustFrontendService.image.repository=chromadb/rust-frontend-service-oss \
         --set-string rustFrontendService.image.tag="$CHROMA_COMMIT" \
         --set-string queryService.image.repository=chromadb/query-service \
