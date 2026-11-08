@@ -4,14 +4,20 @@ copy reads a collection in offset partitions, resumes at an offset, and finds
 a shift of the source by the ids at the end of each partition. That needs
 `get` to return the records in insertion order: a deletion moves each later
 record one offset earlier, and an addition goes last. On a distributed Chroma
-the case waits until each write is compacted, as the seed does.
+the first case waits until each write is compacted, as the seed does. The
+second case copies while distributed Chroma compacts, without that wait.
 """
 
+import pytest
 from chroma.seed import (
     ADD_BATCH,
+    BURST,
+    BURST_COUNT,
     ORDER,
     ORDER_COUNT,
     add_records,
+    burst_records,
+    collection_state,
     count,
     delete_collection,
     delete_records,
@@ -20,7 +26,7 @@ from chroma.seed import (
     page_ids,
     wait_indexed,
 )
-from conftest import chroma_kind
+from conftest import chroma_kind, run
 
 from to_weaviate.sources.chroma.client import CHROMA_MAX_PAGE
 
@@ -71,3 +77,37 @@ def test_get_pages_follow_the_insertion_order():
         ), f"{ORDER} on {kind} Chroma after the addition of {ADDED} records"
     finally:
         delete_collection(ORDER)
+
+
+@pytest.mark.skipif(
+    chroma_kind() != "distributed",
+    reason="needs ACCEPTANCE_CHROMA=distributed (the cluster leg of CI), whose "
+    f"compaction numbers records again; it is {chroma_kind()}",
+)
+def test_copy_during_compaction(tmp_path):
+    # A compaction run takes up to 10,000 records, and a run of more than
+    # 5,000 numbers them again in another order. copy starts right after the
+    # adds, without wait_indexed.
+    make_collection(BURST, burst_records(), ADD_BATCH)
+    try:
+        before = collection_state(BURST)
+        r = run(
+            ["inspect", "chroma", "--collection", BURST, "--sample-pages", "1"],
+            tmp_path,
+        )
+        assert r.exit_code == 0, r
+        r = run(["copy", "--parallelism", "8"], tmp_path)
+        assert r.exit_code == 0 and r.data["status"] == "success", r
+        r = run(["verify"], tmp_path)
+        assert "checks" in r.data, r
+        checks = {c["name"]: c["detail"] for c in r.data["checks"]}
+        state = (
+            f"{BURST} version and log_position: {before} before inspect, "
+            f"{collection_state(BURST)} after verify"
+        )
+        expected = f"source count {BURST_COUNT}, target count {BURST_COUNT}"
+        assert checks["count"] == expected, (checks, state)
+        assert checks["ids"] == "missing 0, extra 0", (checks, state)
+        assert r.exit_code == 0, r
+    finally:
+        delete_collection(BURST)

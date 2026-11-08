@@ -62,9 +62,11 @@ BULK = "bulk"
 BULK_COUNT = 50_000
 # Every collection that `seed` makes.
 SEEDED = (*COLLECTIONS, EDGE, BULK)
-# The collection of the order case of test_source_order.py, which makes it.
+# The collections of the cases of test_source_order.py, which make them.
 ORDER = "order"
 ORDER_COUNT = 1000
+BURST = "burst"
+BURST_COUNT = 12_000
 # A distributed Chroma compacts every 10 s, at most 10,000 records of a
 # collection per run (compaction_interval_sec and max_compaction_size of
 # rust/worker/chroma_config.yaml in the Chroma repository), so bulk needs five
@@ -344,6 +346,21 @@ def order_records(start: int, count: int) -> list[Record]:
     ]
 
 
+def burst_records() -> list[Record]:
+    """BURST_COUNT records of 16 dimensions for BURST."""
+    rng = random.Random(BURST_COUNT)
+    return [
+        Record(
+            id=f"burst-{i:05d}",
+            embedding=_vector(rng, 16),
+            document=f"Record {i} of the burst collection.",
+            metadata={"position": i},
+            uri=None,
+        )
+        for i in range(BURST_COUNT)
+    ]
+
+
 # Made-up secrets of the embedding function of openai-proxy. The tool must
 # neither store nor print them.
 PROXY_USER = "b8-proxy-user"
@@ -601,6 +618,19 @@ def page_ids(name: str, offset: int, limit: int) -> list[str]:
         found.raise_for_status()
         ids: list[str] = found.json()["ids"]
         return ids
+
+
+def collection_state(name: str) -> dict[str, Any]:
+    """The `version` and the `log_position` of the collection `name`.
+
+    A distributed Chroma raises both with each compaction run. A single-node
+    Chroma answers 0 for both.
+    """
+    with _test_server() as http:
+        found = http.get(f"/collections/{name}")
+        found.raise_for_status()
+        document = found.json()
+    return {key: document[key] for key in ("version", "log_position")}
 
 
 def records(name: str, limit: int = 10) -> list[Record]:

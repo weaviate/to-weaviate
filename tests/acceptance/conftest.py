@@ -123,6 +123,7 @@ SUITE_COLLECTIONS = [
     "C_1_leading_digit",
     "Class",
     "Bulk",
+    "Burst",
 ]
 
 
