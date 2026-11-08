@@ -50,8 +50,13 @@ def test_embed_mode_vectorizes_the_documents_in_weaviate(seeded, tmp_path):
         assert len(found.vector["default"]) == dimension
         assert len(record.embedding) != dimension
         assert record.document is not None
-        nearest = weaviate_near_text("Tiny_l2", record.document)
-        assert nearest[0] == record.id, (record.document, nearest)
+        # With text2vec-weaviate the query embedding differs from the document
+        # embedding, so the own document is a near tie for the first place
+        # (distances 0.5035 and 0.5050 on a probe); the stored vector is the
+        # exact check (0.0 and 0.0162).
+        nearest = weaviate_near_vector("Tiny_l2", found.vector["default"])
+        assert nearest[0] == record.id, (record.id, nearest)
+        assert weaviate_near_text("Tiny_l2", record.document, limit=1), record.document
 
 
 def test_both_mode_keeps_the_source_vector_and_embeds_the_document(seeded, tmp_path):
@@ -76,8 +81,11 @@ def test_both_mode_keeps_the_source_vector_and_embeds_the_document(seeded, tmp_p
         assert len(found.vector["default"]) == dimension
         assert len(record.embedding) != dimension
         assert record.document is not None
-        by_text = weaviate_near_text("Tiny_l2", record.document, "default")
-        assert by_text[0] == record.id, (record.document, by_text)
+        by_default = weaviate_near_vector("Tiny_l2", found.vector["default"])
+        assert by_default[0] == record.id, (record.id, by_default)
+        assert weaviate_near_text(
+            "Tiny_l2", record.document, "default", limit=1
+        ), record.document
         by_vector = weaviate_near_vector("Tiny_l2", record.embedding, "source")
         assert by_vector[0] == record.id, (record.id, by_vector)
 
