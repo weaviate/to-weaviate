@@ -669,9 +669,16 @@ and C-03, because no Chroma Cloud source exists.
   suffixes and the sidecar shape are 1.40.4 behavior (older servers accept
   more, so `check` refuses plans they would take). `tests/acceptance/
   weaviate-version` pins the CI version; a version bump reruns the suite.
-- `ASYNC_INDEXING=true`: the dynamic index (strict xfail) and the quantizer
-  update being a no-op. Manual check on such a server: `acc/vector_settings`
-  with the xfail removed.
+- A server without `ASYNC_INDEXING`: both CI legs run with it, as every
+  Weaviate Cloud instance does. Without it, the update of a trained
+  quantizer after the pages (R50) compresses the vectors at once, and
+  Weaviate refuses a `dynamic` index. Unit tests cover the tool's side:
+  `cmd::test_copy_enables_a_quantizer_that_needs_training_after_the_pages`,
+  `cmd::test_a_refused_quantizer_update_stops_copy_and_resumes_without_pages`
+  and `cmd::test_check_warns_that_a_dynamic_index_needs_async_indexing`.
+  The acceptance suite runs against such a server locally:
+  `ASYNC=0 make weaviate-up`, then
+  `WEAVIATE_ASYNC_INDEXING=false make acceptance`.
 - RBAC with a key that reads but cannot write: the CI action creates
   `admin-key` only. U-04 covers the error path with fakes. A live check
   needs `auth-config` in `ci.yml` (the local-k8s `rbac.yaml` example adds
