@@ -328,8 +328,8 @@ nodes with `REPLICATION_MINIMUM_FACTOR=3` and sets `ACCEPTANCE_NODES=3`.
 The cases of `tests/acceptance/chroma/test_cluster.py` run there only: they
 delete a Weaviate pod during `copy` and during `verify`, and copy at each
 consistency level. They skip when `ACCEPTANCE_NODES` is below 3.
-`tests/acceptance/chroma/test_chroma_restart.py` restarts the compose
-Chroma during a copy, on both legs and locally. Right after the
+`tests/acceptance/chroma/test_chroma_restart.py` stops the compose Chroma
+for 3 s during a copy, on both legs and locally. Right after the
 weaviate-local-k8s action, the job runs `tests/acceptance/port-forward.sh`.
 It replaces the action's `kubectl-relay` forwards on ports 8099 and 50099
 with `kubectl port-forward` processes that a loop starts again when they

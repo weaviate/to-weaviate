@@ -667,15 +667,16 @@ with the `count`, `ids` and `records` checks passed.
 
 *Implemented: `tests/acceptance/chroma/test_cluster.py::test_verify_passes_while_a_pod_is_deleted`. Coverage.*
 
-**A-23 A restart of Chroma during `copy`.** Level infra, risk R1, 30 s.
-Steps: `inspect chroma --collection resume --vectors both` with the
+**A-23 Chroma stopped and started during `copy`.** Level infra, risk R1,
+30 s. Steps: `inspect chroma --collection resume --vectors both` with the
 suite's vectorizer; `copy`; 2 s in, `docker compose -f
-tests/acceptance/chroma/docker-compose.yml restart`; the case waits until
-Chroma answers with the 8,000 records of `resume`; `verify`. Expected:
-`copy` exits 0 with `copied 8000, rejects 0, done`; 8,000 objects;
-`verify` exits 0. Runs on both CI legs and locally. Locally the restart
-stopped Chroma for about 0.3 s, so a page read does not always fall in
-that time.
+tests/acceptance/chroma/docker-compose.yml stop`, 3 s of wait, then
+`docker compose ... start`; the case waits until Chroma answers with the
+8,000 records of `resume`; `verify`. Expected: `copy` exits 0 with
+`copied 8000, rejects 0, done`; 8,000 objects; `verify` exits 0. Runs on
+both CI legs and locally. Locally Chroma answered no request for about
+3.7 s. The tool writes no event for a source retry, so the case cannot
+show that one ran.
 
 *Implemented: `tests/acceptance/chroma/test_chroma_restart.py::test_a_chroma_restart_during_copy_leaves_no_reject`. Coverage.*
 

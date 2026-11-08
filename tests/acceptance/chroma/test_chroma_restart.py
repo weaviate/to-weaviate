@@ -1,7 +1,10 @@
-"""A restart of the suite's Chroma during a copy.
+"""Chroma stopped and started again during a copy.
 
-The test restarts the container of tests/acceptance/chroma/docker-compose.yml,
-so it runs only where the suite owns that container.
+The test stops and starts the container of
+tests/acceptance/chroma/docker-compose.yml, so it runs only where the suite
+owns that container. A page read while Chroma is stopped goes through the
+source retry, but the tool writes no event for a retry, so the test cannot
+show that one ran.
 """
 
 import json
@@ -19,26 +22,27 @@ pytestmark = pytest.mark.infra
 
 TARGET = "Resume"
 COMPOSE_FILE = Path(__file__).with_name("docker-compose.yml")
-RESTART_AFTER_SECONDS = 2
-RESTART_TIMEOUT = 120
+STOP_AFTER_SECONDS = 2
+STOPPED_SECONDS = 3
+COMPOSE_TIMEOUT = 120
 READY_TIMEOUT = 60
 
 
-def _restart_chroma() -> None:
+def _compose(command: str) -> None:
     completed = subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "restart"],
+        ["docker", "compose", "-f", str(COMPOSE_FILE), command],
         capture_output=True,
         text=True,
-        timeout=RESTART_TIMEOUT,
+        timeout=COMPOSE_TIMEOUT,
         check=False,
     )
-    assert completed.returncode == 0, f"docker compose restart: {completed.stderr}"
+    assert completed.returncode == 0, f"docker compose {command}: {completed.stderr}"
 
 
 def _wait_for_chroma(total: int) -> None:
     """Wait until Chroma answers again and holds the `total` records of resume.
 
-    docker compose restart returns once the container runs, before the server
+    docker compose start returns once the container runs, before the server
     in it answers.
     """
     deadline = time.monotonic() + READY_TIMEOUT
@@ -48,40 +52,46 @@ def _wait_for_chroma(total: int) -> None:
         except httpx.HTTPError as exc:
             problem = f"{type(exc).__name__}: {exc}"
         else:
-            assert found == total, f"resume holds {found} of {total} after the restart"
+            assert found == total, f"resume holds {found} of {total} after the start"
             return
         if time.monotonic() > deadline:
             pytest.fail(
-                f"Chroma does not answer {READY_TIMEOUT} s after the restart: {problem}"
+                f"Chroma does not answer {READY_TIMEOUT} s after the start: {problem}"
             )
         time.sleep(1)
 
 
 def test_a_chroma_restart_during_copy_leaves_no_reject(seeded, tmp_path):
     # Both mode embeds every document, so the copy still runs when Chroma
-    # restarts.
+    # stops.
     args = ["--vectors", "both", "--vectorizer", enabled_vectorizer()]
     r = run(["inspect", "chroma", "--collection", "resume", *args], tmp_path)
     assert r.exit_code == 0, r
     total = count("resume")
     stdout = tmp_path / "copy.json"
     process = start(["copy"], tmp_path, stdout)
-    restarted = False
+    stopped = started = False
     try:
-        time.sleep(RESTART_AFTER_SECONDS)
+        time.sleep(STOP_AFTER_SECONDS)
         if process.poll() is not None:
             pytest.fail(
-                f"copy exited {process.returncode} within {RESTART_AFTER_SECONDS} s, "
-                "before the restart of Chroma:\n" + stdout.read_text(encoding="utf-8")
+                f"copy exited {process.returncode} within {STOP_AFTER_SECONDS} s, "
+                "before Chroma was stopped:\n" + stdout.read_text(encoding="utf-8")
             )
-        restarted = True
-        _restart_chroma()
+        stopped = True
+        _compose("stop")
+        time.sleep(STOPPED_SECONDS)
+        _compose("start")
+        started = True
         process.wait(timeout=COMMAND_TIMEOUT)
     finally:
         if process.poll() is None:
             process.kill()
             process.wait()
-        if restarted:
+        if stopped:
+            # The rest of the suite needs Chroma.
+            if not started:
+                _compose("start")
             _wait_for_chroma(total)
     text = stdout.read_text(encoding="utf-8")
     assert process.returncode == 0, f"copy exited {process.returncode}:\n{text}"
