@@ -4,7 +4,7 @@ LOCAL_K8S ?= ../weaviate-local-k8s
 export LOCAL_K8S
 CHROMA_COMPOSE := tests/acceptance/chroma/docker-compose.yml
 
-.PHONY: help acceptance-up acceptance acceptance-down chroma-up chroma-down weaviate-up weaviate-down
+.PHONY: help acceptance-up acceptance acceptance-down chroma-up chroma-down weaviate-up weaviate-down acceptance-cloud
 .DEFAULT_GOAL := help
 
 help:
@@ -15,6 +15,7 @@ help:
 	@echo "make chroma-down      stop that Chroma"
 	@echo "make weaviate-up      start Weaviate and text2vec-transformers in Docker on ports 8099 and 50099 (ASYNC=0: no async indexing)"
 	@echo "make weaviate-down    remove those containers and their network"
+	@echo "make acceptance-cloud run the API-level tests against the Weaviate Cloud cluster at WEAVIATE_URL"
 
 # tests/acceptance/cluster.sh holds the checks and the steps of both targets.
 acceptance-up:
@@ -44,3 +45,21 @@ weaviate-up:
 
 weaviate-down:
 	sh tests/acceptance/weaviate-docker.sh down
+
+# WEAVIATE_URL and WEAVIATE_API_KEY come from the environment only. A
+# variable on the make command line also reaches every child process in
+# MAKEFLAGS. The recipe reads them as shell variables, so make never prints
+# a value. The tool reads the empty WEAVIATE_GRPC_URL as unset.
+acceptance-cloud: export ACCEPTANCE_TARGET := cloud
+acceptance-cloud: export CHROMA_URL := http://localhost:8001
+acceptance-cloud: export WEAVIATE_ASYNC_INDEXING := true
+acceptance-cloud: export ACCEPTANCE_VECTORIZER := text2vec-weaviate
+acceptance-cloud: export WEAVIATE_GRPC_URL :=
+acceptance-cloud:
+	@if [ -z "$$WEAVIATE_URL" ] || [ -z "$$WEAVIATE_API_KEY" ] \
+		|| [ "$(origin WEAVIATE_URL)" = "command line" ] \
+		|| [ "$(origin WEAVIATE_API_KEY)" = "command line" ]; then \
+		echo "set WEAVIATE_URL and WEAVIATE_API_KEY in the environment (not on the make command line)" >&2; \
+		exit 2; \
+	fi
+	pytest tests/acceptance -v -m "not infra"

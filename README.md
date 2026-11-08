@@ -410,6 +410,57 @@ indexing. Against that server, run the suite with
 `make weaviate-down` removes the two containers and the network. It
 skips a name that does not exist.
 
+#### Run the API-level suite against a Weaviate Cloud cluster
+
+`make acceptance-cloud` runs the API-level tests against a Weaviate Cloud
+cluster. The source stays the local test Chroma, so start it first with
+`make chroma-up`. The target runs `pytest tests/acceptance -v -m "not infra"`
+with these variables:
+
+| Variable | Value |
+|---|---|
+| `ACCEPTANCE_TARGET` | `cloud` |
+| `CHROMA_URL` | `http://localhost:8001` |
+| `WEAVIATE_ASYNC_INDEXING` | `true` |
+| `ACCEPTANCE_VECTORIZER` | `text2vec-weaviate` |
+| `WEAVIATE_GRPC_URL` | empty, so the tool connects to port 443 of the cluster |
+
+It reads `WEAVIATE_URL` and `WEAVIATE_API_KEY` from the environment.
+`WEAVIATE_URL` is `https://` followed by the cluster host, which ends with
+`.weaviate.cloud` or `.weaviate.network`. `WEAVIATE_API_KEY` is an admin
+key of the cluster. Export both, or put the two `export` lines in a shell
+file outside the repository and `source` it:
+
+```bash
+make chroma-up
+source ~/weaviate-cloud-test.sh   # export WEAVIATE_URL=... and export WEAVIATE_API_KEY=...
+source .venv/bin/activate
+make acceptance-cloud
+```
+
+Never set them on the make command line. A value there stays in the shell
+history, and make passes it to every child process in `MAKEFLAGS`. When
+either variable is empty or set on the make command line, the target
+prints `set WEAVIATE_URL and WEAVIATE_API_KEY in the environment (not on
+the make command line)` and exits 2. It prints no value.
+
+Use a dedicated serverless cluster. Before and after each test, the suite
+deletes the collections that `SUITE_COLLECTIONS` in
+`tests/acceptance/conftest.py` lists. It fails before its first test when
+the cluster holds a collection that `SUITE_COLLECTIONS` does not list. A
+sandbox cluster refuses `hnsw`, `flat`, `dynamic` and the quantizer
+settings, so those cases fail there with the server's message.
+`/v1/meta` of the cluster must list `text2vec-weaviate`. When it does not,
+the tests that embed documents and the module check of `test_check.py`
+fail.
+
+Every API-level test runs. The target deselects the `infra` tests,
+because docker and kubectl reach only the local servers. The
+compression of the tenants by a trained quantizer is an expected failure,
+as on every server with `ASYNC_INDEXING`. When `WEAVIATE_URL` does not use
+`https` or names another host, every test skips and pytest exits 0.
+`PYTEST_ADDOPTS=-rs make acceptance-cloud` prints the reason.
+
 ### Cloud suite and releases
 
 `tests/cloud` runs the installed `to-weaviate` command against Chroma Cloud
