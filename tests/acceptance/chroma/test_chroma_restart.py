@@ -2,9 +2,10 @@
 
 The test stops and starts the container of
 tests/acceptance/chroma/docker-compose.yml, so it runs only where the suite
-owns that container. A page read while Chroma is stopped goes through the
-source retry, but the tool writes no event for a retry, so the test cannot
-show that one ran.
+owns that container. It skips on a distributed Chroma, where no such
+container runs. A page read while Chroma is stopped goes through the source
+retry, but the tool writes no event for a retry, so the test cannot show that
+one ran.
 """
 
 import json
@@ -15,10 +16,17 @@ from pathlib import Path
 import httpx
 import pytest
 from chroma.seed import count
-from conftest import enabled_vectorizer, run, start, weaviate_count
+from conftest import chroma_kind, enabled_vectorizer, run, start, weaviate_count
 from e2e import COMMAND_TIMEOUT
 
-pytestmark = pytest.mark.infra
+pytestmark = [
+    pytest.mark.infra,
+    pytest.mark.skipif(
+        chroma_kind() == "distributed",
+        reason="stops the compose Chroma, which does not run when "
+        "ACCEPTANCE_CHROMA is distributed (the cluster leg of CI)",
+    ),
+]
 
 TARGET = "Resume"
 COMPOSE_FILE = Path(__file__).with_name("docker-compose.yml")

@@ -1,18 +1,20 @@
 """Seed the local Chroma test server with the collections of the acceptance suite.
 
 Run it as a script, or call `seed()`. Each run deletes and recreates the
-collections, so every run sends the same data. `add_to_tiny_l2` and
-`delete_from_tiny_l2` add records to tiny.l2 and delete them again;
-`restore_tiny_l2` makes tiny.l2 again from records read before. Every
-function here that sends a request reads CHROMA_URL and runs only when it is
-TEST_URL.
+collections, so every run sends the same data. On a distributed Chroma the
+suite then calls `wait_indexed`. `add_to_tiny_l2` and `delete_from_tiny_l2`
+add records to tiny.l2 and delete them again; `restore_tiny_l2` makes tiny.l2
+again from records read before. Every function here that sends a request
+reads CHROMA_URL and runs only when it is TEST_URL.
 """
 
 import math
 import os
 import random
 import sys
+import time
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -56,6 +58,17 @@ EDGE = "edge"
 # test that copies every collection does not copy it.
 BULK = "bulk"
 BULK_COUNT = 50_000
+# Every collection that `seed` makes.
+SEEDED = (*COLLECTIONS, EDGE, BULK)
+# A distributed Chroma compacts every 10 s, at most 10,000 records of a
+# collection per run (compaction_interval_sec and max_compaction_size of
+# rust/worker/chroma_config.yaml in the Chroma repository), so bulk needs five
+# runs. Its frontend keeps a collection, with the log position that
+# indexing_status reads, for 60 s (cache_ttl_secs of
+# rust/frontend/sample_configs/distributed.yaml), so the status shows a
+# finished run up to 60 s late.
+INDEXING_TIMEOUT = 300.0
+INDEXING_POLL = 2.0
 CATEGORIES = ("guide", "reference", "tutorial")
 TAGS = ("red", "green", "blue", "small", "large")
 
@@ -412,7 +425,7 @@ def _collection_id(http: httpx.Client, name: str) -> str:
 
 
 def seed() -> None:
-    """Delete and recreate the COLLECTIONS, EDGE and BULK on the test server."""
+    """Delete and recreate the SEEDED collections on the test server."""
     rng = random.Random(0)
     with _test_server() as http:
         _recreate(http, "docs-cosine", "cosine", docs_cosine(rng))
@@ -431,6 +444,48 @@ def seed() -> None:
         for name in RENAMED_COLLECTIONS:
             _recreate(http, name, "cosine", renamed(rng, name))
         _recreate(http, BULK, "cosine", bulk(rng))
+
+
+def wait_indexed(names: Iterable[str], timeout: float = INDEXING_TIMEOUT) -> None:
+    """Wait until distributed Chroma has compacted every write to collections `names`.
+
+    Distributed Chroma reads a write from its log until a compaction run
+    moves it into the segments of the collection. A run of more than 5,000
+    records numbers them again in another order (max_partition_size of the
+    worker config), so pages read before and after such a run can skip or
+    repeat records. indexing_status counts the writes that no run has
+    compacted. It reads the collection from the frontend's cache, as `get`
+    does, so at 0 `get` reads the compacted collection, in one order until
+    the next write. A single-node Chroma answers indexing_status with HTTP
+    500, so the suite calls this on distributed Chroma only. After `timeout`
+    s, raises TimeoutError with the collections that still have such writes.
+    """
+    with _test_server() as http:
+        ids = {name: _collection_id(http, name) for name in names}
+        deadline = time.monotonic() + timeout
+        while True:
+            pending = {}
+            for name, collection_id in ids.items():
+                found = http.get(f"/collections/{collection_id}/indexing_status")
+                found.raise_for_status()
+                status = found.json()
+                if status["num_unindexed_ops"] > 0:
+                    pending[name] = status
+            if not pending:
+                return
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    "distributed Chroma has not compacted every write after "
+                    f"{timeout:.0f} s: "
+                    + ", ".join(
+                        f"{name} has {s['num_unindexed_ops']} of {s['total_ops']} "
+                        "operations not compacted"
+                        for name, s in pending.items()
+                    )
+                )
+            # A compacted collection stays compacted while nothing writes.
+            ids = {name: ids[name] for name in pending}
+            time.sleep(INDEXING_POLL)
 
 
 def _extra_tiny_l2(start: int, count: int) -> list[Record]:
@@ -524,4 +579,4 @@ if __name__ == "__main__":
         seed()
     except (ValueError, httpx.HTTPError) as exc:
         sys.exit(f"seed.py: {exc}")
-    print(f"Seeded {', '.join([*COLLECTIONS, EDGE, BULK])}.")
+    print(f"Seeded {', '.join(SEEDED)}.")

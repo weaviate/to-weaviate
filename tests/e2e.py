@@ -41,6 +41,11 @@ VECTORIZER_VARIABLE = "ACCEPTANCE_VECTORIZER"
 DEFAULT_VECTORIZER = "text2vec-transformers"
 # The number of Weaviate nodes of the target.
 NODES_VARIABLE = "ACCEPTANCE_NODES"
+# The Chroma of the suite: "single", one server process as in
+# tests/acceptance/chroma/docker-compose.yml, or "distributed", the
+# open-source distributed Chroma that tests/acceptance/chroma-k8s.sh starts.
+CHROMA_VARIABLE = "ACCEPTANCE_CHROMA"
+CHROMA_KINDS = ("single", "distributed")
 LOCAL_ENDPOINTS = {
     "CHROMA_URL": "http://localhost:8001",
     "WEAVIATE_URL": "http://localhost:8099",
@@ -211,6 +216,17 @@ def nodes() -> int:
     if not value.isdecimal() or int(value) < 1:
         raise ValueError(f"{NODES_VARIABLE} is not a whole number of at least 1")
     return int(value)
+
+
+def chroma_kind() -> str:
+    """The value of CHROMA_VARIABLE in lower case; unset or empty is "single".
+
+    A value outside CHROMA_KINDS raises ValueError.
+    """
+    kind = _variable(CHROMA_VARIABLE).lower() or "single"
+    if kind not in CHROMA_KINDS:
+        raise ValueError(f"{CHROMA_VARIABLE} is neither single nor distributed")
+    return kind
 
 
 def endpoint_problems() -> list[str]:

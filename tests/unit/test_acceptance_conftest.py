@@ -24,6 +24,7 @@ VARIABLES = (
     "ACCEPTANCE_TARGET",
     "ACCEPTANCE_VECTORIZER",
     "ACCEPTANCE_NODES",
+    "ACCEPTANCE_CHROMA",
     "CHROMA_URL",
     "WEAVIATE_URL",
     "WEAVIATE_GRPC_URL",
@@ -83,6 +84,32 @@ def test_nodes_refuses_a_value_that_is_not_a_count(env, value):
     with pytest.raises(ValueError) as error:
         e2e.nodes()
     assert str(error.value) == "ACCEPTANCE_NODES is not a whole number of at least 1"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, "single"),
+        ("", "single"),
+        ("single", "single"),
+        ("distributed", "distributed"),
+        (" Distributed ", "distributed"),
+    ],
+)
+def test_chroma_kind_is_single_unless_the_variable_names_distributed(
+    env, value, expected
+):
+    if value is not None:
+        env({"ACCEPTANCE_CHROMA": value})
+    assert e2e.chroma_kind() == expected
+
+
+@pytest.mark.parametrize("value", ["cloud", "local", "multi"])
+def test_chroma_kind_refuses_another_value(env, value):
+    env({"ACCEPTANCE_CHROMA": value})
+    with pytest.raises(ValueError) as error:
+        e2e.chroma_kind()
+    assert str(error.value) == "ACCEPTANCE_CHROMA is neither single nor distributed"
 
 
 @pytest.mark.parametrize("target", [{}, {"ACCEPTANCE_TARGET": "local"}])
