@@ -492,6 +492,35 @@ def _unmapped_findings(
     ]
 
 
+def _quantizer_training_findings(entry: CollectionPlan) -> list[Finding]:
+    """A trained quantizer that needs more vectors than the source has.
+
+    Weaviate trains such a quantizer on a shard once the shard holds
+    training_limit vectors. With ASYNC_INDEXING, enabling it after the copy
+    does not compress a smaller shard.
+    """
+    out = []
+    for vector in entry.target.vectors:
+        quantizer = vector.index.quantizer
+        if not quantizer.needs_training():
+            continue
+        limit = quantizer.training_vectors()
+        if entry.source.count >= limit:
+            continue
+        out.append(
+            Finding(
+                "quantizer_training",
+                entry.target.name,
+                f"vector {vector.name}: Weaviate trains the {quantizer.type} "
+                f"quantizer of a shard once the shard holds {limit} vectors, and "
+                f"the source has {entry.source.count} records; with "
+                "ASYNC_INDEXING on the server the vectors stay uncompressed. Set "
+                "training_limit below the count of a shard.",
+            )
+        )
+    return out
+
+
 def _no_vector_findings(entry: CollectionPlan) -> list[Finding]:
     """A kept vector of a source that holds records but no vector."""
     if not has_no_vectors(entry.source):
@@ -692,6 +721,7 @@ def plan_findings(
         errors.extend(_no_vector_findings(entry))
         errors.extend(_keep_model_findings(entry, vectorizer_for))
         errors.extend(_unmapped_findings(entry, inspected))
+        warnings.extend(_quantizer_training_findings(entry))
         for prop in entry.target.properties:
             suffix = reserved_suffix(prop.name)
             if suffix is not None:

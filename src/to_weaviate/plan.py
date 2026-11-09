@@ -70,6 +70,9 @@ IGNORED_FIELDS: dict[str, dict[str, tuple[str, ...]]] = {
 # when a config update enables it on an index that holds vectors. With
 # ASYNC_INDEXING that update changes nothing.
 TRAINED_QUANTIZERS = ("sq", "pq")
+# The vectors a shard needs before Weaviate 1.40.4 trains the quantizer, when
+# the plan sets no training_limit (entities/vectorindex/hnsw/*_config.go).
+DEFAULT_TRAINING_LIMITS = {"sq": 100000, "pq": 100000, "rq": 10000}
 # The distances that Weaviate 1.40.4 accepts for an index type that does not
 # take every distance.
 INDEX_DISTANCES: dict[str, tuple[str, ...]] = {"hfresh": ("cosine", "l2-squared")}
@@ -130,6 +133,10 @@ class QuantizerPlan(_Model):
         return self.type in TRAINED_QUANTIZERS or (
             self.type == "rq" and bool(self.centering)
         )
+
+    def training_vectors(self) -> int:
+        """The vectors a shard needs before Weaviate trains this quantizer."""
+        return self.training_limit or DEFAULT_TRAINING_LIMITS[self.type]
 
 
 class IndexPlan(_Model):
