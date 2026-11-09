@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 
 from chroma.seed import (
@@ -67,7 +68,7 @@ def test_text_mode_prints_lines_and_the_error_on_stderr(seeded, tmp_path):
     check = run_text(["check"], tmp_path, env={"WEAVIATE_API_KEY": "made-up-key-b9"})
     assert check.returncode == 3, check
     # In text mode the progress line goes to stdout and the error to stderr.
-    assert check.stdout == "Checking the target at http://localhost:8099\n"
+    assert check.stdout == f"Checking the target at {os.environ['WEAVIATE_URL']}\n"
     assert check.stderr.splitlines()[-2:] == [
         "Error: Weaviate refused the request: the API key is missing or wrong.",
         "Hint: Check WEAVIATE_API_KEY in the environment or in .env.",

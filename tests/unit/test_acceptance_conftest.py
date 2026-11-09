@@ -71,11 +71,79 @@ def test_vectorizer_is_the_local_module_unless_the_variable_names_another(
     assert e2e.vectorizer() == expected
 
 
-@pytest.mark.parametrize(("value", "expected"), [(None, 1), ("", 1), ("3", 3)])
-def test_nodes_is_one_unless_the_variable_names_a_count(env, value, expected):
+class FakeServer:
+    """Stands for the client: cluster.nodes() lists `count` nodes and counts calls."""
+
+    def __init__(self, count):
+        self.calls = 0
+        self.cluster = self
+        self._count = count
+
+    def nodes(self):
+        self.calls += 1
+        return [object()] * self._count
+
+
+@pytest.fixture
+def server(monkeypatch):
+    """Returns a function that installs a fake server of the given node count."""
+    monkeypatch.setattr(e2e, "_SERVER_NODES", None)
+
+    def install(count):
+        fake = FakeServer(count)
+        monkeypatch.setattr(e2e, "_weaviate", lambda: fake)
+        return fake
+
+    return install
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_nodes_asks_the_server_when_the_variable_is_unset(env, server, value):
     if value is not None:
         env({"ACCEPTANCE_NODES": value})
-    assert e2e.nodes() == expected
+    fake = server(3)
+    assert e2e.nodes() == 3
+    assert e2e.nodes() == 3
+    assert fake.calls == 1
+
+
+def test_nodes_is_the_variable_when_it_is_set(env, server):
+    env({"ACCEPTANCE_NODES": "3"})
+    fake = server(1)
+    assert e2e.nodes() == 3
+    assert fake.calls == 0
+
+
+@pytest.mark.parametrize("value", ["0", "three"])
+def test_a_malformed_node_count_is_a_problem(env, server, value):
+    env(LOCAL)
+    env({"ACCEPTANCE_NODES": value})
+    fake = server(3)
+    assert e2e.endpoint_problems() == [
+        "ACCEPTANCE_NODES is not a whole number of at least 1"
+    ]
+    assert fake.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("variable", "count", "problems"),
+    [
+        ("3", 1, ["ACCEPTANCE_NODES is 3 but the cluster has 1 node"]),
+        ("1", 3, ["ACCEPTANCE_NODES is 1 but the cluster has 3 nodes"]),
+        ("3", 3, []),
+        (None, 3, []),
+    ],
+)
+@pytest.mark.parametrize("target", ["local", "cloud"])
+def test_a_node_count_that_differs_from_the_server_is_a_problem(
+    env, server, target, variable, count, problems
+):
+    env(LOCAL if target == "local" else {**CLOUD, "CHROMA_URL": LOCAL_CHROMA})
+    env({"ACCEPTANCE_TARGET": target})
+    if variable is not None:
+        env({"ACCEPTANCE_NODES": variable})
+    server(count)
+    assert e2e.endpoint_problems() == problems
 
 
 @pytest.mark.parametrize("value", ["0", "three", "-1"])

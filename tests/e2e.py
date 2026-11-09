@@ -55,6 +55,7 @@ LOCAL_ENDPOINTS = {
 CLOUD_HOST_SUFFIXES = (".weaviate.cloud", ".weaviate.network")
 
 _client: weaviate.WeaviateClient | None = None
+_SERVER_NODES: int | None = None
 # The secret values of the environments that `run` and `start` gave a command.
 _secrets: set[str] = set()
 
@@ -206,16 +207,28 @@ def vectorizer() -> str:
 
 
 def nodes() -> int:
-    """The node count that NODES_VARIABLE names; unset or empty is 1.
+    """The node count of the target.
 
-    A value that is not a whole number of at least 1 raises ValueError.
+    The count comes from the cluster unless NODES_VARIABLE sets it. The
+    variable is for a decision at collection time (test_cluster.py skips
+    below 3) and for CI, where it documents the leg; endpoint_problems
+    reports a value that differs from the cluster. A value that is not a
+    whole number of at least 1 raises ValueError.
     """
     value = _variable(NODES_VARIABLE)
     if not value:
-        return 1
+        return _server_nodes()
     if not value.isdecimal() or int(value) < 1:
         raise ValueError(f"{NODES_VARIABLE} is not a whole number of at least 1")
     return int(value)
+
+
+def _server_nodes() -> int:
+    """The number of nodes that the cluster lists; the first call asks it."""
+    global _SERVER_NODES
+    if _SERVER_NODES is None:
+        _SERVER_NODES = len(_weaviate().cluster.nodes())
+    return _SERVER_NODES
 
 
 def chroma_kind() -> str:
@@ -237,10 +250,29 @@ def endpoint_problems() -> list[str]:
     value from the environment appears in the text.
     """
     if target() == "local":
-        return _local_problems()
+        return _with_nodes_problems(_local_problems())
     if target() == "cloud":
-        return _cloud_problems()
+        return _with_nodes_problems(_cloud_problems())
     return [f"{TARGET_VARIABLE} is neither local nor cloud"]
+
+
+def _with_nodes_problems(problems: list[str]) -> list[str]:
+    # The node check connects, so it waits until the endpoints pass their rules.
+    return problems or _nodes_problems()
+
+
+def _nodes_problems() -> list[str]:
+    if not _variable(NODES_VARIABLE):
+        return []
+    try:
+        value = nodes()
+    except ValueError as error:
+        return [str(error)]
+    count = _server_nodes()
+    if value == count:
+        return []
+    plural = "s" if count != 1 else ""
+    return [f"{NODES_VARIABLE} is {value} but the cluster has {count} node{plural}"]
 
 
 def _local_problems() -> list[str]:

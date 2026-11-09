@@ -1,8 +1,8 @@
 """Cases that need a Weaviate cluster of 3 nodes with replication factor 3.
 
 Two of them delete a pod with kubectl. They run on the cluster leg of CI,
-where ACCEPTANCE_NODES and REPLICATION_MINIMUM_FACTOR are 3, and skip
-elsewhere.
+where REPLICATION_MINIMUM_FACTOR is 3, and skip on a cluster of fewer than
+3 nodes.
 """
 
 import json
@@ -27,14 +27,20 @@ from e2e import COMMAND_TIMEOUT, close_weaviate
 from to_weaviate.settings import weaviate_settings
 from to_weaviate.target.connect import connect
 
-pytestmark = [
-    pytest.mark.infra,
-    pytest.mark.skipif(
-        nodes() < 3,
-        reason="needs ACCEPTANCE_NODES of at least 3 (the cluster leg of CI); "
-        f"it is {nodes()}",
-    ),
-]
+pytestmark = pytest.mark.infra
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _needs_three_nodes(_test_endpoints: None) -> None:
+    # A fixture, not a module-level skipif: nodes() connects to the target,
+    # which only the session fixture _test_endpoints may allow.
+    count = nodes()
+    if count < 3:
+        pytest.skip(
+            "needs a Weaviate cluster of at least 3 nodes (the cluster's count, "
+            f"or ACCEPTANCE_NODES); it has {count}"
+        )
+
 
 TARGET = "Resume"
 # The REPLICATION_MINIMUM_FACTOR of the cluster leg.
