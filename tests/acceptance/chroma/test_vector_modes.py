@@ -8,6 +8,7 @@ from conftest import (
     weaviate_config,
     weaviate_near_text,
     weaviate_near_vector,
+    weaviate_wait_indexed,
 )
 
 MODULE = "text2vec-transformers"
@@ -39,6 +40,7 @@ def test_embed_mode_vectorizes_the_documents_in_weaviate(seeded, tmp_path):
     vectors = weaviate_config("Tiny_l2").vector_config
     assert list(vectors) == ["default"]
     assert vectors["default"].vectorizer.vectorizer.value == MODULE
+    weaviate_wait_indexed("Tiny_l2")
     for record in records("tiny.l2", limit=3):
         found = weaviate_by_source_id("Tiny_l2", record.id)
         assert found is not None
@@ -58,6 +60,7 @@ def test_both_mode_keeps_the_source_vector_and_embeds_the_document(seeded, tmp_p
     assert vectors["default"].vectorizer.vectorizer.value == MODULE
     assert vectors["source"].vectorizer.vectorizer.value == "none"
     assert vectors["source"].vector_index_config.distance_metric.value == "l2-squared"
+    weaviate_wait_indexed("Tiny_l2")
     for record in records("tiny.l2", limit=3):
         found = weaviate_by_source_id("Tiny_l2", record.id)
         assert found is not None
@@ -90,5 +93,6 @@ def test_both_mode_keeps_the_source_vector_of_a_record_without_a_document(
         found = weaviate_by_source_id("Docs_cosine", record.id)
         assert found is not None and sorted(found.vector) == ["source"], record.id
     first = without[0]
+    weaviate_wait_indexed("Docs_cosine")
     by_vector = weaviate_near_vector("Docs_cosine", first.embedding, "source")
     assert by_vector[0] == first.id, (first.id, by_vector)
