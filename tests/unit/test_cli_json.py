@@ -29,7 +29,12 @@ from to_weaviate.plan import load_plan
 from to_weaviate.sources.chroma.client import ChromaError
 
 COMMANDS = [["inspect", "chroma"], ["check"], ["copy"], ["status"]]
-PROGRESS = {"inspect": "Inspecting", "check": "Checking", "copy": "Copying"}
+PROGRESS = {
+    "inspect": "Inspecting",
+    "check": "Checking",
+    "copy": "Copying",
+    "verify": "Verifying",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -48,7 +53,7 @@ def leaf_commands(command: Any, path: tuple[str, ...] = ()) -> Iterator[Any]:
 
 def test_every_command_has_a_json_option():
     commands = dict(leaf_commands(typer.main.get_command(app)))
-    assert set(commands) >= {"inspect chroma", "check", "copy", "status"}
+    assert set(commands) >= {"inspect chroma", "check", "copy", "status", "verify"}
     missing = [
         name
         for name, command in commands.items()
@@ -68,12 +73,14 @@ def test_every_command_has_a_dir_option():
 
 
 @pytest.mark.parametrize(
-    "cmd", [["inspect", "chroma"], ["check"], ["copy"], ["status"]]
+    "cmd", [["inspect", "chroma"], ["check"], ["copy"], ["status"], ["verify"]]
 )
 def test_json_stdout_is_one_document(cmd):
     fakes = FakeFactories(FakeSource(cli_records(10)))
     if cmd[0] != "inspect":
         assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    if cmd[0] == "verify":
+        assert invoke(fakes, "copy").exit_code == 0
     r = invoke(fakes, *cmd, "--json")
     assert r.exit_code == 0, r.output
     assert json.loads(r.stdout)["status"] == "success"
@@ -154,10 +161,12 @@ def test_no_secret_in_any_output(tmp_path):
         (["check"], 0),
         (["copy"], 1),
         (["status"], 0),
+        (["verify"], 1),
         (["inspect", "chroma", "--force", "--json", *embed], 0),
         (["check", "--json"], 0),
         (["copy", "--json"], 1),
         (["status", "--json"], 0),
+        (["verify", "--json"], 1),
     ):
         r = invoke(fakes, *args, **env)
         assert r.exit_code == exit_code, r.output
@@ -437,7 +446,7 @@ def test_source_errors_map_to_codes(error, code, named):
         ),
     ],
 )
-@pytest.mark.parametrize("cmd", ["check", "copy"])
+@pytest.mark.parametrize("cmd", ["check", "copy", "verify"])
 def test_target_errors_map_to_codes(error, code, named, cmd):
     fakes = FakeFactories(FakeSource(cli_records(10)))
     assert invoke(fakes, "inspect", "chroma").exit_code == 0
@@ -477,7 +486,7 @@ def test_copy_refuses_an_invalid_vectorizer_before_connecting():
     assert "colour" in d["errors"][0]["message"]
 
 
-@pytest.mark.parametrize("cmd", ["check", "copy", "status"])
+@pytest.mark.parametrize("cmd", ["check", "copy", "status", "verify"])
 def test_missing_plan_is_a_usage_error(cmd):
     r = invoke(FakeFactories(FakeSource(cli_records(10))), cmd, "--json")
     assert r.exit_code == 2
@@ -486,7 +495,7 @@ def test_missing_plan_is_a_usage_error(cmd):
 
 
 @pytest.mark.parametrize("content", ["collections: [", "version: 1\n", ""])
-@pytest.mark.parametrize("cmd", ["check", "copy", "status"])
+@pytest.mark.parametrize("cmd", ["check", "copy", "status", "verify"])
 def test_invalid_plan_is_reported(tmp_path, content, cmd):
     fakes = FakeFactories(FakeSource(cli_records(10)))
     assert invoke(fakes, "inspect", "chroma").exit_code == 0

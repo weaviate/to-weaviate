@@ -3,9 +3,10 @@ import random
 import threading
 import time
 from collections import Counter
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import replace
-from typing import Any, ClassVar, Literal
+from types import SimpleNamespace
+from typing import Any, ClassVar, Literal, NoReturn
 
 import typer
 from typer.testing import CliRunner, Result
@@ -198,11 +199,38 @@ class FakeSource:
         return matches[:limit]
 
 
+class FakeRpcError(Exception):
+    """Stands in for grpc.RpcError: `code()` returns an object with the status name."""
+
+    def __init__(self, status: str) -> None:
+        super().__init__(status)
+        self.status = status
+
+    def code(self) -> SimpleNamespace:
+        return SimpleNamespace(name=self.status)
+
+
+def raise_grpc_failure(status: str, error: Callable[[str], Exception]) -> NoReturn:
+    """Raise `error` inside the except block of a FakeRpcError, as the client does.
+
+    The FakeRpcError becomes the `__context__` of the raised error.
+    """
+    try:
+        raise FakeRpcError(status)
+    except FakeRpcError:
+        raise error(f"fake gRPC failure {status}")  # noqa: B904
+
+
+def _source_id(obj: TargetObject) -> str:
+    return str(obj.properties.get("source_id", obj.uuid))
+
+
 class FakeWriter:
     """Writer that keeps the objects in memory. Safe to call from several threads.
 
-    The call numbered `fail_on_call` (1-based) stores its objects and then
-    raises RuntimeError, like a write whose response was lost.
+    `stored` holds the objects by (target name, tenant), then by uuid. The
+    call numbered `fail_on_call` (1-based) stores its objects and then raises
+    RuntimeError, like a write whose response was lost.
     """
 
     def __init__(
@@ -210,25 +238,79 @@ class FakeWriter:
     ) -> None:
         self.fail_on_call = fail_on_call
         self.reject_ids = set(reject_ids)
-        self.objects: dict[str, TargetObject] = {}
+        self.stored: dict[tuple[str, str | None], dict[str, TargetObject]] = {}
         self.writes_per_uuid: Counter[str] = Counter()
         self.calls = 0
         self._lock = threading.Lock()
 
+    @property
+    def objects(self) -> dict[str, TargetObject]:
+        """Every stored object by uuid, over all collections and tenants."""
+        return {u: o for place in self.stored.values() for u, o in place.items()}
+
     def write(self, entry: CollectionPlan, objects: list[TargetObject]) -> list[Reject]:
         with self._lock:
             self.calls += 1
+            place = self.stored.setdefault((entry.target.name, entry.target.tenant), {})
             rejects: list[Reject] = []
             for obj in objects:
-                source_id = str(obj.properties.get("source_id", obj.uuid))
+                source_id = _source_id(obj)
                 if source_id in self.reject_ids:
                     rejects.append(Reject(source_id, "rejected by fake"))
                     continue
-                self.objects[obj.uuid] = obj
+                place[obj.uuid] = obj
                 self.writes_per_uuid[obj.uuid] += 1
             if self.calls == self.fail_on_call:
                 raise RuntimeError(f"fake write failure on call {self.calls}")
             return rejects
+
+
+class FakeReader:
+    """TargetReader over a FakeWriter's objects of one collection and tenant."""
+
+    def __init__(self, writer: FakeWriter) -> None:
+        self.writer = writer
+
+    def _objects(self, entry: CollectionPlan) -> dict[str, TargetObject]:
+        return self.writer.stored.get((entry.target.name, entry.target.tenant), {})
+
+    def exists(self, entry: CollectionPlan) -> bool:
+        """A collection or a tenant exists once a write named it."""
+        name, tenant = entry.target.name, entry.target.tenant
+        if tenant:
+            return (name, tenant) in self.writer.stored
+        return any(stored_name == name for stored_name, _ in self.writer.stored)
+
+    def count(self, entry: CollectionPlan) -> int:
+        return len(self._objects(entry))
+
+    def fetch(self, entry: CollectionPlan, uuids: list[str]) -> dict[str, TargetObject]:
+        objects = self._objects(entry)
+        return {u: objects[u] for u in uuids if u in objects}
+
+    def near_vector(
+        self, entry: CollectionPlan, vector: list[float], limit: int
+    ) -> list[str]:
+        kept = next(v for v in entry.target.vectors if v.mode == "keep")
+        scored = [
+            (_distance(kept.distance, vector, obj.vectors[kept.name]), _source_id(obj))
+            for obj in self._objects(entry).values()
+        ]
+        return [source_id for _, source_id in sorted(scored)[:limit]]
+
+    def filter_equal(
+        self, entry: CollectionPlan, prop: str, value: Any, limit: int
+    ) -> list[str]:
+        matches = [
+            _source_id(obj)
+            for obj in self._objects(entry).values()
+            if obj.properties.get(prop) == value
+        ]
+        return matches[:limit]
+
+    def source_ids(self, entry: CollectionPlan) -> Iterator[tuple[str, str]]:
+        for obj in list(self._objects(entry).values()):
+            yield obj.uuid, _source_id(obj)
 
 
 class FakeSchema:
@@ -273,7 +355,8 @@ class FakeFactories:
     """The four `build_app` factories over fakes. Counts the factory calls.
 
     `source_error` is raised by the source factory, `target_error` by the
-    writer and schema factories, like a failed connection.
+    writer, reader and schema factories, like a failed connection. The reader
+    reads what the writer stored.
     """
 
     def __init__(
@@ -310,8 +393,10 @@ class FakeFactories:
         self.consistency.append(consistency)
         return self.writer
 
-    def _reader(self, settings: WeaviateSettings) -> None:
-        return None
+    def _reader(self, settings: WeaviateSettings) -> FakeReader:
+        if self.target_error is not None:
+            raise self.target_error
+        return FakeReader(self.writer)
 
     def _schema(self, settings: WeaviateSettings) -> FakeSchema:
         self.schema_calls += 1

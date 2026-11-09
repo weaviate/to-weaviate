@@ -3,8 +3,10 @@ from typing import Any
 
 import httpx
 import pytest
+from fakes import raise_grpc_failure
 from weaviate.exceptions import (
     UnexpectedStatusCodeError,
+    WeaviateBatchError,
     WeaviateInsertManyAllFailedError,
 )
 from weaviate.util import generate_uuid5
@@ -163,6 +165,8 @@ class FakeData:
     def insert_many(self, objects: list[Any]) -> Any:
         self.calls.append(objects)
         outcome = self.outcomes.pop(0) if self.outcomes else SimpleNamespace(errors={})
+        if isinstance(outcome, str):
+            raise_grpc_failure(outcome, WeaviateBatchError)
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
@@ -272,3 +276,10 @@ def test_writer_retries_transient_and_raises_others():
         WeaviateWriter(FakeClient(bad), sleep=lambda s: None).write(  # type: ignore[arg-type]
             ENTRY_KEEP, objects(1)
         )
+
+
+def test_writer_retries_a_transient_grpc_failure():
+    data = FakeData(["UNAVAILABLE", SimpleNamespace(errors={})])
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    assert writer.write(ENTRY_KEEP, objects(1)) == []
+    assert len(data.calls) == 2

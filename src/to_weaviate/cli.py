@@ -1,7 +1,25 @@
+import warnings
+
+# authlib comes with weaviate-client and is not a declared dependency.
+try:
+    from authlib.deprecate import AuthlibDeprecationWarning
+except ImportError:
+    pass
+else:
+    # Importing authlib.deprecate adds an "always" filter for this category, so
+    # this filter comes after that import. It must come before weaviate is
+    # imported.
+    warnings.filterwarnings(
+        "ignore",
+        message="The httpx module is deprecated",
+        category=AuthlibDeprecationWarning,
+    )
+
 import atexit
 import dataclasses
 import json
 import os
+import random
 import sys
 import traceback
 from collections.abc import Callable, Iterator
@@ -38,6 +56,19 @@ from to_weaviate.engine.check import (
     target_groups,
 )
 from to_weaviate.engine.copy import copy_collection
+from to_weaviate.engine.verify import (
+    REPORT_MD,
+    Check,
+    check_line,
+    diff_ids,
+    missing_target,
+    remove_report,
+    target_label,
+    verify_counts,
+    verify_ids,
+    verify_records,
+    write_report,
+)
 from to_weaviate.events import Events
 from to_weaviate.output import (
     ERROR_EXIT,
@@ -73,6 +104,7 @@ from to_weaviate.sources.chroma.mapping import vectorizer_for
 from to_weaviate.sources.chroma.source import ChromaSource
 from to_weaviate.state import CollectionProgress, State
 from to_weaviate.target.connect import connect
+from to_weaviate.target.reader import TargetReader, WeaviateReader
 from to_weaviate.target.schema import (
     PlanMismatch,
     Schema,
@@ -83,7 +115,7 @@ from to_weaviate.target.writer import WeaviateWriter, Writer
 
 SourceFactory = Callable[[ChromaSettings], Source]
 WriterFactory = Callable[[WeaviateSettings, str | None], Writer]
-ReaderFactory = Callable[[WeaviateSettings], Any]
+ReaderFactory = Callable[[WeaviateSettings], TargetReader]
 SchemaFactory = Callable[[WeaviateSettings], Schema]
 
 VectorsMode = Literal["keep", "embed", "both"]
@@ -99,6 +131,8 @@ EVENTS_FILE = "events.jsonl"
 REJECTS_FILE = "rejects.jsonl"
 DEFAULT_PARALLELISM = 5
 MAX_PARALLELISM = 8
+DEFAULT_SAMPLE = 300
+MAX_SAMPLE = 10_000
 MAX_MESSAGE_CHARS = 500
 
 INSPECT_HINT = "Run to-weaviate inspect chroma to create it."
@@ -341,6 +375,26 @@ def _load_inspected(directory: Path) -> dict[str, SourceCollection] | None:
             "usage", f"{path} cannot be read: {exc}", REINSPECT_HINT
         ) from exc
     return {c.ref: c for c in collections}
+
+
+def _load_plan_and_inspection(
+    directory: Path,
+) -> tuple[Plan, dict[str, SourceCollection]]:
+    """The plan, and the inspected collections by ref, with one for every entry."""
+    plan = _load_plan(directory)
+    inspected = _load_inspected(directory)
+    if inspected is None:
+        raise CliError(
+            "usage", f"{directory / INSPECT_FILE} does not exist.", INSPECT_HINT
+        )
+    missing = [e.source.name for e in plan.collections if e.source.ref not in inspected]
+    if missing:
+        raise CliError(
+            "usage",
+            f"{INSPECT_FILE} has no inspection of {', '.join(missing)}.",
+            REINSPECT_HINT,
+        )
+    return plan, inspected
 
 
 def _option_value(text: str) -> Any:
@@ -623,19 +677,7 @@ def _copy(
             f"--parallelism {parallelism} is outside 1 to {MAX_PARALLELISM}.",
             f"Use a --parallelism from 1 to {MAX_PARALLELISM}.",
         )
-    plan = _load_plan(directory)
-    inspected = _load_inspected(directory)
-    if inspected is None:
-        raise CliError(
-            "usage", f"{directory / INSPECT_FILE} does not exist.", INSPECT_HINT
-        )
-    missing = [e.source.name for e in plan.collections if e.source.ref not in inspected]
-    if missing:
-        raise CliError(
-            "usage",
-            f"{INSPECT_FILE} has no inspection of {', '.join(missing)}.",
-            REINSPECT_HINT,
-        )
+    plan, inspected = _load_plan_and_inspection(directory)
     entries = _select(plan.collections, names)
     groups = target_groups(plan.collections)
     selected = {e.target.name: groups[e.target.name] for e in entries}
@@ -704,6 +746,55 @@ def _status(directory: Path, json_output: bool) -> None:
             state.close()
     rows = _rows(plan.collections, progress)
     document, text = _progress_output(plan.collections, rows)
+    emit(json_output, {"status": "success", **document}, text)
+
+
+def _verify(
+    factories: _Factories,
+    directory: Path,
+    sample: int,
+    quick: bool,
+    json_output: bool,
+) -> None:
+    # A run that fails must not leave the report of an earlier run.
+    remove_report(directory)
+    plan, inspected = _load_plan_and_inspection(directory)
+    env = load_env(Path.cwd())
+    source_settings = chroma_settings(env)
+    target_settings = weaviate_settings(env)
+    source = factories.source(source_settings)
+    reader = factories.reader(target_settings)
+    rng = random.Random()
+    checks: list[Check] = []
+    for entry in plan.collections:
+        collection = inspected[entry.source.ref]
+        place = target_label(entry.target.name, entry.target.tenant)
+        info(json_output, f"Verifying {entry.source.name} in {place}")
+        missing = missing_target(reader, entry)
+        if missing is not None:
+            checks.append(missing)
+            continue
+        checks.append(verify_counts(source, reader, entry, collection))
+        if not quick:
+            diff = diff_ids(source, reader, entry, collection, directory)
+            checks.append(verify_ids(diff, entry))
+        checks.append(verify_records(source, reader, entry, collection, sample, rng))
+    write_report(checks, directory)
+    report = directory / REPORT_MD
+    document = {
+        "checks": [dataclasses.asdict(c) for c in checks],
+        "report": str(report),
+    }
+    text = "\n".join(check_line(c) for c in checks)
+    failed = sum(not c.passed for c in checks)
+    if failed:
+        raise CliError(
+            "verification_failed",
+            f"{_plural(failed, 'check')} failed.",
+            f"See {report} for the detail of each check.",
+            fields=document,
+            text=text,
+        )
     emit(json_output, {"status": "success", **document}, text)
 
 
@@ -867,6 +958,28 @@ def build_app(
         with _handled(json_output):
             _status(directory, json_output)
 
+    @app.command("verify")
+    def verify(
+        sample: Annotated[
+            int,
+            typer.Option(
+                "--sample",
+                min=1,
+                max=MAX_SAMPLE,
+                metavar="N",
+                help=f"Records to compare per collection, 1 to {MAX_SAMPLE}.",
+            ),
+        ] = DEFAULT_SAMPLE,
+        quick: Annotated[
+            bool, typer.Option("--quick", help="Skip the full id comparison.")
+        ] = False,
+        directory: DirOption = DEFAULT_DIR,
+        json_output: JsonOption = False,
+    ) -> None:
+        """Compare the target with the source. Writes report.md and report.json."""
+        with _handled(json_output):
+            _verify(factories, directory, sample, quick, json_output)
+
     return app
 
 
@@ -893,8 +1006,8 @@ def _weaviate_writer(settings: WeaviateSettings, consistency: str | None) -> Wri
     return WeaviateWriter(_weaviate_client(settings), consistency)
 
 
-def _weaviate_reader(settings: WeaviateSettings) -> Any:
-    return _weaviate_client(settings)
+def _weaviate_reader(settings: WeaviateSettings) -> TargetReader:
+    return WeaviateReader(_weaviate_client(settings))
 
 
 def _weaviate_schema(settings: WeaviateSettings) -> Schema:
