@@ -1,7 +1,10 @@
+from collections import Counter
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 
+from to_weaviate.naming import reserved_suffix, sidecar_word
 from to_weaviate.plan import (
+    DISTANCES,
     CollectionPlan,
     Plan,
     PropertyPlan,
@@ -10,11 +13,14 @@ from to_weaviate.plan import (
 )
 from to_weaviate.sources.base import SourceCollection
 from to_weaviate.target.schema import (
+    PROPERTY_TYPES,
     USERINFO_TEXT,
     PlanMismatch,
+    cleaned_options,
     collection_kwargs,
     module_names,
 )
+from to_weaviate.target.writer import unmapped_key_text
 
 # Vectorizer module to the Weaviate header that carries its provider key and
 # the environment variable that `weaviate_settings` reads it from.
@@ -28,6 +34,8 @@ PROVIDER_KEYS: dict[str, tuple[str, str]] = {
 }
 GOOGLE_VERTEX_KEY = ("X-Goog-Vertex-Api-Key", "VERTEX_API_KEY")
 GOOGLE_STUDIO_KEY = ("X-Goog-Studio-Api-Key", "STUDIO_API_KEY")
+ID_KEY = "#id"
+ID_PROPERTY = "source_id"
 
 VECTOR_MODE_DETAIL = (
     "No Weaviate vectorizer matches the source embedding function. Either "
@@ -114,6 +122,119 @@ def _duplicate_source_findings(entries: list[CollectionPlan]) -> list[Finding]:
         )
         for key in dict.fromkeys(collection_key(e.target.name) for e in group):
             out.append(Finding("duplicate_source", key, message))
+    return out
+
+
+def _name_findings(entry: CollectionPlan) -> list[Finding]:
+    """Property names that are equal ignoring case, and repeated vector names.
+
+    Weaviate compares property names in lower case.
+    """
+    target = entry.target.name
+    by_lower: dict[str, list[str]] = {}
+    for prop in entry.target.properties:
+        by_lower.setdefault(prop.name.lower(), []).append(prop.name)
+    out = [
+        Finding(
+            "duplicate_property",
+            target,
+            f"properties {', '.join(names)} have the same name ignoring case; "
+            "give each property its own name",
+        )
+        for names in by_lower.values()
+        if len(names) > 1
+    ]
+    out.extend(
+        Finding(
+            "duplicate_vector",
+            target,
+            f"vector name {name} is used {n} times; give each vector its own name",
+        )
+        for name, n in Counter(v.name for v in entry.target.vectors).items()
+        if n > 1
+    )
+    return out
+
+
+def _id_findings(entry: CollectionPlan) -> list[Finding]:
+    """The source ID needs one property, named source_id.
+
+    The writer, the reader and verify find the source ID of an object in the
+    property source_id.
+    """
+    target = entry.target.name
+    properties = entry.target.properties
+    ids = [p.name for p in properties if p.source_key == ID_KEY]
+    out: list[Finding] = []
+    if not ids:
+        out.append(
+            Finding(
+                "missing_id_property",
+                target,
+                f"no property has source_key {ID_KEY}; add the property "
+                f"{ID_PROPERTY} with source_key {ID_KEY}",
+            )
+        )
+    elif len(ids) > 1:
+        out.append(
+            Finding(
+                "duplicate_id_property",
+                target,
+                f"properties {', '.join(ids)} have source_key {ID_KEY}; keep one "
+                f"property for {ID_KEY} and name it {ID_PROPERTY}",
+            )
+        )
+    elif ids[0] != ID_PROPERTY:
+        out.append(
+            Finding(
+                "missing_id_property",
+                target,
+                f"property {ids[0]} has source_key {ID_KEY}; name it {ID_PROPERTY}",
+            )
+        )
+    out.extend(
+        Finding(
+            "duplicate_id_property",
+            target,
+            f"property {ID_PROPERTY} has source_key {p.source_key}; only the "
+            f"property with source_key {ID_KEY} can be named {ID_PROPERTY}",
+        )
+        for p in properties
+        if p.name == ID_PROPERTY and p.source_key != ID_KEY
+    )
+    return out
+
+
+def _collection_case_findings(entries: list[CollectionPlan]) -> list[Finding]:
+    """Target collections whose stored names differ only in case.
+
+    Weaviate refuses a collection whose name equals an existing one ignoring
+    case. Names with one collection key are one collection.
+    """
+    by_lower: dict[str, list[str]] = {}
+    for entry in entries:
+        key = collection_key(entry.target.name)
+        keys = by_lower.setdefault(key.lower(), [])
+        if key not in keys:
+            keys.append(key)
+    return [
+        Finding(
+            "duplicate_collection_name",
+            keys[0],
+            f"target collections {', '.join(keys)} differ only in case; Weaviate "
+            "compares collection names ignoring case, so give each its own name",
+        )
+        for keys in by_lower.values()
+        if len(keys) > 1
+    ]
+
+
+def load_findings(plan: Plan) -> list[Finding]:
+    """Errors that refuse the plan in every command that loads it."""
+    out = _collection_case_findings(plan.collections)
+    for entry in plan.collections:
+        out.extend(_name_findings(entry))
+        out.extend(_id_findings(entry))
     return out
 
 
@@ -219,6 +340,49 @@ def _keep_model_findings(
     return out
 
 
+def _unmapped_findings(
+    entry: CollectionPlan, inspected: Mapping[str, SourceCollection] | None
+) -> list[Finding]:
+    """Inspected metadata keys that the entry neither maps nor drops."""
+    collection = inspected.get(entry.source.ref) if inspected else None
+    if collection is None:
+        return []
+    known = {p.source_key for p in entry.target.properties}
+    known.update(d.source_key for d in entry.target.dropped)
+    keys = [f.key for f in collection.fields] + collection.sparse_keys
+    return [
+        Finding("unmapped_key", entry.target.name, unmapped_key_text(key))
+        for key in keys
+        if key not in known
+    ]
+
+
+def _value_findings(entry: CollectionPlan) -> list[Finding]:
+    """Property types and distances that the schema mapping does not have."""
+    name = entry.target.name
+    out = [
+        Finding(
+            "invalid_type",
+            name,
+            f"property {prop.name}: type {prop.type} is not one of "
+            f"{', '.join(PROPERTY_TYPES)}",
+        )
+        for prop in entry.target.properties
+        if prop.type not in PROPERTY_TYPES
+    ]
+    out.extend(
+        Finding(
+            "invalid_distance",
+            name,
+            f"vector {vector.name}: distance {vector.distance} is not one of "
+            f"{', '.join(DISTANCES)}",
+        )
+        for vector in entry.target.vectors
+        if vector.distance is not None and vector.distance not in DISTANCES
+    )
+    return out
+
+
 def vectorizer_findings(groups: Mapping[str, list[CollectionPlan]]) -> list[Finding]:
     """Vectorizer settings that the client cannot turn into a collection."""
     out: list[Finding] = []
@@ -228,6 +392,27 @@ def vectorizer_findings(groups: Mapping[str, list[CollectionPlan]]) -> list[Find
         except PlanMismatch as exc:
             out.append(Finding("invalid_vectorizer", name, str(exc)))
     return out
+
+
+def cleaned_option_findings(
+    groups: Mapping[str, list[CollectionPlan]],
+) -> list[Finding]:
+    """URL options that lose userinfo, a query or a fragment when sent, as warnings.
+
+    `collection_kwargs` sends the vectors of the first entry of a group.
+    """
+    return [
+        Finding(
+            "cleaned_option",
+            name,
+            f"option {key} of vector {vector.name} in {name} holds userinfo, a "
+            "query or a fragment; it is sent without them.",
+        )
+        for name, group in groups.items()
+        for vector in group[0].target.vectors
+        if vector.vectorizer is not None
+        for key in cleaned_options(vector.vectorizer)
+    ]
 
 
 def userinfo_only(errors: list[Finding]) -> bool:
@@ -248,10 +433,41 @@ def plan_findings(
     warnings: list[Finding] = []
     errors.extend(_duplicate_findings(plan.collections))
     errors.extend(_duplicate_source_findings(plan.collections))
-    errors.extend(vectorizer_findings(target_groups(plan.collections)))
+    value_errors = [f for e in plan.collections for f in _value_findings(e)]
+    errors.extend(value_errors)
+    # collection_kwargs cannot map a group that has a value error.
+    unmapped = {f.collection for f in value_errors}
+    groups = target_groups(plan.collections)
+    errors.extend(
+        vectorizer_findings({n: g for n, g in groups.items() if n not in unmapped})
+    )
+    warnings.extend(cleaned_option_findings(groups))
     for entry in plan.collections:
         errors.extend(_keep_model_findings(entry, vectorizer_for))
+        errors.extend(_unmapped_findings(entry, inspected))
         for prop in entry.target.properties:
+            suffix = reserved_suffix(prop.name)
+            if suffix is not None:
+                warnings.append(
+                    Finding(
+                        "reserved_suffix",
+                        entry.target.name,
+                        f"property {prop.name} ends in {suffix}; Weaviate 1.35.20, "
+                        "1.36.15, 1.37.5 and later refuse to create a property "
+                        "with this suffix",
+                    )
+                )
+            word = sidecar_word(prop.name)
+            if suffix is None and word is not None:
+                warnings.append(
+                    Finding(
+                        "reserved_suffix",
+                        entry.target.name,
+                        f"property {prop.name} has the shape of a migration "
+                        f"directory name (__ and the word {word}); Weaviate 1.39.3 "
+                        "and later refuse to create a property with this shape",
+                    )
+                )
             if prop.coerced_from:
                 warnings.append(
                     Finding(

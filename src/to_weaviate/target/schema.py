@@ -1,4 +1,5 @@
 import inspect
+import re
 import time
 from collections.abc import Callable
 from typing import Any, Literal, Protocol
@@ -42,6 +43,7 @@ GRPC_RETRY_STATUSES = frozenset(
 )
 CHAIN_DEPTH = 5
 USERINFO_TEXT = "holds userinfo that cannot be removed"
+_MISSING_ARGUMENTS = re.compile(r"missing \d+ required .*?arguments?: (.*)")
 
 _DATA_TYPES = {
     "text": DataType.TEXT,
@@ -53,6 +55,7 @@ _DATA_TYPES = {
     "number[]": DataType.NUMBER_ARRAY,
     "boolean[]": DataType.BOOL_ARRAY,
 }
+PROPERTY_TYPES = tuple(sorted(_DATA_TYPES))
 _QUANTIZER_CLASSES: dict[type, str] = {
     _RQConfig: "rq",
     _PQConfig: "pq",
@@ -195,6 +198,18 @@ def _sent_options(vectorizer: VectorizerPlan, collection: str) -> dict[str, Any]
     return sent
 
 
+def cleaned_options(vectorizer: VectorizerPlan) -> list[str]:
+    """Keys of the URL options that are sent without userinfo, a query or a fragment.
+
+    A URL option whose userinfo cannot be removed is an error, not one of these.
+    """
+    return [
+        key
+        for key, value in vectorizer.options.items()
+        if _is_url(value) and stored_url(value) not in (None, value)
+    ]
+
+
 def _vector(plan: VectorPlan, collection: str) -> Any:
     kwargs: dict[str, Any] = {"name": plan.name}
     index = plan.index
@@ -241,6 +256,22 @@ def _vector(plan: VectorPlan, collection: str) -> Any:
         raise PlanMismatch(
             f"vectorizer option {key} of {module}: {error['msg']}"
         ) from exc
+    except TypeError as exc:
+        raise PlanMismatch(_type_error_text(module, exc)) from exc
+
+
+def _type_error_text(module: str, exc: TypeError) -> str:
+    """The message for a TypeError of a factory; names the missing options.
+
+    Python names the missing arguments of a call as in "missing 2 required
+    keyword-only arguments: 'model' and 'region'".
+    """
+    missing = _MISSING_ARGUMENTS.search(str(exc))
+    names = re.findall(r"'([^']+)'", missing.group(1)) if missing else []
+    if not names:
+        return f"vectorizer {module} refused its options: {exc}"
+    noun = "option" if len(names) == 1 else "options"
+    return f"vectorizer {module} needs the {noun} {', '.join(names)}"
 
 
 def _properties(group: list[CollectionPlan]) -> list[PropertyPlan]:
@@ -331,9 +362,11 @@ def differences(
             out.extend(_vector_differences(plan, found))
     actual = {p.name: _val(p.data_type) for p in cfg.properties}
     for prop in _properties(group):
+        # A type without a mapping is an invalid_type finding of the plan.
+        planned_type = _DATA_TYPES.get(prop.type)
         if prop.name not in actual:
             out.append(f"property {prop.name}: missing in the collection")
-        elif actual[prop.name] != _DATA_TYPES[prop.type].value:
+        elif planned_type is not None and actual[prop.name] != planned_type.value:
             out.append(
                 f"property {prop.name}: type is {actual[prop.name]}, "
                 f"plan has {prop.type}"

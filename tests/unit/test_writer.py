@@ -115,7 +115,11 @@ def test_to_object_coercion_error_rejects():
 
 def test_to_object_unknown_metadata_key_rejects():
     r = to_object(Record("a", [1.0], "d", None, {"mystery": 1}), ENTRY_KEEP)
-    assert r == Reject("a", "unknown metadata key mystery; run inspect again")
+    assert r == Reject(
+        "a",
+        "metadata key mystery is not in plan.yaml; add a property for it or list "
+        "it under dropped",
+    )
 
 
 def test_embed_mode_sends_no_vector():

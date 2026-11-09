@@ -20,6 +20,7 @@ import dataclasses
 import json
 import os
 import random
+import re
 import sys
 import traceback
 from collections.abc import Callable, Iterator
@@ -50,6 +51,7 @@ from to_weaviate.engine.check import (
     Finding,
     collection_key,
     decisions,
+    load_findings,
     module_findings,
     plan_findings,
     provider_keys,
@@ -145,6 +147,10 @@ EDIT_PLAN_HINT = (
     "Edit plan.yaml, or run to-weaviate inspect chroma --force to draft it again."
 )
 USERINFO_HINT = "Percent-encode the password in plan.yaml or remove the option."
+UTF8_HINT = (
+    "Save the file as UTF-8, or run to-weaviate inspect chroma --force to write "
+    "it again."
+)
 CHROMA_HINT = "Check CHROMA_URL and that the Chroma server is running."
 NO_COLLECTION_HINT = "Check --database, CHROMA_DATABASE and CHROMA_TENANT."
 WEAVIATE_HINT = (
@@ -164,6 +170,9 @@ STATE_HINT = (
     "target, use another --dir."
 )
 BATCH_HINT = "Fix the cause and run to-weaviate copy again. It resumes at this page."
+# A part of a text in single or double quotes; a quote after a backslash is
+# part of it, as in a Python repr.
+_QUOTED = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
 
 
 @dataclass(frozen=True)
@@ -357,25 +366,64 @@ def _handled(json_output: bool) -> Iterator[None]:
         raise typer.Exit(report.exit_code) from None
 
 
-def _load_plan(directory: Path) -> Plan:
+def _yaml_error_text(exc: yaml.YAMLError) -> str:
+    """The position and the problem of `exc`, without any text of the file.
+
+    The text that PyYAML gives for an error quotes the line, which can hold a
+    password. Its problem text can quote a name from the line, such as an
+    alias, a tag or a key, so each quoted part becomes "...".
+    """
+    if isinstance(exc, yaml.MarkedYAMLError) and exc.problem_mark is not None:
+        mark = exc.problem_mark
+        where = f"YAML error at line {mark.line + 1}, column {mark.column + 1}"
+        if not exc.problem:
+            return where
+        return f"{where}: {_QUOTED.sub('...', exc.problem)}"
+    return "the text is not valid YAML"
+
+
+def _not_utf8(path: Path) -> CliError:
+    return CliError("invalid_plan", f"{path} is not UTF-8 text.", UTF8_HINT)
+
+
+def _read_plan(directory: Path) -> Plan:
+    """The plan, parsed and validated, before `load_findings` are applied."""
     path = directory / PLAN_FILE
     if not path.exists():
         raise CliError("usage", f"{path} does not exist.", INSPECT_HINT)
     try:
         plan = load_plan(path)
-    except (ValidationError, yaml.YAMLError) as exc:
-        detail = _validation_text(exc) if isinstance(exc, ValidationError) else str(exc)
+    except UnicodeDecodeError as exc:
+        raise _not_utf8(path) from exc
+    except ValidationError as exc:
         raise CliError(
             "invalid_plan",
-            f"{path} is not a valid plan: {detail}",
+            f"{path} is not a valid plan: {_validation_text(exc)}",
             EDIT_PLAN_HINT,
         ) from exc
+    except yaml.YAMLError as exc:
+        # Not chained: the YAML error holds the line, and the debug traceback
+        # would print it.
+        raise CliError(
+            "invalid_plan",
+            f"{path} is not a valid plan: {_yaml_error_text(exc)}",
+            EDIT_PLAN_HINT,
+        ) from None
     if not plan.collections:
         raise CliError(
             "invalid_plan",
             f"{path} is not a valid plan: collections is empty.",
             EDIT_PLAN_HINT,
         )
+    return plan
+
+
+def _load_plan(directory: Path) -> Plan:
+    """The plan, refused when it has a `load_findings` error."""
+    plan = _read_plan(directory)
+    errors = load_findings(plan)
+    if errors:
+        raise _plan_errors(errors, [])
     return plan
 
 
@@ -390,8 +438,10 @@ def _load_inspected(directory: Path) -> dict[str, SourceCollection] | None:
     if not path.exists():
         return None
     try:
-        raw = json.loads(path.read_text())
+        raw = json.loads(path.read_text(encoding="utf-8"))
         collections = [_source_collection(c) for c in raw["collections"]]
+    except UnicodeDecodeError as exc:
+        raise _not_utf8(path) from exc
     except (ValueError, KeyError, TypeError) as exc:
         raise CliError(
             "usage", f"{path} cannot be read: {exc}", REINSPECT_HINT
@@ -556,7 +606,9 @@ def _inspect_chroma(
         ) from exc
     directory.mkdir(parents=True, exist_ok=True)
     inspect_document = {"collections": [dataclasses.asdict(c) for c in collections]}
-    (directory / INSPECT_FILE).write_text(json.dumps(inspect_document, indent=2))
+    (directory / INSPECT_FILE).write_text(
+        json.dumps(inspect_document, indent=2), encoding="utf-8"
+    )
     save_plan(plan, plan_path)
 
     found = decisions(plan, {c.ref: c for c in collections})
@@ -643,9 +695,10 @@ def _require_provider_keys(plan: Plan, settings: WeaviateSettings) -> None:
 
 
 def _check(factories: _Factories, directory: Path, json_output: bool) -> None:
-    plan = _load_plan(directory)
+    plan = _read_plan(directory)
     inspected = _load_inspected(directory)
     errors, warnings = plan_findings(plan, inspected, vectorizer_for)
+    errors[:0] = load_findings(plan)
     settings = weaviate_settings(load_env(Path.cwd()))
     _require_provider_keys(plan, settings)
     info(json_output, f"Checking the target at {without_userinfo(settings.url)}")

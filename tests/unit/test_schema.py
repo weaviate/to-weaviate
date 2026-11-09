@@ -323,6 +323,12 @@ def test_differences_reports_mismatch(plan_kwargs, cfg, expected):
     assert found and expected in " ".join(found)
 
 
+def test_differences_skip_a_property_type_without_a_mapping():
+    props = [*PROPS[:2], p.PropertyPlan(source_key="year", name="year", type="date")]
+    found = differences(FakeClient(FakeCollection(config())), [entry(properties=props)])  # type: ignore[arg-type]
+    assert found == []
+
+
 def test_differences_missing_property():
     cfg = config()
     cfg.properties = [x for x in cfg.properties if x.name != "year"]
@@ -718,6 +724,35 @@ def test_kwargs_refuses_a_vectorizer_option_key(key):
     message = f"vectorizer option {key} is not accepted by text2vec-openai"
     with pytest.raises(PlanMismatch, match=message):
         collection_kwargs([entry(mode="embed", vectorizer=v)])
+
+
+# The client warns on every text2vec_aws call.
+@pytest.mark.filterwarnings("ignore:`text2vec_aws` is deprecated:DeprecationWarning")
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({}, "vectorizer text2vec-aws needs the options model, region"),
+        ({"model": "m"}, "vectorizer text2vec-aws needs the option region"),
+    ],
+)
+def test_kwargs_name_the_missing_options_of_a_vectorizer(options, message):
+    v = p.VectorizerPlan(module="text2vec-aws", options=options)
+    with pytest.raises(PlanMismatch) as e:
+        collection_kwargs([entry(mode="embed", vectorizer=v)])
+    assert str(e.value) == message
+
+
+def test_kwargs_report_another_type_error_of_a_vectorizer_factory(monkeypatch):
+    def factory(**kwargs: Any) -> Any:
+        raise TypeError("unsupported operand")
+
+    monkeypatch.setattr(Configure.Vectors, "text2vec_openai", factory)
+    v = p.VectorizerPlan(module="text2vec-openai")
+    with pytest.raises(PlanMismatch) as e:
+        collection_kwargs([entry(mode="embed", vectorizer=v)])
+    assert str(e.value) == (
+        "vectorizer text2vec-openai refused its options: unsupported operand"
+    )
 
 
 def test_kwargs_refuses_a_vectorizer_option_value():

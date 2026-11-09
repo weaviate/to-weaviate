@@ -1,4 +1,8 @@
+import io
+import re
+
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from to_weaviate.plan import (
@@ -90,6 +94,23 @@ def test_draft_unique_collection_names():
     a, b = make("my-docs", ref="a"), make("my_docs", ref="b")
     names = [c.target.name for c in draft_plan(SRC, [a, b], "keep").collections]
     assert names == ["My_docs", "My_docs_2"]
+
+
+def test_draft_names_differ_ignoring_case_and_avoid_reserved_suffixes():
+    keys = ["myKey", "mykey", "max_temp", "title_searchable"]
+    fields = [FieldStats(key, {"text": 1}) for key in keys]
+    sources = [make("my_docs", ref="a", fields=fields)]
+    sources += [make(name, ref=name) for name in ("my_Docs", "MY_DOCS")]
+    plan = draft_plan(SRC, sources, "keep")
+    names = [c.target.name for c in plan.collections]
+    assert names == ["My_docs", "My_Docs_2", "MY_DOCS_3"]
+    properties = [p.name for p in target(plan).properties]
+    assert properties[3:] == [
+        "myKey",
+        "mykey_2",
+        "max_temp_meta",
+        "title_searchable_meta",
+    ]
 
 
 def test_draft_source_ref():
@@ -292,6 +313,17 @@ def test_round_trip(tmp_path, collection_with_fields):
     assert load_plan(tmp_path / "plan.yaml") == plan
 
 
+def test_plan_is_written_and_read_as_utf8_in_any_locale(tmp_path, monkeypatch):
+    # pathlib asks io.text_encoding for the locale encoding when none is given.
+    monkeypatch.setattr(
+        io, "text_encoding", lambda encoding, stacklevel=2: encoding or "latin-1"
+    )
+    plan = draft_plan(SRC, [make(fields=[FieldStats("名前 año", {"text": 1})])])
+    save_plan(plan, tmp_path / "plan.yaml")
+    assert "名前 año" in (tmp_path / "plan.yaml").read_bytes().decode("utf-8")
+    assert load_plan(tmp_path / "plan.yaml") == plan
+
+
 def test_save_keeps_model_key_order(tmp_path):
     plan = Plan(source=SRC, collections=[])
     save_plan(plan, tmp_path / "p.yaml")
@@ -307,6 +339,37 @@ def test_load_refuses_a_typo(tmp_path):
     (tmp_path / "p.yaml").write_text(text)
     with pytest.raises(ValidationError):
         load_plan(tmp_path / "p.yaml")
+
+
+def test_load_refuses_a_key_that_appears_twice_in_one_mapping(tmp_path):
+    save_plan(draft_plan(SRC, [make()], "keep"), tmp_path / "p.yaml")
+    lines = (tmp_path / "p.yaml").read_text().splitlines(keepends=True)
+    at = next(i for i, line in enumerate(lines) if line.strip() == "type: text")
+    lines.insert(at + 1, lines[at].replace("text", "int"))
+    (tmp_path / "p.yaml").write_text("".join(lines))
+    with pytest.raises(yaml.YAMLError) as e:
+        load_plan(tmp_path / "p.yaml")
+    assert e.value.problem == f"found duplicate key 'type', first at line {at + 1}"
+    assert e.value.problem_mark.line == at + 1
+
+
+def test_load_accepts_a_key_that_a_merge_key_brings_in_again(tmp_path):
+    plan = draft_plan(SRC, [make()], "keep")
+    save_plan(plan, tmp_path / "p.yaml")
+    text = (tmp_path / "p.yaml").read_text()
+    uri = re.search(r"( *)- source_key: '#uri'\n(?:\1  .*\n)+", text)
+    assert uri is not None
+    indent = uri.group(1)
+    merged = (
+        f"{indent}- <<: *field\n{indent}  source_key: '#uri'\n{indent}  name: uri\n"
+    )
+    text = text.replace(uri.group(0), merged)
+    text = text.replace(
+        "- source_key: '#id'\n", f"- &field\n{indent}  source_key: '#id'\n"
+    )
+    (tmp_path / "p.yaml").write_text(text)
+    assert "<<: *field" in text and "&field" in text
+    assert load_plan(tmp_path / "p.yaml") == plan
 
 
 def test_models_are_exported():
