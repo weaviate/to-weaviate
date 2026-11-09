@@ -126,14 +126,18 @@ Each record that the tool cannot convert or that Weaviate refuses goes to
 fixing the cause, copy `plan.yaml` and `inspect.json` to a new `--dir` and
 run `copy` there; objects already in Weaviate are written again unchanged.
 When Weaviate refuses every object of a batch of more than one record,
-`copy` retries the batch as it retries a network error: without
-Retry-After headers it retries a transient error for at least 15.75 s and
-at most 31.5 s in total before it gives up; with them each delay can be up
-to 30 s. When the retries are used up, it stops with `target_unreachable`
+`copy` retries the batch as it retries a network error: it retries a
+transient error for at least 15.75 s and at most 31.5 s in total before it
+gives up. When the retries are used up, it stops with `target_unreachable`
 and stores no reject. The next run starts at that page. A record that
 Weaviate refuses with an error about a node, a shard or a deadline, as it
 does while a node restarts, is not a reject either: `copy` sends it again
 under the same retry, and when the error stays, stops the same way.
+
+A Chroma request that fails with a network error or with HTTP 429, 500,
+502, 503 or 504 is retried the same way, for 15.75 s to 31.5 s in total. A
+Retry-After header in Chroma's answer raises each delay to at least its
+value, up to 30 s per delay, so these retries can take longer.
 
 When the target collection exists without a property that `plan.yaml`
 has, `copy` adds the property before it writes. Its JSON document lists
@@ -156,6 +160,9 @@ source collection are copied, `copy` stops with `state_mismatch` when
 `WEAVIATE_URL` or the target in `plan.yaml` names another target, or when
 the target collection no longer exists. To copy to another target, use
 another `--dir`. Before any record is copied, a run takes the new target.
+On the source side, `copy` and `verify` stop with `invalid_plan` before
+they connect when `CHROMA_URL` or `CHROMA_TENANT` names another source than
+the one `inspect` recorded in `plan.yaml`.
 
 One `copy` at a time uses a directory. It holds a lock on `copy.lock` while
 it runs, and a second `copy` on that directory exits with `usage`. The
