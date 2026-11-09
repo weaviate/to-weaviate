@@ -5,7 +5,7 @@ from typing import Any
 import httpx
 import pytest
 from fakes import FakeRpcError, raise_grpc_failure
-from weaviate.classes.config import Configure, DataType, VectorDistances
+from weaviate.classes.config import Configure, DataType, Tokenization, VectorDistances
 from weaviate.collections.classes.config import (
     PQEncoderDistribution,
     PQEncoderType,
@@ -418,6 +418,95 @@ def test_a_refused_property_addition_is_schema_rejected(status):
         WeaviateSchema(FakeClient(existing)).ensure([entry()])  # type: ignore[arg-type]
     assert str(info.value) == "property year already exists"
     assert info.value.action == "add the property year to My_docs"
+
+
+def stored_property(
+    name: str,
+    data_type: str,
+    tokenization: Tokenization | None = None,
+    searchable: bool = False,
+    filterable: bool = True,
+    range_filters: bool = False,
+) -> Any:
+    return SimpleNamespace(
+        name=name,
+        data_type=SimpleNamespace(value=data_type),
+        tokenization=tokenization,
+        index_searchable=searchable,
+        index_filterable=filterable,
+        index_range_filters=range_filters,
+    )
+
+
+def stored_props(**changed: Any) -> list[Any]:
+    """The properties of a collection made from PROPS, with `changed` flags by name."""
+    made = {
+        "document": {
+            "tokenization": Tokenization.WORD,
+            "searchable": True,
+            "filterable": False,
+        },
+        "source_id": {"tokenization": Tokenization.FIELD, "searchable": False},
+        "year": {"range_filters": True},
+    }
+    types = {"document": "text", "source_id": "text", "year": "int"}
+    return [
+        stored_property(n, types[n], **{**flags, **changed.get(n, {})})
+        for n, flags in made.items()
+    ]
+
+
+def test_differences_accept_the_property_flags_the_plan_sends():
+    cfg = config()
+    cfg.properties = stored_props()
+    assert differences(FakeClient(FakeCollection(cfg)), [entry()]) == []  # type: ignore[arg-type]
+
+
+# (flags of one stored property that differ from PROPS, expected difference)
+PROPERTY_FLAG_MISMATCHES = {
+    "tokenization": (
+        {"document": {"tokenization": Tokenization.FIELD}},
+        "property document: tokenization is field, plan has word",
+    ),
+    "searchable": (
+        {"document": {"searchable": False}},
+        "property document: searchable is False, plan has True",
+    ),
+    "filterable": (
+        {"document": {"filterable": True}},
+        "property document: filterable is True, plan has False",
+    ),
+    "range-filters": (
+        {"year": {"range_filters": False}},
+        "property year: range_filters is False, plan has True",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("changed", "expected"),
+    PROPERTY_FLAG_MISMATCHES.values(),
+    ids=PROPERTY_FLAG_MISMATCHES,
+)
+def test_differences_compare_each_property_flag_the_plan_sends(changed, expected):
+    cfg = config()
+    cfg.properties = stored_props(**changed)
+    found = differences(FakeClient(FakeCollection(cfg)), [entry()])  # type: ignore[arg-type]
+    assert found == [expected]
+
+
+def test_differences_skip_the_property_flags_that_the_plan_does_not_send():
+    # _property sends neither searchable for an int nor an unset tokenization.
+    props = [
+        p.PropertyPlan(source_key="k", name="k", type="text", searchable=True),
+        p.PropertyPlan(source_key="n", name="n", type="int", searchable=True),
+    ]
+    cfg = config()
+    cfg.properties = [
+        stored_property("k", "text", tokenization=Tokenization.WORD, searchable=True),
+        stored_property("n", "int", searchable=False),
+    ]
+    assert differences(FakeClient(FakeCollection(cfg)), [entry(properties=props)]) == []  # type: ignore[arg-type]
 
 
 def test_differences_multi_tenancy():

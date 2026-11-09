@@ -80,6 +80,14 @@ COMPARED_QUANTIZER_FIELDS = (
     "rescore_limit",
 )
 
+# The attribute of a stored property that holds each PropertyPlan flag.
+_STORED_FLAGS = {
+    "tokenization": "tokenization",
+    "searchable": "index_searchable",
+    "filterable": "index_filterable",
+    "range_filters": "index_range_filters",
+}
+
 # A server reports a Google vectorizer as text2vec-google or as the legacy
 # name text2vec-palm.
 _MODULE_NAMES = {"text2vec-google": frozenset({"text2vec-google", "text2vec-palm"})}
@@ -492,6 +500,29 @@ def _quantizer_field_differences(
     return out
 
 
+def _property_flag_differences(plan: PropertyPlan, found: Any) -> list[str]:
+    """The flags that `_property` sends for `plan` and `found` holds otherwise.
+
+    A flag that the server does not report is not compared.
+    """
+    planned: dict[str, Any] = {}
+    is_text = plan.type in ("text", "text[]")
+    if is_text and plan.tokenization:
+        planned["tokenization"] = plan.tokenization
+    if is_text:
+        planned["searchable"] = plan.searchable
+    planned["filterable"] = plan.filterable
+    planned["range_filters"] = plan.range_filters
+    out: list[str] = []
+    for flag, value in planned.items():
+        reported = getattr(found, _STORED_FLAGS[flag], None)
+        if reported is not None and _val(reported) != _val(value):
+            out.append(
+                f"property {plan.name}: {flag} is {_val(reported)}, plan has {value}"
+            )
+    return out
+
+
 def differences(
     client: weaviate.WeaviateClient, group: list[CollectionPlan]
 ) -> list[str] | None:
@@ -506,18 +537,18 @@ def differences(
             out.append(f"vector {plan.name}: missing in the collection")
         else:
             out.extend(_vector_differences(plan, found))
-    actual = {p.name: _val(p.data_type) for p in cfg.properties}
+    stored = {p.name: p for p in cfg.properties}
     for prop in _properties(group):
         # A type without a mapping is an invalid_type finding of the plan. A
         # missing property is no difference: ensure adds it.
         planned_type = _DATA_TYPES.get(prop.type)
-        if prop.name not in actual:
+        if prop.name not in stored or planned_type is None:
             continue
-        if planned_type is not None and actual[prop.name] != planned_type.value:
-            out.append(
-                f"property {prop.name}: type is {actual[prop.name]}, "
-                f"plan has {prop.type}"
-            )
+        actual = _val(stored[prop.name].data_type)
+        if actual != planned_type.value:
+            out.append(f"property {prop.name}: type is {actual}, plan has {prop.type}")
+        else:
+            out.extend(_property_flag_differences(prop, stored[prop.name]))
     planned_mt = bool(_tenants(group))
     if planned_mt != cfg.multi_tenancy_config.enabled:
         found_mt = "on" if cfg.multi_tenancy_config.enabled else "off"
