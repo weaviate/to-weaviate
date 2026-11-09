@@ -1223,6 +1223,23 @@ def test_check_and_copy_show_the_quantizer_training_warning(cmd):
     assert "warning quantizer_training Docs: vector default:" in text.stdout
 
 
+def test_copy_with_rejects_shows_the_quantizer_training_warning():
+    source = FakeSource(cli_records(10))
+    writer = FakeWriter(reject_ids={"id-3"})
+    sq = ["--index", "hnsw", "--quantizer", "sq"]
+    fakes = inspected(FakeFactories(source, writer=writer), *sq)
+    js = invoke(fakes, "copy", "--json")
+    assert js.exit_code == 1, js.output
+    d = json.loads(js.stdout)
+    assert d["code"] == "rejects"
+    assert [(w["code"], w["collection"]) for w in d["warnings"]] == [
+        ("quantizer_training", "Docs")
+    ]
+    text = invoke(fakes, "copy")
+    assert text.exit_code == 1, text.output
+    assert "warning quantizer_training Docs: vector default:" in text.stdout
+
+
 def test_copy_requires_provider_key():
     fakes = inspected(
         FakeFactories(FakeSource(cli_records(10))),

@@ -1185,6 +1185,8 @@ def _copy(
             row["reread_from"] = rereads[row["ref"]]
     document, text = _progress_output(entries, rows)
     document["added_properties"] = added
+    document["warnings"] = _findings_document([], warnings)["warnings"]
+    text = "\n".join([*_findings_text([], warnings), text])
     rejects = sum(row["rejects"] for row in rows)
     if rejects:
         raise CliError(
@@ -1195,8 +1197,6 @@ def _copy(
             fields=document,
             text=text,
         )
-    document["warnings"] = _findings_document([], warnings)["warnings"]
-    text = "\n".join([*_findings_text([], warnings), text])
     _emit_success(json_output, {"status": "success", **document}, text)
 
 
