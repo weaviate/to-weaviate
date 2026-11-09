@@ -1,0 +1,183 @@
+import json
+import sqlite3
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+
+from to_weaviate.sources.base import Partition
+from to_weaviate.target.writer import Reject
+
+BATCH_SIZE = 500
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS collections (
+    ref TEXT PRIMARY KEY,
+    total INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS partitions (
+    ref TEXT NOT NULL,
+    key TEXT NOT NULL,
+    start TEXT,
+    stop TEXT,
+    cursor TEXT,
+    finished INTEGER NOT NULL DEFAULT 0,
+    copied INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (ref, key)
+);
+CREATE TABLE IF NOT EXISTS rejects (
+    ref TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    PRIMARY KEY (ref, source_id)
+);
+CREATE TABLE IF NOT EXISTS hashes (
+    ref TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    hash BLOB NOT NULL,
+    PRIMARY KEY (ref, source_id)
+);
+"""
+
+
+@dataclass(frozen=True)
+class CollectionProgress:
+    ref: str
+    total: int
+    copied: int
+    rejects: int
+    done: bool
+
+
+class State:
+    """Copy progress in sqlite. Every method commits before it returns.
+
+    Collections and partitions are listed in insertion (rowid) order.
+    """
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._rejects_path = path.parent / "rejects.jsonl"
+        self._lock = threading.Lock()
+        self._db = sqlite3.connect(path, check_same_thread=False)
+        with self._lock, self._db:
+            self._db.executescript(_SCHEMA)
+
+    def close(self) -> None:
+        with self._lock:
+            self._db.close()
+
+    def init_collection(
+        self, ref: str, partitions: list[Partition], total: int
+    ) -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT INTO collections (ref, total) VALUES (?, ?) "
+                "ON CONFLICT(ref) DO UPDATE SET total = excluded.total",
+                (ref, total),
+            )
+            (stored,) = self._db.execute(
+                "SELECT COUNT(*) FROM partitions WHERE ref = ?", (ref,)
+            ).fetchone()
+            if stored == 0:
+                self._insert_partitions(ref, partitions)
+
+    def pending(self, ref: str) -> list[tuple[Partition, str | None]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT key, start, stop, cursor FROM partitions "
+                "WHERE ref = ? AND finished = 0 ORDER BY rowid",
+                (ref,),
+            ).fetchall()
+        return [
+            (Partition(key, start, stop), cursor) for key, start, stop, cursor in rows
+        ]
+
+    def advance(self, ref: str, key: str, cursor: str | None, copied: int) -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                "UPDATE partitions SET cursor = ?, finished = ?, copied = copied + ? "
+                "WHERE ref = ? AND key = ?",
+                (cursor, 1 if cursor is None else 0, copied, ref, key),
+            )
+
+    def add_partition(self, ref: str, partition: Partition) -> None:
+        with self._lock, self._db:
+            self._insert_partitions(ref, [partition])
+
+    def add_rejects(self, ref: str, rejects: list[Reject]) -> None:
+        """Store rejects and append the new ones to rejects.jsonl.
+
+        The file lines are written and closed before the sqlite commit. A crash
+        between the two leaves a line without a row, and the retry writes that
+        line again. A duplicate line is accepted, a missing line is not.
+        """
+        with self._lock, self._db:
+            added: list[Reject] = []
+            for reject in rejects:
+                cur = self._db.execute(
+                    "INSERT OR IGNORE INTO rejects (ref, source_id, reason) "
+                    "VALUES (?, ?, ?)",
+                    (ref, reject.source_id, reject.reason),
+                )
+                if cur.rowcount:
+                    added.append(reject)
+            if added:
+                with self._rejects_path.open("a", encoding="utf-8") as handle:
+                    for reject in added:
+                        line = {
+                            "ref": ref,
+                            "source_id": reject.source_id,
+                            "reason": reject.reason,
+                        }
+                        handle.write(json.dumps(line) + "\n")
+
+    def progress(self) -> list[CollectionProgress]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT c.ref, c.total, "
+                "(SELECT COALESCE(SUM(copied), 0) FROM partitions p "
+                "WHERE p.ref = c.ref), "
+                "(SELECT COUNT(*) FROM rejects r WHERE r.ref = c.ref), "
+                "(SELECT COUNT(*) FROM partitions p "
+                "WHERE p.ref = c.ref AND p.finished = 0) "
+                "FROM collections c ORDER BY c.rowid"
+            ).fetchall()
+        return [
+            CollectionProgress(ref, total, copied, rejects, unfinished == 0)
+            for ref, total, copied, rejects, unfinished in rows
+        ]
+
+    def reset(self, ref: str) -> None:
+        with self._lock, self._db:
+            self._db.execute("DELETE FROM partitions WHERE ref = ?", (ref,))
+            self._db.execute("DELETE FROM rejects WHERE ref = ?", (ref,))
+
+    def record_hashes(self, ref: str, hashes: list[tuple[str, bytes]]) -> None:
+        with self._lock, self._db:
+            self._db.executemany(
+                "INSERT OR REPLACE INTO hashes (ref, source_id, hash) VALUES (?, ?, ?)",
+                [(ref, source_id, digest) for source_id, digest in hashes],
+            )
+
+    def unchanged(self, ref: str, hashes: list[tuple[str, bytes]]) -> set[str]:
+        wanted = dict(hashes)
+        ids = list(wanted)
+        same: set[str] = set()
+        with self._lock:
+            for i in range(0, len(ids), BATCH_SIZE):
+                batch = ids[i : i + BATCH_SIZE]
+                marks = ",".join("?" * len(batch))
+                rows = self._db.execute(
+                    "SELECT source_id, hash FROM hashes "
+                    f"WHERE ref = ? AND source_id IN ({marks})",
+                    (ref, *batch),
+                ).fetchall()
+                same.update(sid for sid, digest in rows if digest == wanted[sid])
+        return same
+
+    def _insert_partitions(self, ref: str, partitions: list[Partition]) -> None:
+        self._db.executemany(
+            "INSERT OR IGNORE INTO partitions (ref, key, start, stop) "
+            "VALUES (?, ?, ?, ?)",
+            [(ref, p.key, p.start, p.stop) for p in partitions],
+        )
