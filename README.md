@@ -126,9 +126,10 @@ Each record that the tool cannot convert or that Weaviate refuses goes to
 fixing the cause, copy `plan.yaml` and `inspect.json` to a new `--dir` and
 run `copy` there; objects already in Weaviate are written again unchanged.
 When Weaviate refuses every object of a batch of more than one record,
-`copy` retries the batch as it retries a network error: it retries a
-transient error for at least 15 s and at most about 30 s in total before it
-gives up. When the retries are used up, it stops with `target_unreachable`
+`copy` retries the batch as it retries a network error: without
+Retry-After headers it retries a transient error for at least 15.75 s and
+at most 31.5 s in total before it gives up; with them each delay can be up
+to 30 s. When the retries are used up, it stops with `target_unreachable`
 and stores no reject. The next run starts at that page. A record that
 Weaviate refuses with an error about a node, a shard or a deadline, as it
 does while a node restarts, is not a reject either: `copy` sends it again

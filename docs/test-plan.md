@@ -87,7 +87,7 @@ server's message.
 | Plan: properties (`source_key`, `name`, `type`, tokenization, flags, `coerced_from`) | cov `test_writer::test_to_object_*`, `test_schema::test_kwargs_property_flags` | cov `acc/migration::test_metadata_shapes_map_to_property_types` | part | acceptance API |
 | Plan: `dropped`, unmapped key | cov `cmd::test_a_key_that_the_plan_neither_maps_nor_drops_is_an_invalid_plan`, `::test_copy_resumes_after_an_unmapped_key_is_listed_under_dropped` | no | no | unit |
 | Plan: allowed hand edits applied end to end (rename, retype, drop, tenant) | part (`write_plan` edits in acceptance only) | part `acc/multi_tenant`, `acc/vector_settings` | no | acceptance API |
-| Plan: property added after the collection exists | no (U-15) | no | no | unit |
+| Plan: property added after the collection exists | cov `cmd::test_copy_adds_a_planned_property_that_the_collection_lacks` (U-15) | no | no | unit |
 | Source: distances l2, cosine, ip; legacy 0.5.x metadata; spann | cov `test_chroma_config` | cov `acc/vector_settings::test_chroma_distances_map_to_weaviate_distances` | cov (cosine) | acceptance API |
 | Source: embedding functions (10 mappings, default, azure, unknown, stored form) | cov `test_chroma_mapping` (29 tests) | part `acc/embedding_secrets` (azure openai) | no | acceptance API |
 | Source: metadata types scalar, array, mixed, partial, sparse | cov `test_types`, `test_chroma_source::test_inspect_*` | cov `acc/migration` | part | acceptance API |
@@ -98,7 +98,7 @@ server's message.
 | Source: vectors of mixed dimension in one collection | no (U-05; Chroma refuses it, section 5) | no | no | unit |
 | Source: collection names that need renaming | part `test_naming`, `test_plan::test_draft_unique_collection_names`; non-ASCII untested (U-09, A-11) | no | no | acceptance API |
 | Source: several databases, listing order, paging of the collection list | cov `cmd::test_inspect_of_every_database_*`, `test_chroma_client::test_collections_*` | part (one database) | no | acceptance API |
-| Source: a page shorter than the limit | part `test_chroma_source::test_read_open_ended_partition_stops_on_short_page` asserts the stop; the loss it can cause is not covered (U-01) | no | no | unit |
+| Source: a page shorter than the limit | cov `test_cli_chroma::test_a_page_shorter_than_the_limit_does_not_end_a_partition` (U-01) | no | no | unit |
 | Source: records deleted during a copy | no; deferred F4 (U-08 pins the documented limit) | no | no | unit |
 | Source: records added between runs (tail) | cov `test_copy::test_*tail*`, `cmd::test_every_copy_reads_the_records_added_since_the_last_run` | cov `acc/migration::test_each_copy_adds_the_records_that_the_source_gained` | no | acceptance API |
 | Source: compaction on distributed Chroma (wait for num_unindexed_ops 0, stop on a changed version or log_position, single-node HTTP 500) | cov `test_chroma_client::test_indexing_status_*`, `::test_another_500_on_indexing_status_is_retried`, `::test_collection_by_name_reads_the_collection_document`, `test_chroma_source::test_wait_compacted_*`, `::test_compaction_state_of_a_collection_created_again_names_inspect_force`, `test_copy::test_the_wait_comes_before_the_first_page_and_the_state_after_the_last_read`, `::test_a_changed_state_stops_the_copy_and_the_next_run_reads_from_the_start`, `::test_a_source_without_compaction_is_not_compared`, `::test_the_wait_writes_a_compaction_wait_event_per_change`, `::test_a_wait_that_ends_without_compaction_reads_no_page`, `test_verify::test_verify_waits_before_the_counts_and_reads_the_state_after_the_records`, `::test_verify_stops_with_source_compacting_and_writes_no_report`, `test_cli_chroma::test_copy_and_verify_wait_until_chroma_compacted`, `::test_a_single_node_chroma_gets_one_indexing_status_request_per_command` | cov `acc/source_order::test_copy_during_compaction` (cluster leg) | no | acceptance API |
@@ -111,14 +111,14 @@ server's message.
 | Target: new collection, tenants, properties union | cov `test_schema::test_ensure_collection_*` | cov | cov | acceptance API |
 | Target: existing collection with differences, with extra items, with multi-tenancy | cov `test_schema::test_differences_*` (16 tests), `json::test_copy_stops_when_the_collection_exists_with_other_settings` | no (A-12) | no | acceptance API |
 | Target: existing name that differs only in case | no; deferred (ledger Task 10 minor) | no | no | unit |
-| Target: index types, quantizers, trained quantizers, dynamic | cov `test_schema`, `cmd::test_copy_enables_*` | cov `acc/vector_settings`, `acc/multi_tenant` (dynamic is a strict xfail) | no | acceptance API |
+| Target: index types, quantizers, trained quantizers, dynamic | cov `test_schema`, `cmd::test_copy_enables_*` | cov `acc/vector_settings`, `acc/multi_tenant` (dynamic xfails only when the server refuses the dynamic index) | no | acceptance API |
 | Target: module not enabled | cov `cmd::test_check_refuses_module_not_enabled_on_target` | no (A-09) | no | acceptance API |
 | Target: 401, 403 at connect | cov `json::test_target_errors_map_to_codes` | cov `acc/migration::test_wrong_or_missing_api_key_exits_3` | no | acceptance API |
 | Target: 403 at create or at insert (RBAC without write rights) | no (U-04) | no (needs a second key, section 5) | no | unit |
 | Target: writes refused (READONLY shard, inactive tenant, every object refused) | cov `cmd::test_copy_stops_when_weaviate_refuses_every_object_of_a_batch` (fake) | no (A-02, A-06) | no | acceptance API |
 | Target: per-object refusal with the server's message | cov `test_writer::test_writer_inserts_and_maps_errors` (writer level; U-05 adds the copy path) | no (not producible from Chroma) | no | unit |
 | Target: 429/503/5xx, gRPC UNAVAILABLE, WeaviateRetryError, timeouts | cov `test_schema::test_transient_*`, `test_writer::test_writer_retries_*`, `json::test_copy_retries_a_retry_error_and_then_reports_target_unreachable` | no (A-04 covers unreachable only) | no | acceptance infra |
-| Target: one object above the gRPC message limit | no (U-06, A-05) | no | no | unit |
+| Target: one object above the gRPC message limit | cov `cmd::test_an_object_above_the_message_limit_is_a_reject` (U-06) | no (A-05 not implemented: no Chroma record reaches the limit) | no | unit |
 | Target: cloud connect (port 443, no gRPC URL), explicit port refused | cov `test_schema::test_connect_cloud*`, `test_settings::test_weaviate_url_port_other_than_443_needs_a_grpc_url` | no | cov | local cloud run |
 | Error codes 0, 1, 2, 3 | cov `json::test_error_exit_covers_every_code` and per-code tests | cov | cov (0) | acceptance API |
 | Error codes 4, 5 | cov `json::test_source_errors_map_to_codes`, `::test_a_compaction_during_copy_is_source_compacting_exit_4`, `::test_a_collection_that_chroma_does_not_compact_is_source_compacting_exit_4`, `::test_unexpected_error_gives_an_internal_error_document` | no (A-04 for 4; 5 by design not provoked) | no | acceptance API |
@@ -127,7 +127,7 @@ server's message.
 | Resume: refused batch, refused schema, refused quantizer update | cov `cmd::test_copy_resumes_at_the_refused_page_and_writes_each_object_once`, `::test_a_refused_quantizer_update_stops_copy_and_resumes_without_pages` | part (`acc/vector_settings` resume after check) | no | acceptance API |
 | Resume: renamed target, other URL, missing collection or tenant, other source | cov `cmd::test_copy_refuses_*` (8 tests) | cov `acc/target_change` | no | acceptance API |
 | Resume: state file of an older schema | cov `cmd::test_copy_resumes_a_state_without_targets_and_stores_the_target`, `test_state::test_state_file_without_*` | no | no | unit |
-| Resume: corrupted state file, state of a newer schema | no (U-12) | no | no | unit |
+| Resume: corrupted state file, state of a newer schema | cov `cmd::test_a_corrupted_state_file_is_an_invalid_state`, `::test_a_state_file_of_a_newer_schema_resumes` (U-12) | no | no | unit |
 | Concurrency: two `copy` processes | cov `test_lock`, `cmd::test_copy_refuses_a_directory_that_another_copy_holds` | part `acc/target_change` (lock held by the test process; A-01 adds a real second process) | no | acceptance API |
 | Concurrency: workers and sqlite, stop after an error | cov `test_state::test_lock_keeps_statement_spans_from_overlapping`, `test_copy::test_other_workers_stop_after_a_write_raises` | part (parallelism 5 in every run) | no | acceptance API |
 | Secrets: API keys in stdout, stderr, traceback, error bodies | cov `json::test_no_secret_in_any_output`, `::test_secret_in_an_exception_is_redacted`, `::test_debug_prints_the_traceback_on_stderr` | part (no suite-wide check, A-08) | no | acceptance API |
@@ -175,15 +175,12 @@ seconds). The cases marked "optional" come last; stop before them when
 the budget is used.
 
 Shared data (added once, in `tests/acceptance/chroma/seed.py`): the
-collections `empty` (0 records), `no-vectors` (12 records with documents
-and metadata, added without the `embeddings` key; Chroma 1.5.9 accepts
-such an add), `edge` (about 40 records of 8 dimensions, cosine, see A-10),
-`Mixed-Case`, `mixed-case`, `1-leading-digit` and `class` (5 records of 8
-dimensions each), and the optional `bulk` (50,000 records of 32
-dimensions). `no-vectors` stays out of `COLLECTIONS` (it rejects in keep
-mode) in a second tuple that the seed also makes. New targets go into
-`SUITE_COLLECTIONS`: `Empty`, `No_vectors`, `Edge`, `Mixed_Case`,
-`Mixed_case_2`, `C_1_leading_digit`, `Class`, `Bulk`. A recreated
+collections `empty` (0 records), `edge` (about 40 records of 8
+dimensions, cosine, see A-10), `Mixed-Case`, `mixed-case`,
+`1-leading-digit` and `class` (5 records of 8 dimensions each), and the
+optional `bulk` (50,000 records of 32 dimensions). New targets go into
+`SUITE_COLLECTIONS`: `Empty`, `Edge`, `Mixed_Case`, `Mixed_case_2`,
+`C_1_leading_digit`, `Class`, `Bulk`. A recreated
 collection can show stale array keys from Chroma's sqlite (ledger fact), so
 no case asserts the exact key set of a source collection.
 
