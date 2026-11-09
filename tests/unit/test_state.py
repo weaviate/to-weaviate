@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -13,6 +14,7 @@ from to_weaviate.state import (
     State,
     StateInUse,
     StateUnreadable,
+    StateUnwritable,
     Target,
 )
 from to_weaviate.target.writer import Reject
@@ -461,6 +463,91 @@ def test_a_file_that_is_not_a_database_raises_state_unreadable(tmp_path):
     with pytest.raises(StateUnreadable) as info:
         State(path)
     assert info.value.path == path
+
+
+NOT_ROOT = pytest.mark.skipif(os.geteuid() == 0, reason="root writes read-only files")
+
+
+@NOT_ROOT
+def test_a_read_only_state_file_raises_state_unwritable(tmp_path):
+    path = tmp_path / "state.sqlite"
+    State(path).close()
+    path.chmod(0o444)
+    try:
+        with pytest.raises(StateUnwritable) as info:
+            state = State(path)
+            state.init_collection("r", [Partition("0-1", "0", "1")], 1)
+    finally:
+        path.chmod(0o644)
+    assert str(info.value) == (
+        f"state.sqlite in {tmp_path} cannot be written: the file is read-only."
+    )
+    assert info.value.path == path
+
+
+@NOT_ROOT
+def test_a_read_only_directory_raises_state_unwritable(tmp_path):
+    directory = tmp_path / "mig"
+    directory.mkdir()
+    directory.chmod(0o555)
+    try:
+        with pytest.raises(StateUnwritable) as info:
+            State(directory / "state.sqlite")
+    finally:
+        directory.chmod(0o755)
+    assert str(info.value) == (
+        f"state.sqlite in {directory} cannot be written: "
+        "the directory does not allow it."
+    )
+
+
+class FullDisk:
+    """A sqlite connection whose every statement finds the disk full."""
+
+    def __enter__(self) -> "FullDisk":
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def execute(self, *args: object) -> None:
+        raise sqlite3.OperationalError("database or disk is full")
+
+    executemany = execute
+
+
+def test_a_full_disk_during_a_write_raises_state_unwritable(tmp_path):
+    state = State(tmp_path / "state.sqlite")
+    real = state._db
+    state._db = FullDisk()  # type: ignore[assignment]
+    try:
+        with pytest.raises(StateUnwritable) as info:
+            state.init_collection("r", [Partition("0-1", "0", "1")], 1)
+    finally:
+        state._db = real
+        state.close()
+    assert str(info.value) == (
+        f"state.sqlite in {tmp_path} cannot be written: the disk is full."
+    )
+
+
+def test_another_sqlite_error_during_a_write_is_not_state_unwritable(tmp_path):
+    state = State(tmp_path / "state.sqlite")
+    real = state._db
+
+    class Broken(FullDisk):
+        def execute(self, *args: object) -> None:
+            raise sqlite3.OperationalError("no such table: partitions")
+
+        executemany = execute
+
+    state._db = Broken()  # type: ignore[assignment]
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            state.init_collection("r", [Partition("0-1", "0", "1")], 1)
+    finally:
+        state._db = real
+        state.close()
 
 
 class LockedConnection:

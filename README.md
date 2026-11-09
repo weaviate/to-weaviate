@@ -181,6 +181,10 @@ run reads again are counted once.
 Every command takes `--dir`. The default is `./.to-weaviate`. The directory
 holds `inspect.json`, `plan.yaml`, `state.sqlite`, `copy.lock`,
 `events.jsonl`, `rejects.jsonl`, `report.md` and `report.json`.
+When the disk of the directory is full, or the directory or a file in it
+is read-only, a command stops with the error `directory_unwritable`, exit
+2, naming the file and the cause. `copy` resumes at the page it was on
+once the directory can be written.
 
 ## JSON output
 
@@ -204,7 +208,7 @@ The exit code is the same with and without `--json`:
 |---|---|---|
 | 0 | success | |
 | 1 | rejected records or a failed verification | `rejects`, `verification_failed` |
-| 2 | usage error, invalid plan, a state of another target, or a state file that cannot be read | `usage`, `invalid_plan`, `plan_mismatch`, `target_rejected_schema`, `state_mismatch`, `invalid_state` |
+| 2 | usage error, invalid plan, a state of another target, a state file that cannot be read, or a directory that cannot be written | `usage`, `invalid_plan`, `plan_mismatch`, `target_rejected_schema`, `state_mismatch`, `invalid_state`, `directory_unwritable` |
 | 3 | missing credential or authentication failure | `missing_credential`, `auth_failed` |
 | 4 | source or target unreachable | `source_unreachable`, `target_unreachable` |
 | 5 | internal error | `internal_error` |

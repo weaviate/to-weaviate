@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -2444,6 +2445,67 @@ def test_a_tenant_name_that_weaviate_refuses_is_an_invalid_plan(tmp_path, cmd):
         )
     ]
     assert fakes.schema.ensured == [] and fakes.writer.calls == 0
+
+
+UNWRITABLE_HINT = "Make --dir and its files writable, or use another --dir."
+DISK_FULL_HINT = "Free space on the disk of --dir, or use another --dir."
+NOT_ROOT = pytest.mark.skipif(os.geteuid() == 0, reason="root writes read-only files")
+
+
+@NOT_ROOT
+def test_a_read_only_directory_is_directory_unwritable(tmp_path):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    directory = tmp_path / DIR
+    directory.chmod(0o555)
+    try:
+        r = invoke(fakes, "copy", "--json")
+    finally:
+        directory.chmod(0o755)
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"], d["hint"]) == (
+        "directory_unwritable",
+        f"copy.lock in {DIR} cannot be written: Permission denied.",
+        UNWRITABLE_HINT,
+    )
+    assert fakes.writer.calls == 0
+
+
+@NOT_ROOT
+def test_a_read_only_state_file_is_directory_unwritable(tmp_path):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    path = tmp_path / DIR / "state.sqlite"
+    State(path).close()
+    path.chmod(0o444)
+    try:
+        r = invoke(fakes, "copy", "--json")
+    finally:
+        path.chmod(0o644)
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"], d["hint"]) == (
+        "directory_unwritable",
+        f"state.sqlite in {DIR} cannot be written: the file is read-only.",
+        UNWRITABLE_HINT,
+    )
+    assert fakes.writer.calls == 0
+
+
+def test_a_full_disk_is_directory_unwritable(monkeypatch):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+
+    def full(self: State, *args: object, **kwargs: object) -> None:
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(State, "init_collection", full)
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"], d["hint"]) == (
+        "directory_unwritable",
+        "A database file cannot be written: the disk is full.",
+        DISK_FULL_HINT,
+    )
 
 
 STATE_HINT_UNREADABLE = "Start again with another --dir, or restore the file."
