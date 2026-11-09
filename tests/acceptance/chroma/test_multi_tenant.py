@@ -122,3 +122,23 @@ def test_a_trained_quantizer_compresses_the_vectors_of_every_tenant(seeded, tmp_
     while weaviate_compressed(TARGET) != [True, True] and time.monotonic() < deadline:
         time.sleep(0.5)
     assert weaviate_compressed(TARGET) == [True, True]
+
+
+def test_a_tenant_name_that_weaviate_refuses_is_an_invalid_name(seeded, tmp_path):
+    r = run(["inspect", "chroma", "--collection", "tenant-a"], tmp_path)
+    assert r.exit_code == 0, r
+    plan = read_plan(tmp_path)
+    plan["collections"][0]["target"]["name"] = TARGET
+    plan["collections"][0]["target"]["tenant"] = "a.b"
+    write_plan(tmp_path, plan)
+    for cmd in (["check"], ["copy"]):
+        r = run(cmd, tmp_path)
+        assert r.exit_code == 2 and r.data["code"] == "invalid_plan", r
+        assert [(e["code"], e["message"]) for e in r.data["errors"]] == [
+            (
+                "invalid_name",
+                "tenant a.b: Weaviate accepts a tenant name that matches "
+                "^[-_0-9A-Za-z]{1,64}$",
+            )
+        ], r
+    assert not weaviate_exists(TARGET)

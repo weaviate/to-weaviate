@@ -6,8 +6,10 @@ import re
 # The client refuses the property name vector.
 MAX_COLLECTION_NAME = 255
 MAX_PROPERTY_NAME = 231
+MAX_TENANT_NAME = 64
 COLLECTION_NAME_RULE = f"^[A-Z][_0-9A-Za-z]{{0,{MAX_COLLECTION_NAME - 1}}}$"
 PROPERTY_NAME_RULE = f"^[_A-Za-z][_0-9A-Za-z]{{0,{MAX_PROPERTY_NAME - 1}}}$"
+TENANT_NAME_RULE = f"^[-_0-9A-Za-z]{{1,{MAX_TENANT_NAME}}}$"
 SERVER_RESERVED = ("id", "_id", "_additional")
 CLIENT_RESERVED = ("vector",)
 # The draft uses document, source_id and uri itself.
@@ -62,6 +64,13 @@ def property_name_problem(name: str) -> str | None:
             f"case, as {stored}; use that name"
         )
     return None
+
+
+def tenant_name_problem(name: str) -> str | None:
+    """Why Weaviate refuses the tenant name `name`, or None."""
+    if re.fullmatch(TENANT_NAME_RULE, name):
+        return None
+    return f"Weaviate accepts a tenant name that matches {TENANT_NAME_RULE}"
 
 
 def reserved_suffix(name: str) -> str | None:
