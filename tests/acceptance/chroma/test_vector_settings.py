@@ -14,6 +14,7 @@ from conftest import (
     nodes,
     read_plan,
     run,
+    shard_replicas,
     weaviate_compressed,
     weaviate_config,
     weaviate_exists,
@@ -210,10 +211,10 @@ def test_quantizer_settings_reach_the_server(docs_rq_inspection, tmp_path, quant
     assert found.vector_index_type() == "hnsw"
     _assert_quantizer(found.quantizer, quantizer)
     if quantizer["type"] in COMPRESS_AT_ONCE:
-        # {True}: every shard is compressed. {False}: no shard is.
-        expected = {COMPRESS_AT_ONCE[quantizer["type"]]}
+        # One flag per replica of each shard.
+        expected = [COMPRESS_AT_ONCE[quantizer["type"]]] * shard_replicas("Docs_rq")
         compressed = weaviate_compressed("Docs_rq")
-        assert set(compressed) == expected, compressed
+        assert compressed == expected, compressed
 
 
 def _expect_dynamic_outcome(r: Result) -> None:
@@ -295,9 +296,10 @@ def test_trained_quantizer_compresses_the_vectors(docs_rq_inspection, tmp_path, 
     index = {"type": "hnsw", "quantizer": quantizer}
     _plan_with_index(docs_rq_inspection, tmp_path, index)
     copy_and_verify(tmp_path)
+    # One flag per replica of each shard.
+    every_shard = [True] * shard_replicas("Docs_rq")
     deadline = time.monotonic() + COMPRESSION_WAIT
-    # Every shard is compressed.
-    while set(weaviate_compressed("Docs_rq")) != {True} and time.monotonic() < deadline:
+    while weaviate_compressed("Docs_rq") != every_shard and time.monotonic() < deadline:
         time.sleep(0.5)
     compressed = weaviate_compressed("Docs_rq")
-    assert set(compressed) == {True}, compressed
+    assert compressed == every_shard, compressed

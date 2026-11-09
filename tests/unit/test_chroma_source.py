@@ -191,6 +191,15 @@ def test_inspect_sample_pages_limits_metadata_pages(fake_client):
     assert fake_client.calls_including(["metadatas"]) == 2
 
 
+@pytest.mark.parametrize(
+    ("asked", "searched"), [(None, ["db"]), (["other", "db"], ["other", "db"])]
+)
+def test_inspect_exposes_the_namespaces_it_searched(source, asked, searched):
+    assert source.searched_namespaces == []
+    source.inspect(asked, ["nope"], None)
+    assert source.searched_namespaces == searched
+
+
 def test_inspect_filters_by_name_and_namespace(source):
     assert source.inspect(None, ["nope"], None) == []
     assert source.inspect(["other"], None, None) == []
@@ -325,6 +334,16 @@ def test_read_decodes_a_null_in_an_embedding_as_nan(source, fake_client, inspect
     assert second is not None and math.isnan(second[0]) and second[1] == 1.0
 
 
+@pytest.mark.parametrize("value", [True, False])
+def test_read_decodes_a_boolean_in_an_embedding_as_nan(
+    source, fake_client, inspected, value
+):
+    fake_client.records[1]["vector"] = [value, 1.0]
+    page = source.read(inspected, Partition("0-3", "0", "3"), None, True)
+    vector = page.records[1].vector
+    assert vector is not None and math.isnan(vector[0]) and vector[1] == 1.0
+
+
 def test_read_without_vectors_gives_none(source, inspected):
     page = source.read(inspected, Partition("0-2", "0", "2"), None, False)
     assert all(r.vector is None for r in page.records)
@@ -425,6 +444,14 @@ def test_sample_reads_the_live_count_not_the_inspected_one(
     )
     assert len({r.id for r in records}) == len(records) == 300
     assert fake_client.count_calls == 1
+
+
+@pytest.mark.parametrize("count", [0, 1000])
+def test_sample_holds_the_count_it_read(source, fake_client, inspected, count):
+    fake_client.records = LazyRecords(count)
+    fake_client.count_calls = 0
+    records = source.sample(replace(inspected, count=5), 300, random.Random(1), False)
+    assert records.source_count == count and fake_client.count_calls == 1
 
 
 def test_sample_of_300_from_100000_comes_from_10_places(source, fake_client, inspected):

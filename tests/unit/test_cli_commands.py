@@ -585,6 +585,25 @@ def test_inspect_of_every_database_names_them_in_the_order_chroma_lists_them():
     assert not DIR.exists()
 
 
+class ChangingDatabases(NoCollections):
+    """NoCollections that lists the next item of `listings` on each call."""
+
+    def __init__(self, listings: list[list[str]]) -> None:
+        super().__init__([])
+        self.listings = listings
+
+    def databases(self, tenant: str) -> list[str]:
+        return self.listings.pop(0)
+
+
+def test_inspect_that_finds_no_collection_names_the_databases_of_one_listing():
+    client = ChangingDatabases([["db-a"], ["db-a", "db-new"]])
+    source = ChromaSource(client, "t")  # type: ignore[arg-type]
+    r = invoke(FakeFactories(source), "inspect", "chroma", "--json")  # type: ignore[arg-type]
+    assert error_of(r)[2] == "Chroma tenant t has no collection in database db-a."
+    assert client.listings == [["db-a", "db-new"]]
+
+
 def test_inspect_of_a_tenant_without_a_database_exits_2():
     source = ChromaSource(NoCollections([]), "t")
     r = invoke(FakeFactories(source), "inspect", "chroma", "--json")  # type: ignore[arg-type]
@@ -886,6 +905,32 @@ def test_copy_resumes_at_the_refused_page_and_writes_each_object_once():
     assert set(client.writes_per_uuid.values()) == {1}
 
 
+@pytest.mark.parametrize("value", [True, False])
+def test_copy_rejects_a_record_whose_embedding_holds_a_boolean(value):
+    rows = [
+        {
+            "id": f"id-{i}",
+            "embedding": [float(i), 1.0],
+            "document": f"doc {i}",
+            "uri": None,
+            "metadata": {"year": 2000 + i},
+        }
+        for i in range(10)
+    ]
+    rows[4]["embedding"] = [value, 1.0]
+    fakes = inspected(FakeFactories(ChromaSource(ChromaRows(rows), "t")))  # type: ignore[arg-type]
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 1, r.output
+    row = json.loads(r.stdout)["collections"][0]
+    assert (row["copied"], row["rejects"]) == (9, 1)
+    assert to_uuid("id-4") not in fakes.writer.objects
+    reject = json.loads((DIR / "rejects.jsonl").read_text())
+    assert (reject["source_id"], reject["reason"]) == (
+        "id-4",
+        "embedding holds a value that is not a number",
+    )
+
+
 # (first target name, first tenant, second target name, second tenant)
 ONE_PLACE = [
     ("Docs", None, "Docs", None),
@@ -1162,6 +1207,39 @@ def test_an_entry_is_done_again_when_its_plan_stops_needing_the_update(tmp_path)
     assert status["done"] is True
 
 
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_check_and_copy_show_the_quantizer_training_warning(cmd):
+    source = FakeSource(cli_records(10))
+    fakes = inspected(FakeFactories(source), "--index", "hnsw", "--quantizer", "sq")
+    js = invoke(fakes, cmd, "--json")
+    assert js.exit_code == 0, js.output
+    warnings = json.loads(js.stdout)["warnings"]
+    assert [(w["code"], w["collection"]) for w in warnings] == [
+        ("quantizer_training", "Docs")
+    ]
+    assert "the source has 10 records" in warnings[0]["message"]
+    text = invoke(fakes, cmd)
+    assert text.exit_code == 0, text.output
+    assert "warning quantizer_training Docs: vector default:" in text.stdout
+
+
+def test_copy_with_rejects_shows_the_quantizer_training_warning():
+    source = FakeSource(cli_records(10))
+    writer = FakeWriter(reject_ids={"id-3"})
+    sq = ["--index", "hnsw", "--quantizer", "sq"]
+    fakes = inspected(FakeFactories(source, writer=writer), *sq)
+    js = invoke(fakes, "copy", "--json")
+    assert js.exit_code == 1, js.output
+    d = json.loads(js.stdout)
+    assert d["code"] == "rejects"
+    assert [(w["code"], w["collection"]) for w in d["warnings"]] == [
+        ("quantizer_training", "Docs")
+    ]
+    text = invoke(fakes, "copy")
+    assert text.exit_code == 1, text.output
+    assert "warning quantizer_training Docs: vector default:" in text.stdout
+
+
 def test_copy_requires_provider_key():
     fakes = inspected(
         FakeFactories(FakeSource(cli_records(10))),
@@ -1296,6 +1374,56 @@ def test_copy_refuses_a_tenant_change(tmp_path):
     d = mismatch(invoke(fakes, "copy", "--json"))
     assert "collection Docs, tenant a. The plan" in d["message"]
     assert d["message"].endswith("collection Docs, tenant b.")
+
+
+SOURCE_CHANGED_HINT = (
+    "Run to-weaviate inspect chroma --force to inspect the new source, or set "
+    "CHROMA_URL and CHROMA_TENANT back to the source of the plan."
+)
+PLANNED_SOURCE = "https://api.trychroma.com, the tenant of the API key"
+
+
+@pytest.mark.parametrize("cmd", ["copy", "verify"])
+@pytest.mark.parametrize(
+    ("env", "now"),
+    [
+        (
+            {"CHROMA_URL": "https://user:MADE-UP-PW@other.example.com/?t=MADE-UP-T"},
+            "https://other.example.com/, the tenant of the API key",
+        ),
+        ({"CHROMA_TENANT": "other"}, "https://api.trychroma.com, tenant other"),
+    ],
+    ids=["url", "tenant"],
+)
+def test_copy_and_verify_refuse_another_chroma_source_than_the_plan(cmd, env, now):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    r = invoke(fakes, cmd, "--json", **env)
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"], d["hint"]) == (
+        "invalid_plan",
+        f"{DIR / 'plan.yaml'} was inspected from {PLANNED_SOURCE}. "
+        f"CHROMA_URL and CHROMA_TENANT now name {now}.",
+        SOURCE_CHANGED_HINT,
+    )
+    assert fakes.source_calls == 1 and fakes.writer.calls == 0
+    assert "MADE-UP" not in r.output
+
+
+def test_copy_compares_the_planned_source_url_without_its_userinfo(tmp_path):
+    # A hand-edited source URL: its password is neither compared nor printed.
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    path = tmp_path / DIR / "plan.yaml"
+    plan = load_plan(path)
+    plan.source.url = "https://user:MADE-UP-PW@chroma.example.com"
+    save_plan(plan, path)
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 2, r.output
+    message = json.loads(r.stdout)["message"]
+    assert "was inspected from https://chroma.example.com, the tenant" in message
+    assert "MADE-UP" not in r.output
+    r = invoke(fakes, "copy", "--json", CHROMA_URL="https://chroma.example.com")
+    assert r.exit_code == 0, r.output
 
 
 @pytest.mark.parametrize("partial", [True, False])
@@ -2165,6 +2293,33 @@ def test_a_provider_that_refuses_the_key_is_auth_failed_naming_its_variables():
     assert "sk-made" not in r.output and "3456" not in r.output
     assert client.calls == 1
     assert len(client.writes_per_uuid) == 0
+
+
+def test_the_debug_traceback_of_a_provider_refusal_holds_no_provider_text():
+    fakes, client = refusing(10, lambda n: all_failed(PROVIDER_401))
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json", TO_WEAVIATE_DEBUG="1")
+    assert r.exit_code == 3, r.output
+    assert "Traceback" in r.stderr and "ProviderRefused" in r.stderr
+    assert "Incorrect API key" not in r.output and "sk-made" not in r.output
+
+
+def test_a_provider_that_refuses_the_key_of_one_object_is_auth_failed(tmp_path):
+    client = FakeInsertClient(
+        reject=lambda obj: PROVIDER_401 if obj.uuid == to_uuid("id-3") else None
+    )
+    writer = WeaviateWriter(client, sleep=lambda s: None)  # type: ignore[arg-type]
+    source = FakeSource(cli_records(10))
+    fakes = inspected(FakeFactories(source, writer=writer, store=client))
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 3, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"]) == (
+        "auth_failed",
+        "OpenAI API refused the request: the API key is missing or wrong.",
+    )
+    assert "sk-made" not in r.output
+    rejects = tmp_path / DIR / "rejects.jsonl"
+    assert not rejects.exists() or rejects.read_text() == ""
 
 
 def test_a_provider_without_a_variable_is_named_in_the_hint():

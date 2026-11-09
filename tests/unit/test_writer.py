@@ -401,6 +401,16 @@ def test_a_provider_that_refuses_the_key_of_a_single_object_stops_the_batch():
     assert len(data.calls) == 1
 
 
+def test_a_provider_that_refuses_the_key_of_one_object_stops_the_batch():
+    data = FakeData([partial((0, CONTENT_ERROR), (1, PROVIDER_401))] * 10)
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    with pytest.raises(ProviderRefused) as info:
+        writer.write(ENTRY_EMBED, objects(3))
+    assert (info.value.provider, info.value.status) == ("OpenAI API", 401)
+    assert "sk-made" not in str(info.value)
+    assert len(data.calls) == 1
+
+
 def test_all_failed_batch_is_retried_and_then_raises():
     data = FakeData([all_failed("bad vector")] * 10)
     writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]

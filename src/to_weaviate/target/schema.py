@@ -80,6 +80,14 @@ COMPARED_QUANTIZER_FIELDS = (
     "rescore_limit",
 )
 
+# The attribute of a stored property that holds each PropertyPlan flag.
+_STORED_FLAGS = {
+    "tokenization": "tokenization",
+    "searchable": "index_searchable",
+    "filterable": "index_filterable",
+    "range_filters": "index_range_filters",
+}
+
 # A server reports a Google vectorizer as text2vec-google or as the legacy
 # name text2vec-palm.
 _MODULE_NAMES = {"text2vec-google": frozenset({"text2vec-google", "text2vec-palm"})}
@@ -442,6 +450,8 @@ def _vector_differences(plan: VectorPlan, found: Any) -> list[str]:
                 f"vector {name}: index type is {actual_type}, "
                 f"plan has {plan.index.type}"
             )
+        else:
+            out.extend(_index_option_differences(name, plan.index.options, index))
     q = plan.index.quantizer
     if q.type != "default":
         types = _index_quantizers(index)
@@ -452,6 +462,21 @@ def _vector_differences(plan: VectorPlan, found: Any) -> list[str]:
         else:
             parts = [index.hnsw, index.flat] if len(types) == 2 else [index]
             out.extend(_quantizer_field_differences(name, q, parts))
+    return out
+
+
+def _index_option_differences(
+    name: str, options: dict[str, int], index: Any
+) -> list[str]:
+    """Planned index options that the index holds otherwise.
+
+    An option that the index does not report is not compared.
+    """
+    out: list[str] = []
+    for option, value in options.items():
+        found = getattr(index, option, None)
+        if found is not None and found != value:
+            out.append(f"vector {name}: {option} is {found}, plan has {value}")
     return out
 
 
@@ -475,6 +500,29 @@ def _quantizer_field_differences(
     return out
 
 
+def _property_flag_differences(plan: PropertyPlan, found: Any) -> list[str]:
+    """The flags that `_property` sends for `plan` and `found` holds otherwise.
+
+    A flag that the server does not report is not compared.
+    """
+    planned: dict[str, Any] = {}
+    is_text = plan.type in ("text", "text[]")
+    if is_text and plan.tokenization:
+        planned["tokenization"] = plan.tokenization
+    if is_text:
+        planned["searchable"] = plan.searchable
+    planned["filterable"] = plan.filterable
+    planned["range_filters"] = plan.range_filters
+    out: list[str] = []
+    for flag, value in planned.items():
+        reported = getattr(found, _STORED_FLAGS[flag], None)
+        if reported is not None and _val(reported) != _val(value):
+            out.append(
+                f"property {plan.name}: {flag} is {_val(reported)}, plan has {value}"
+            )
+    return out
+
+
 def differences(
     client: weaviate.WeaviateClient, group: list[CollectionPlan]
 ) -> list[str] | None:
@@ -489,18 +537,18 @@ def differences(
             out.append(f"vector {plan.name}: missing in the collection")
         else:
             out.extend(_vector_differences(plan, found))
-    actual = {p.name: _val(p.data_type) for p in cfg.properties}
+    stored = {p.name: p for p in cfg.properties}
     for prop in _properties(group):
         # A type without a mapping is an invalid_type finding of the plan. A
         # missing property is no difference: ensure adds it.
         planned_type = _DATA_TYPES.get(prop.type)
-        if prop.name not in actual:
+        if prop.name not in stored or planned_type is None:
             continue
-        if planned_type is not None and actual[prop.name] != planned_type.value:
-            out.append(
-                f"property {prop.name}: type is {actual[prop.name]}, "
-                f"plan has {prop.type}"
-            )
+        actual = _val(stored[prop.name].data_type)
+        if actual != planned_type.value:
+            out.append(f"property {prop.name}: type is {actual}, plan has {prop.type}")
+        else:
+            out.extend(_property_flag_differences(prop, stored[prop.name]))
     planned_mt = bool(_tenants(group))
     if planned_mt != cfg.multi_tenancy_config.enabled:
         found_mt = "on" if cfg.multi_tenancy_config.enabled else "off"

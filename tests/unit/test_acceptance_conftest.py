@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import e2e
 import pytest
@@ -119,6 +120,16 @@ def test_nodes_is_the_variable_when_it_is_set(env, server):
     fake = server(1)
     assert e2e.nodes() == 3
     assert fake.calls == 0
+
+
+def test_shard_replicas_counts_each_replica_of_each_shard(monkeypatch):
+    # The cluster leg: 3 nodes, one shard per node, replication factor 3.
+    config = SimpleNamespace(
+        sharding_config=SimpleNamespace(actual_count=3),
+        replication_config=SimpleNamespace(factor=3),
+    )
+    monkeypatch.setattr(e2e, "weaviate_config", lambda name: config)
+    assert e2e.shard_replicas("Docs_rq") == 9
 
 
 @pytest.mark.parametrize("value", ["0", "three"])
@@ -259,6 +270,14 @@ CLOUD_REFUSED = {
         ".weaviate.network",
     ),
     "not a url": ({"WEAVIATE_URL": "https://[abc"}, "WEAVIATE_URL is not a URL"),
+    "port not a number": (
+        {"WEAVIATE_URL": f"{CLOUD_URL}:bad"},
+        "WEAVIATE_URL is not a URL",
+    ),
+    "port out of range": (
+        {"WEAVIATE_URL": f"{CLOUD_URL}:99999"},
+        "WEAVIATE_URL is not a URL",
+    ),
     "no key": ({"WEAVIATE_API_KEY": None}, "WEAVIATE_API_KEY is not set"),
     "grpc url": (
         {"WEAVIATE_GRPC_URL": "https://grpc-abc.weaviate.cloud"},

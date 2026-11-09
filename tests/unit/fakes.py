@@ -22,6 +22,7 @@ from to_weaviate.sources.base import (
     Page,
     Partition,
     Record,
+    Sample,
     SourceCollection,
 )
 from to_weaviate.target.schema import PlanMismatch
@@ -76,6 +77,7 @@ class FakeSource:
         self.read_delay = read_delay
         self.embedding = embedding
         self.inspected_namespaces: list[list[str] | None] = []
+        self.searched_namespaces: list[str] = []
         self.compaction: list[dict[str, int]] | None = None
         self.waits: list[tuple[int, int]] = []
         self.wait_error: Exception | None = None
@@ -101,6 +103,9 @@ class FakeSource:
         sample_pages: int | None,
     ) -> list[SourceCollection]:
         self.inspected_namespaces.append(namespaces)
+        self.searched_namespaces = (
+            [self.NAMESPACE] if namespaces is None else namespaces
+        )
         if namespaces is not None and self.NAMESPACE not in namespaces:
             return []
         if collections is not None and self.COLLECTION not in collections:
@@ -227,12 +232,12 @@ class FakeSource:
         size: int,
         rng: random.Random,
         with_vectors: bool,
-    ) -> list[Record]:
+    ) -> Sample:
         self.calls.append("sample")
         picked = rng.sample(self.records, min(size, len(self.records)))
-        if with_vectors:
-            return picked
-        return [replace(r, vector=None) for r in picked]
+        if not with_vectors:
+            picked = [replace(r, vector=None) for r in picked]
+        return Sample(picked, len(self.records))
 
     def vector_search(
         self, collection: SourceCollection, vector: list[float], limit: int

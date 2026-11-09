@@ -230,6 +230,92 @@ def test_secret_in_an_exception_is_redacted(mode):
     assert "***" in r.output
 
 
+# A made-up WEAVIATE_API_KEY that is also the name of the source and the target.
+KEY_AS_NAME = "MADE_UP_KEY_42"
+
+
+def key_named_fakes() -> FakeFactories:
+    source = FakeSource(cli_records(3))
+    source.COLLECTION = KEY_AS_NAME
+    return FakeFactories(source)
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [["inspect", "chroma", "--force"], ["check"], ["copy"], ["status"], ["verify"]],
+    ids=lambda cmd: cmd[0],
+)
+def test_secret_in_a_success_document_is_redacted(cmd):
+    fakes = key_named_fakes()
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    assert invoke(fakes, "copy").exit_code == 0
+    # check warns about each planned property that the collection lacks.
+    fakes.schema.properties[KEY_AS_NAME] = set()
+    r = invoke(fakes, *cmd, "--json", WEAVIATE_API_KEY=KEY_AS_NAME)
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["status"] == "success"
+    assert KEY_AS_NAME not in r.stdout and "***" in r.stdout
+
+
+def test_secret_in_a_success_text_is_redacted():
+    r = invoke(key_named_fakes(), "inspect", "chroma", WEAVIATE_API_KEY=KEY_AS_NAME)
+    assert r.exit_code == 0, r.output
+    assert KEY_AS_NAME not in r.stdout and "*** -> ***" in r.stdout
+
+
+@pytest.mark.parametrize("mode", [["--json"], []], ids=["json", "text"])
+def test_secret_in_a_progress_line_is_redacted(mode):
+    fakes = key_named_fakes()
+    sq = ["--index", "hnsw", "--quantizer", "sq"]
+    assert invoke(fakes, "inspect", "chroma", *sq).exit_code == 0
+    # copy adds each planned property that the collection lacks.
+    fakes.schema.properties[KEY_AS_NAME] = set()
+    r = invoke(fakes, "copy", *mode, WEAVIATE_API_KEY=KEY_AS_NAME)
+    assert r.exit_code == 0, r.output
+    assert KEY_AS_NAME not in r.stdout and KEY_AS_NAME not in r.stderr
+    progress = (r.stderr if mode else r.stdout).splitlines()
+    for line in (
+        "Added the property document to ***",
+        "Copying *** to ***",
+        "Enabling the trained quantizers of ***",
+        "Copied ***: 3 records, 0 rejects",
+    ):
+        assert line in progress, progress
+
+
+def test_secret_in_the_source_changed_warning_is_redacted():
+    fakes = key_named_fakes()
+    source = fakes.source
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    assert invoke(fakes, "copy", "--parallelism", "1").exit_code == 0
+    # id-2, the last record read, is deleted; id-3 and id-4 are added.
+    source.records = source.records[:2] + cli_records(5)[3:]
+    r = invoke(fakes, "copy", "--json", WEAVIATE_API_KEY=KEY_AS_NAME)
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["collections"][0]["reread_from"] == 0
+    assert KEY_AS_NAME not in r.stdout and KEY_AS_NAME not in r.stderr
+    assert (
+        "Warning: ***: the source changed since the last run; re-reading from the start"
+    ) in r.stderr.splitlines()
+
+
+def test_secret_in_a_progress_line_of_verify_is_redacted():
+    fakes = key_named_fakes()
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    assert invoke(fakes, "copy").exit_code == 0
+    fakes.source.waits = [(5, 10)]
+    fakes.source.compaction = [{"version": 2, "log_position": 10}]
+    r = invoke(fakes, "verify", "--json", WEAVIATE_API_KEY=KEY_AS_NAME)
+    assert r.exit_code == 0, r.output
+    assert KEY_AS_NAME not in r.stdout and KEY_AS_NAME not in r.stderr
+    progress = r.stderr.splitlines()
+    assert "Verifying *** in ***" in progress, progress
+    assert (
+        "Waiting for Chroma to compact ***: 5 of 10 operations not compacted"
+        in progress
+    ), progress
+
+
 LONG_KEY = (
     "".join(chr(ord("a") + i * 7 % 26) for i in range(230))
     + "é"
@@ -623,9 +709,9 @@ def test_a_failing_error_report_prints_a_fixed_error(monkeypatch, mode):
     def broken(env):
         raise ValueError("redaction broke on SENTINEL-X")
 
-    monkeypatch.setattr("to_weaviate.cli.secret_values", broken)
     fakes = FakeFactories(FakeSource(cli_records(10)))
     assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    monkeypatch.setattr("to_weaviate.cli.secret_values", broken)
     fakes.target_error = RuntimeError("headers: SENTINEL-B")
     r = invoke(fakes, "check", *mode, TO_WEAVIATE_DEBUG="1")
     assert r.exit_code == 5

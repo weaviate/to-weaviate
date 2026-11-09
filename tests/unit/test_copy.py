@@ -341,6 +341,18 @@ def test_a_deleted_last_read_record_falls_back_to_an_earlier_partition(
     assert _warnings(tmp_path) == []
 
 
+def test_a_tail_that_reads_nothing_gives_no_reread_from(src, state, events, tmp_path):
+    writer = FakeWriter()
+    copy_collection(src, writer, state, events, ENTRY, C, 2)
+    # Every record after id-499, the last record of the first partition, is gone.
+    del src.records[500:]
+    reads = src.read_calls
+    result = copy_collection(src, writer, state, events, ENTRY, C, 2)
+    assert state.partitions(C.ref)[-1] == Partition("500-", "500", "500")
+    assert src.read_calls - reads == 1 and len(writer.objects) == 1000
+    assert result.reread_from is None and _warnings(tmp_path) == []
+
+
 def test_an_unchanged_source_costs_one_id_read(src, state, events):
     writer = FakeWriter()
     copy_collection(src, writer, state, events, ENTRY, C, 2)

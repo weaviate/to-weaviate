@@ -27,6 +27,7 @@ import sys
 import traceback
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -107,6 +108,7 @@ from to_weaviate.settings import (
     chroma_settings,
     key_variables,
     load_env,
+    stored_url,
     weaviate_settings,
     without_userinfo,
 )
@@ -132,6 +134,7 @@ from to_weaviate.state import (
 from to_weaviate.target.connect import connect
 from to_weaviate.target.reader import TargetReader, WeaviateReader
 from to_weaviate.target.schema import (
+    USERINFO_TEXT,
     PlanMismatch,
     PropertyRejected,
     Schema,
@@ -203,6 +206,10 @@ STATE_HINT = (
     "target, use another --dir."
 )
 GONE_HINT = "To copy it again, use another --dir."
+SOURCE_CHANGED_HINT = (
+    "Run to-weaviate inspect chroma --force to inspect the new source, or set "
+    "CHROMA_URL and CHROMA_TENANT back to the source of the plan."
+)
 UNREADABLE_STATE_HINT = "Start again with another --dir, or restore the file."
 UNWRITABLE_HINT = "Make --dir and its files writable, or use another --dir."
 DISK_FULL_HINT = "Free space on the disk of --dir, or use another --dir."
@@ -431,6 +438,11 @@ _FALLBACK_REPORT = _Report(
     "",
 )
 
+# The secret values of the running command; see `_command_secrets`.
+_COMMAND_SECRETS: ContextVar[list[str] | None] = ContextVar(
+    "command_secrets", default=None
+)
+
 
 def _report(exc: Exception) -> _Report:
     """The redacted output for `exc`. Builds strings only; prints nothing."""
@@ -455,6 +467,7 @@ def _handled(json_output: bool) -> Iterator[None]:
     Typer and Click exits keep their own behavior. Secret values are redacted
     from everything printed here.
     """
+    token = _COMMAND_SECRETS.set(None)
     try:
         yield
     except (typer.Exit, typer.Abort, typer.TyperException):
@@ -472,6 +485,35 @@ def _handled(json_output: bool) -> Iterator[None]:
             print(f"Error: {report.document['message']}", file=sys.stderr)
             print(f"Hint: {report.document['hint']}", file=sys.stderr)
         raise typer.Exit(report.exit_code) from None
+    finally:
+        _COMMAND_SECRETS.reset(token)
+
+
+def _command_secrets() -> list[str]:
+    """The secret values that `_report` redacts from an error, for this command.
+
+    The set is read on first use and kept until the command ends: `_handled`
+    clears it when a command starts. That is safe because the environment and
+    .env do not change while a command runs. A cache per process would not
+    be: one process can run several commands with other secrets, as the tests
+    do through CliRunner.
+    """
+    secrets = _COMMAND_SECRETS.get()
+    if secrets is None:
+        secrets = secret_values(_handler_env())
+        _COMMAND_SECRETS.set(secrets)
+    return secrets
+
+
+def _emit_success(json_output: bool, document: dict[str, Any], text: str) -> None:
+    """`emit`, redacting the `_command_secrets`."""
+    secrets = _command_secrets()
+    emit(json_output, redact_strings(document, secrets), redact(text, secrets))
+
+
+def _info(json_output: bool, line: str) -> None:
+    """`info`, redacting the `_command_secrets`."""
+    info(json_output, redact(line, _command_secrets()))
 
 
 def _yaml_error_text(exc: yaml.YAMLError) -> str:
@@ -533,6 +575,31 @@ def _load_plan(directory: Path) -> Plan:
     if errors:
         raise _plan_errors(errors, [])
     return plan
+
+
+def _chroma_text(url: str | None, tenant: str | None) -> str:
+    where = url if url is not None else f"a URL that {USERINFO_TEXT}"
+    which = f"tenant {tenant}" if tenant else "the tenant of the API key"
+    return f"{where}, {which}"
+
+
+def _require_planned_source(
+    plan: Plan, settings: ChromaSettings, directory: Path
+) -> None:
+    """Refuse CHROMA_URL and CHROMA_TENANT when they name another source than the plan.
+
+    The URLs are compared and printed in their stored form, without userinfo:
+    plan.yaml can be edited by hand.
+    """
+    planned = (stored_url(plan.source.url), plan.source.tenant)
+    current = (settings.stored_url, settings.tenant)
+    if planned != current:
+        raise CliError(
+            "invalid_plan",
+            f"{directory / PLAN_FILE} was inspected from {_chroma_text(*planned)}. "
+            f"CHROMA_URL and CHROMA_TENANT now name {_chroma_text(*current)}.",
+            SOURCE_CHANGED_HINT,
+        )
 
 
 def _source_collection(raw: dict[str, Any]) -> SourceCollection:
@@ -684,7 +751,7 @@ def _inspect_chroma(
     if not databases and settings.database is not None:
         databases = [settings.database]
     source = factories.source(settings)
-    info(json_output, f"Inspecting Chroma at {settings.stored_url}")
+    _info(json_output, f"Inspecting Chroma at {settings.stored_url}")
     collections = source.inspect(databases or None, names or None, sample_pages)
     missing = sorted(set(names) - {c.name for c in collections})
     if missing:
@@ -695,7 +762,7 @@ def _inspect_chroma(
             "another database.",
         )
     if not collections:
-        raise _no_collection(source.tenant, databases or source.namespaces())
+        raise _no_collection(source.tenant, source.searched_namespaces)
     collections, source_notes = _stored_collections(collections)
     try:
         plan = draft_plan(
@@ -720,7 +787,7 @@ def _inspect_chroma(
 
     found = decisions(plan, {c.ref: c for c in collections})
     document, text = _inspect_output(plan, found, plan_path)
-    emit(json_output, document, text)
+    _emit_success(json_output, document, text)
 
 
 def _inspect_output(
@@ -808,7 +875,7 @@ def _check(factories: _Factories, directory: Path, json_output: bool) -> None:
     errors[:0] = load_findings(plan)
     settings = weaviate_settings(load_env(Path.cwd()))
     _require_provider_keys(plan, settings)
-    info(json_output, f"Checking the target at {without_userinfo(settings.url)}")
+    _info(json_output, f"Checking the target at {without_userinfo(settings.url)}")
     schema = factories.schema(settings)
     errors.extend(module_findings(plan, schema.modules()))
     for name, group in target_groups(plan.collections).items():
@@ -823,7 +890,7 @@ def _check(factories: _Factories, directory: Path, json_output: bool) -> None:
     lines = _findings_text(errors, warnings)
     lines.append(f"No errors, {_plural(len(warnings), 'warning')}.")
     document = {"status": "success", **_findings_document(errors, warnings)}
-    emit(json_output, document, "\n".join(lines))
+    _emit_success(json_output, document, "\n".join(lines))
 
 
 def _rows(
@@ -968,10 +1035,14 @@ def _copy_lock(directory: Path) -> Iterator[None]:
 
 
 def _warning(name: str) -> Callable[[str], None]:
-    """A function that prints a warning about the collection `name` on stderr."""
+    """A function that prints a warning about the collection `name` on stderr.
+
+    The printed line is redacted of the `_command_secrets`.
+    """
 
     def warn(line: str) -> None:
-        print(f"Warning: {name}: {line}", file=sys.stderr, flush=True)
+        text = redact(f"Warning: {name}: {line}", _command_secrets())
+        print(text, file=sys.stderr, flush=True)
 
     return warn
 
@@ -980,7 +1051,7 @@ def _waiting(json_output: bool, name: str) -> Callable[[int, int], None]:
     """A function that prints the wait for Chroma's compaction of `name`."""
 
     def waiting(unindexed: int, total: int) -> None:
-        info(
+        _info(
             json_output,
             f"Waiting for Chroma to compact {name}: {unindexed} of {total} "
             "operations not compacted",
@@ -1029,6 +1100,7 @@ def _copy(
         raise _plan_errors(errors, warnings)
     env = load_env(Path.cwd())
     source_settings = chroma_settings(env)
+    _require_planned_source(plan, source_settings, directory)
     target_settings = weaviate_settings(env)
     _require_provider_keys(
         plan.model_copy(update={"collections": entries}), target_settings
@@ -1062,7 +1134,7 @@ def _copy(
                 missing = schema.missing_properties(group)
                 schema.ensure(group)
                 for prop in missing:
-                    info(json_output, f"Added the property {prop} to {name}")
+                    _info(json_output, f"Added the property {prop} to {name}")
                     added.append({"collection": name, "property": prop})
             events = Events(directory / EVENTS_FILE)
             rereads: dict[str, int] = {}
@@ -1076,7 +1148,9 @@ def _copy(
                     # A row from a run with an earlier plan would keep the
                     # entry not done.
                     state.quantizers_updated(ref)
-                info(json_output, f"Copying {entry.source.name} to {entry.target.name}")
+                _info(
+                    json_output, f"Copying {entry.source.name} to {entry.target.name}"
+                )
                 result = copy_collection(
                     source,
                     writer,
@@ -1091,13 +1165,13 @@ def _copy(
                 if result.reread_from is not None:
                     rereads[ref] = result.reread_from
                 if trained:
-                    info(
+                    _info(
                         json_output,
                         f"Enabling the trained quantizers of {entry.target.name}",
                     )
                     schema.enable_trained_quantizers(entry)
                     state.quantizers_updated(ref)
-                info(
+                _info(
                     json_output,
                     f"Copied {entry.source.name}: {_plural(result.copied, 'record')}, "
                     f"{_plural(result.rejects, 'reject')}",
@@ -1111,6 +1185,8 @@ def _copy(
             row["reread_from"] = rereads[row["ref"]]
     document, text = _progress_output(entries, rows)
     document["added_properties"] = added
+    document["warnings"] = _findings_document([], warnings)["warnings"]
+    text = "\n".join([*_findings_text([], warnings), text])
     rejects = sum(row["rejects"] for row in rows)
     if rejects:
         raise CliError(
@@ -1121,7 +1197,7 @@ def _copy(
             fields=document,
             text=text,
         )
-    emit(json_output, {"status": "success", **document}, text)
+    _emit_success(json_output, {"status": "success", **document}, text)
 
 
 def _status(directory: Path, json_output: bool) -> None:
@@ -1138,7 +1214,7 @@ def _status(directory: Path, json_output: bool) -> None:
             state.close()
     rows = _rows(plan.collections, progress)
     document, text = _progress_output(plan.collections, rows, targets)
-    emit(json_output, {"status": "success", **document}, text)
+    _emit_success(json_output, {"status": "success", **document}, text)
 
 
 def _verify(
@@ -1153,6 +1229,7 @@ def _verify(
     plan, inspected = _load_plan_and_inspection(directory)
     env = load_env(Path.cwd())
     source_settings = chroma_settings(env)
+    _require_planned_source(plan, source_settings, directory)
     target_settings = weaviate_settings(env)
     source = factories.source(source_settings)
     reader = factories.reader(target_settings)
@@ -1161,7 +1238,7 @@ def _verify(
     for entry in plan.collections:
         collection = inspected[entry.source.ref]
         place = target_label(entry.target.name, entry.target.tenant)
-        info(json_output, f"Verifying {entry.source.name} in {place}")
+        _info(json_output, f"Verifying {entry.source.name} in {place}")
         missing = missing_target(reader, entry)
         if missing is not None:
             checks.append(missing)
@@ -1191,7 +1268,7 @@ def _verify(
             fields=document,
             text=text,
         )
-    emit(json_output, {"status": "success", **document}, text)
+    _emit_success(json_output, {"status": "success", **document}, text)
 
 
 def _version_callback(value: bool) -> None:

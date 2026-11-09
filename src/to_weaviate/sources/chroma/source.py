@@ -11,6 +11,7 @@ from to_weaviate.sources.base import (
     Page,
     Partition,
     Record,
+    Sample,
     SourceCollection,
     SourceNotCompacted,
 )
@@ -84,8 +85,13 @@ def _no_advance(collection: SourceCollection, offset: int) -> ChromaError:
 
 
 def _number(value: Any) -> float:
-    """`value` as a float. A value that is not a number, such as None, gives NaN."""
-    return float(value) if isinstance(value, int | float) else math.nan
+    """`value` as a float. A value that is not a number, such as None, gives NaN.
+
+    A JSON true or false is a bool, which is an int in Python.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return math.nan
+    return float(value)
 
 
 def _records(response: dict[str, Any]) -> list[Record]:
@@ -131,6 +137,7 @@ class ChromaSource:
         # Workers read other partitions at the same time.
         self._last_pages: dict[tuple[str, str], tuple[int, set[str]]] = {}
         self._pages_lock = threading.Lock()
+        self._searched: list[str] = []
 
     def _get(
         self,
@@ -162,6 +169,10 @@ class ChromaSource:
     def namespaces(self) -> list[str]:
         return self._client.databases(self._tenant)
 
+    @property
+    def searched_namespaces(self) -> list[str]:
+        return list(self._searched)
+
     def inspect(
         self,
         namespaces: list[str] | None,
@@ -169,6 +180,7 @@ class ChromaSource:
         sample_pages: int | None,
     ) -> list[SourceCollection]:
         databases = self.namespaces() if namespaces is None else namespaces
+        self._searched = list(databases)
         found: list[SourceCollection] = []
         for database in databases:
             for raw in self._client.collections(self._tenant, database):
@@ -418,22 +430,23 @@ class ChromaSource:
         size: int,
         rng: random.Random,
         with_vectors: bool,
-    ) -> list[Record]:
+    ) -> Sample:
         """`min(size, count)` different records, read at the `_sample_pages` pages.
 
         `count` is the source count read at the start of the call, not
-        `collection.count`. A source that changes during the call can give
-        fewer records.
+        `collection.count`; the result holds it. A source that changes during
+        the call can give fewer records.
         """
         include = [*READ_INCLUDE, "embeddings"] if with_vectors else READ_INCLUDE
+        count = self.count(collection)
         seen: dict[str, Record] = {}
-        for offset, limit in _sample_pages(self.count(collection), size, rng):
+        for offset, limit in _sample_pages(count, size, rng):
             response = self._get(
                 collection, limit=limit, offset=offset, include=include
             )
             for record in _records(response):
                 seen.setdefault(record.id, record)
-        return list(seen.values())
+        return Sample(seen.values(), count)
 
     def vector_search(
         self, collection: SourceCollection, vector: list[float], limit: int

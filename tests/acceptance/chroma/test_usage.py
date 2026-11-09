@@ -10,6 +10,8 @@ from chroma.seed import (
 )
 from conftest import read_plan, run, run_text, weaviate_by_source_id, write_plan
 
+from to_weaviate.settings import without_userinfo
+
 TINY = ["inspect", "chroma", "--collection", "tiny.l2"]
 NOTE = {
     "source_key": "note",
@@ -68,7 +70,9 @@ def test_text_mode_prints_lines_and_the_error_on_stderr(seeded, tmp_path):
     check = run_text(["check"], tmp_path, env={"WEAVIATE_API_KEY": "made-up-key-b9"})
     assert check.returncode == 3, check
     # In text mode the progress line goes to stdout and the error to stderr.
-    assert check.stdout == f"Checking the target at {os.environ['WEAVIATE_URL']}\n"
+    # The CLI prints the stripped URL without its userinfo.
+    shown = without_userinfo(os.environ["WEAVIATE_URL"].strip())
+    assert check.stdout == f"Checking the target at {shown}\n"
     assert check.stderr.splitlines()[-2:] == [
         "Error: Weaviate refused the request: the API key is missing or wrong.",
         "Hint: Check WEAVIATE_API_KEY in the environment or in .env.",

@@ -21,9 +21,10 @@ def with_retry(
     the minimum delay in seconds. Every delay is capped at 30 seconds. The last
     exception is re-raised when the attempts are used up.
 
-    There are 7 attempts and 6 delays. A full retry waits between 15.75 s and
-    31.5 s, so a restart of a source or a target that lasts a few seconds does
-    not use up the attempts (acceptance case A-23).
+    There are 7 attempts and 6 delays. Without a `minimum`, a full retry waits
+    between 15.75 s and 31.5 s, so a restart of a source or a target that
+    lasts a few seconds does not use up the attempts (acceptance case A-23).
+    A `minimum` from a Retry-After header can raise each delay up to 30 s.
     """
     for attempt in range(attempts):
         try:
