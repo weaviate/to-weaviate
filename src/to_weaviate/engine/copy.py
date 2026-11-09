@@ -438,7 +438,7 @@ def copy_collection(
         }
         place = _tail_place(source, collection, stored, marks, covered, count)
         shifted = place.start != covered
-        if place.superseded:
+        if place.superseded and count > place.start:
             reread_from = place.start
         if shifted and place.start == 0:
             events.emit("warning", "source_changed", ref=ref, message=SOURCE_CHANGED)
