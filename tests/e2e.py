@@ -535,6 +535,16 @@ def weaviate_compressed(name: str) -> list[bool]:
     return [shard.compressed for node in nodes for shard in node.shards or []]
 
 
+def shard_replicas(name: str) -> int:
+    """The flag count of `weaviate_compressed(name)`, for a collection without tenants.
+
+    It returns one flag per replica of each shard: the shard count times the
+    replication factor. With one shard per node on 3 nodes and factor 3, 9.
+    """
+    cfg = weaviate_config(name)
+    return cfg.sharding_config.actual_count * cfg.replication_config.factor
+
+
 def weaviate_config(name: str) -> CollectionConfig:
     """The configuration of the target collection `name`, read from the server."""
     return _weaviate().collections.use(name).config.get()
