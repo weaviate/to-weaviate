@@ -54,6 +54,8 @@ class FakeSource:
     REF = "fake-collection"
     NAMESPACE = "default"
     COLLECTION = "docs"
+    TENANT = "default_tenant"
+    tenant = TENANT
 
     def __init__(
         self,
@@ -76,6 +78,9 @@ class FakeSource:
     def grow_after_partitions(self, records: list[Record]) -> None:
         """Append `records` at the end of the next `partitions()` call."""
         self._growth.extend(records)
+
+    def namespaces(self) -> list[str]:
+        return [self.NAMESPACE]
 
     def inspect(
         self,

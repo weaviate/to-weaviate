@@ -1,13 +1,15 @@
 import json
 import math
 import random
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
 
 from to_weaviate.sources.base import Partition
-from to_weaviate.sources.chroma.source import ChromaSource
+from to_weaviate.sources.chroma.client import CHROMA_MAX_PAGE
+from to_weaviate.sources.chroma.source import ChromaSource, _sample_pages
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -26,6 +28,7 @@ class FakeClient:
         self.records = records
         self.calls: list[Call] = []
         self.queries: list[tuple[list[float], int]] = []
+        self.count_calls = 0
 
     def databases(self, tenant):
         return ["db"]
@@ -34,6 +37,7 @@ class FakeClient:
         return [self.collection] if database == "db" else []
 
     def count(self, tenant, database, collection_id):
+        self.count_calls += 1
         return len(self.records)
 
     def get(
@@ -63,6 +67,27 @@ class FakeClient:
 
     def calls_including(self, include):
         return sum(all(name in c.include for name in include) for c in self.calls)
+
+
+class LazyRecords(Sequence):
+    """`n` records like make_records gives, built only when read."""
+
+    def __init__(self, n):
+        self.n = n
+
+    def __len__(self):
+        return self.n
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(self.n))]
+        return {
+            "id": f"id{index}",
+            "vector": [float(index), 1.0],
+            "document": None,
+            "uri": None,
+            "metadata": {},
+        }
 
 
 def make_records(n, years_text_from=None):
@@ -248,17 +273,146 @@ def test_count(source, inspected):
     assert source.count(inspected) == 650
 
 
-def test_sample_size_and_offsets(source, inspected):
-    records = source.sample(inspected, 100, random.Random(1), False)
-    assert 0 < len(records) <= 100
-    assert len({r.id for r in records}) == len(records)
+def test_tenant_and_namespaces(source):
+    assert source.tenant == "t"
+    assert source.namespaces() == ["db"]
 
 
-def test_sample_reads_ceil_pages(source, fake_client, inspected):
+def test_sample_size_and_offsets(source, fake_client, inspected):
     fake_client.calls.clear()
-    source.sample(inspected, 301, random.Random(1), True)
-    assert len(fake_client.calls) == 2
+    records = source.sample(inspected, 100, random.Random(1), False)
+    assert len(records) == 100
+    assert len({r.id for r in records}) == 100
+    # 10 pages of 10 records; page i lies in the i-th tenth of the 650 records.
+    assert [c.limit for c in fake_client.calls] == [10] * 10
+    assert [c.offset // 65 for c in fake_client.calls] == list(range(10))
+    assert [(c.offset + c.limit - 1) // 65 for c in fake_client.calls] == list(
+        range(10)
+    )
+
+
+# A sample reads min(size, max(10, ceil(size / CHROMA_MAX_PAGE))) pages of at
+# most ceil(size / pages) records.
+@pytest.mark.parametrize(
+    "count, size, pages",
+    [(650, 301, 10), (650, 30, 10), (650, 3, 3), (5000, 4000, 14)],
+)
+def test_sample_reads_ceil_pages(source, fake_client, inspected, count, size, pages):
+    fake_client.records = LazyRecords(count)
+    fake_client.calls.clear()
+    records = source.sample(
+        replace(inspected, count=count), size, random.Random(1), True
+    )
+    limits = [c.limit for c in fake_client.calls]
+    assert len(limits) == pages and sum(limits) == size
+    assert max(limits) == math.ceil(size / pages) <= CHROMA_MAX_PAGE
     assert all("embeddings" in c.include for c in fake_client.calls)
+    assert all(c.where is None for c in fake_client.calls)
+    assert len({r.id for r in records}) == size
+
+
+# count = size + 1 is the smallest count that the sample does not read whole.
+@pytest.mark.parametrize("size", [10, 300, 10_000])
+def test_sample_of_one_less_than_the_count_comes_from_10_places(
+    source, fake_client, inspected, size
+):
+    fake_client.records = LazyRecords(size + 1)
+    fake_client.calls.clear()
+    records = source.sample(
+        replace(inspected, count=size + 1), size, random.Random(1), False
+    )
+    assert len({r.id for r in records}) == len(records) == size
+    offsets = [c.offset for c in fake_client.calls]
+    assert len(set(offsets)) == len(offsets) >= 10
+
+
+def test_sample_reads_the_live_count_not_the_inspected_one(
+    source, fake_client, inspected
+):
+    fake_client.records = LazyRecords(1000)
+    fake_client.count_calls = 0
+    records = source.sample(
+        replace(inspected, count=100_000), 300, random.Random(1), False
+    )
+    assert len({r.id for r in records}) == len(records) == 300
+    assert fake_client.count_calls == 1
+
+
+def test_sample_of_300_from_100000_comes_from_10_places(source, fake_client, inspected):
+    fake_client.records = LazyRecords(100_000)
+    fake_client.calls.clear()
+    records = source.sample(
+        replace(inspected, count=100_000), 300, random.Random(1), False
+    )
+    assert len({r.id for r in records}) == 300
+    assert [c.limit for c in fake_client.calls] == [30] * 10
+    assert [c.offset // 10_000 for c in fake_client.calls] == list(range(10))
+    assert [(c.offset + c.limit - 1) // 10_000 for c in fake_client.calls] == list(
+        range(10)
+    )
+
+
+def test_sample_of_10000_from_12000_returns_10000(source, fake_client, inspected):
+    fake_client.records = LazyRecords(12_000)
+    records = source.sample(
+        replace(inspected, count=12_000), 10_000, random.Random(1), False
+    )
+    assert len({r.id for r in records}) == len(records) == 10_000
+
+
+def test_sample_of_at_least_the_count_reads_every_record(
+    source, fake_client, inspected
+):
+    fake_client.calls.clear()
+    records = source.sample(inspected, 650, random.Random(1), False)
+    assert sorted(r.id for r in records) == sorted(f"id{i}" for i in range(650))
+    assert [(c.offset, c.limit) for c in fake_client.calls] == [
+        (0, 300),
+        (300, 300),
+        (600, 50),
+    ]
+
+
+class EdgeRandom(random.Random):
+    """A Random whose randint returns the low or the high end of its range."""
+
+    def __init__(self, high):
+        super().__init__(0)
+        self.high = high
+
+    def randint(self, a, b):
+        return b if self.high else a
+
+
+# Every (count, size) with size below count below 100, plus larger pairs. In
+# (14866, 7702), page 11 of 26 can start at 6288; its part starts at 6289.
+BOUND_PAIRS = [(c, s) for c in range(2, 100) for s in range(1, c)] + [
+    (301, 300),
+    (1003, 307),
+    (10_001, 10_000),
+    (12_000, 10_000),
+    (14_866, 7_702),
+    (100_000, 300),
+    (100_000, 10_000),
+]
+
+
+def test_sample_page_lies_from_one_record_before_its_part_to_the_part_end():
+    # The extreme gaps give the earliest start and the latest end of each page.
+    for count, size in BOUND_PAIRS:
+        for high in (False, True):
+            pages = _sample_pages(count, size, EdgeRandom(high))
+            places = len(pages)
+            for i, (offset, limit) in enumerate(pages):
+                start, end = i * count // places, (i + 1) * count // places
+                assert start - 1 <= offset and offset + limit <= end, (count, size, i)
+
+
+def test_sample_of_an_empty_source_reads_no_page(source, fake_client, inspected):
+    fake_client.records = []
+    fake_client.calls.clear()
+    assert source.sample(inspected, 300, random.Random(1), True) == []
+    assert fake_client.calls == []
 
 
 def test_vector_search(source, fake_client, inspected):
