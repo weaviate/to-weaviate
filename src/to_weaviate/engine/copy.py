@@ -8,7 +8,14 @@ from dataclasses import dataclass
 
 from to_weaviate.events import Events
 from to_weaviate.plan import CollectionPlan
-from to_weaviate.sources.base import Page, Partition, Record, Source, SourceCollection
+from to_weaviate.sources.base import (
+    Page,
+    Partition,
+    Record,
+    Source,
+    SourceChanged,
+    SourceCollection,
+)
 from to_weaviate.state import CollectionProgress, State
 from to_weaviate.target.writer import Reject, TargetObject, Writer, to_object
 
@@ -347,6 +354,20 @@ class _CollectionCopy:
         self._events.progress(self._ref, copied, self.total)
 
 
+def raise_if_compacted(
+    source: Source, collection: SourceCollection, before: dict[str, int] | None
+) -> None:
+    """Raise SourceChanged when the compaction state differs from `before`.
+
+    `before` None comes from a source without compaction: nothing is read.
+    """
+    if before is None:
+        return
+    after = source.compaction_state(collection)
+    if after != before:
+        raise SourceChanged(collection.name, before, after)
+
+
 def copy_collection(
     source: Source,
     writer: Writer,
@@ -357,6 +378,7 @@ def copy_collection(
     parallelism: int,
     skip_unchanged: bool = False,
     warn: Callable[[str], None] | None = None,
+    waiting: Callable[[int, int], None] | None = None,
 ) -> CopyResult:
     """Copy one collection and return its totals over all runs.
 
@@ -373,8 +395,28 @@ def copy_collection(
     run starts from its end. When the tail reads records of earlier runs
     again, `reread_from` holds its start. A tail from offset 0 writes a
     `source_changed` warning event and passes the same text to `warn`.
+
+    Before the first page, `source.wait_compacted` waits until the source
+    has no write left to compact. Each report of the wait writes a
+    `compaction_wait` event and goes to `waiting`. After the last read, a
+    changed compaction state raises SourceChanged. Before it does, a tail
+    from offset 0 supersedes every stored partition, so the next run reads
+    the collection again. Pages read before the change used the old order,
+    and the marks of `_tail_place` assume insertion order, so they cannot
+    find the place of the last read. A record read again is written again
+    unchanged. The stop writes no event: no error of the tool writes one,
+    and the error document names the collection.
     """
     ref = collection.ref
+
+    def on_wait(unindexed: int, total: int) -> None:
+        events.emit(
+            "info", "compaction_wait", ref=ref, unindexed=unindexed, total=total
+        )
+        if waiting is not None:
+            waiting(unindexed, total)
+
+    before = source.wait_compacted(collection, on_wait)
     state.init_collection(
         ref, source.partitions(collection, parallelism), collection.count
     )
@@ -420,6 +462,12 @@ def copy_collection(
             copy.run(state.pending(ref), parallelism)
             # A tail reads to the last record, which can be past `count` now.
             state.raise_total(ref, source.count(collection))
+    try:
+        raise_if_compacted(source, collection, before)
+    except SourceChanged:
+        stored = state.partitions(ref)
+        state.add_partition(ref, _tail(stored, 0), None, [p.key for p in stored])
+        raise
     progress = _progress(state, ref)
     events.emit(
         "info",

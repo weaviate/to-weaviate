@@ -10,7 +10,12 @@ from to_weaviate import plan as p
 from to_weaviate.engine.copy import CopyResult, content_hash, copy_collection
 from to_weaviate.events import Events
 from to_weaviate.ids import to_uuid
-from to_weaviate.sources.base import Partition, Record
+from to_weaviate.sources.base import (
+    Partition,
+    Record,
+    SourceChanged,
+    SourceNotCompacted,
+)
 from to_weaviate.state import State
 
 
@@ -468,3 +473,80 @@ def test_emits_collection_started_and_finished(src, state, events, tmp_path):
         999,
         1,
     )
+
+
+def test_the_wait_comes_before_the_first_page_and_the_state_after_the_last_read(
+    src, state, events
+):
+    src.compaction = [{"version": 1, "log_position": 1000}]
+    assert copy_collection(src, FakeWriter(), state, events, ENTRY, C, 2).copied == 1000
+    assert src.calls[0] == "wait_compacted" and src.calls[-1] == "compaction_state"
+    assert src.calls.count("compaction_state") == 1 and "read" in src.calls
+
+
+@pytest.mark.parametrize(
+    "after",
+    [{"version": 2, "log_position": 1000}, {"version": 1, "log_position": 1300}],
+    ids=["version", "log_position"],
+)
+def test_a_changed_state_stops_the_copy_and_the_next_run_reads_from_the_start(
+    src, state, events, after
+):
+    before = {"version": 1, "log_position": 1000}
+    src.compaction = [before, after]
+    writer = FakeWriter()
+    with pytest.raises(SourceChanged) as stopped:
+        copy_collection(src, writer, state, events, ENTRY, C, 2)
+    assert (stopped.value.collection, stopped.value.before, stopped.value.after) == (
+        "docs",
+        before,
+        after,
+    )
+    assert state.pending(C.ref) == [(Partition("0-", "0", None), None)]
+    assert state.progress()[0].copied == 0 and not state.progress()[0].done
+    # `after` is the last item of `compaction`, so the state is unchanged now.
+    result = copy_collection(src, writer, state, events, ENTRY, C, 2)
+    assert result.copied == 1000
+    assert set(writer.writes_per_uuid.values()) == {2}
+
+
+def test_a_source_without_compaction_is_not_compared(src, state, events):
+    assert copy_collection(src, FakeWriter(), state, events, ENTRY, C, 2).copied == 1000
+    assert src.calls.count("wait_compacted") == 1
+    assert "compaction_state" not in src.calls
+
+
+def test_the_wait_writes_a_compaction_wait_event_per_change(
+    src, state, events, tmp_path
+):
+    src.waits = [(1200, 40000), (200, 40000)]
+    src.compaction = [{"version": 4, "log_position": 40000}]
+    seen = []
+    copy_collection(
+        src,
+        FakeWriter(),
+        state,
+        events,
+        ENTRY,
+        C,
+        2,
+        waiting=lambda u, t: seen.append((u, t)),
+    )
+    lines = (tmp_path / "events.jsonl").read_text().splitlines()
+    named = [e for e in map(json.loads, lines) if e["event"] != "progress"]
+    assert [
+        (e["level"], e["event"], e.get("unindexed"), e.get("total")) for e in named
+    ] == [
+        ("info", "compaction_wait", 1200, 40000),
+        ("info", "compaction_wait", 200, 40000),
+        ("info", "collection_started", None, 1000),
+        ("info", "collection_finished", None, None),
+    ]
+    assert named[0]["ref"] == C.ref and seen == [(1200, 40000), (200, 40000)]
+
+
+def test_a_wait_that_ends_without_compaction_reads_no_page(src, state, events):
+    src.wait_error = SourceNotCompacted("docs", 1200, 40000, 600.0)
+    with pytest.raises(SourceNotCompacted):
+        copy_collection(src, FakeWriter(), state, events, ENTRY, C, 2)
+    assert src.read_calls == 0 and state.progress() == []

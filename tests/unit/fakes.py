@@ -44,7 +44,13 @@ class FakeSource:
 
     Cursors are decimal offsets into `records`. Reads are counted and timed so
     tests can check paging and concurrency. `id_reads` counts the `ids_at`
-    calls apart from `read_calls`.
+    calls apart from `read_calls`. `calls` names each call of a method that
+    reads the collection, in order.
+
+    With `compaction` None, the source has no compaction, as single-node
+    Chroma. Otherwise `wait_compacted` and `compaction_state` return its first
+    item, removed unless it is the last. `wait_compacted` raises `wait_error`
+    when it is set and reports each pair of `waits` first.
     """
 
     name: ClassVar[str] = "fake"
@@ -70,6 +76,10 @@ class FakeSource:
         self.read_delay = read_delay
         self.embedding = embedding
         self.inspected_namespaces: list[list[str] | None] = []
+        self.compaction: list[dict[str, int]] | None = None
+        self.waits: list[tuple[int, int]] = []
+        self.wait_error: Exception | None = None
+        self.calls: list[str] = []
         self.read_calls = 0
         self.id_reads = 0
         self.peak_concurrent_reads = 0
@@ -144,6 +154,7 @@ class FakeSource:
         with_vectors: bool,
     ) -> Page:
         with self._lock:
+            self.calls.append("read")
             self.read_calls += 1
             self._active_reads += 1
             self.peak_concurrent_reads = max(
@@ -175,17 +186,40 @@ class FakeSource:
         return Page(records, None if done else str(next_offset))
 
     def ids(self, collection: SourceCollection) -> Iterator[str]:
-        yield from [r.id for r in self.records]
+        self.calls.append("ids")
+        return iter([r.id for r in self.records])
 
     def ids_at(
         self, collection: SourceCollection, offset: int, limit: int
     ) -> list[str]:
         with self._lock:
+            self.calls.append("ids_at")
             self.id_reads += 1
         return [r.id for r in self.records[offset : offset + limit]]
 
     def count(self, collection: SourceCollection) -> int:
+        self.calls.append("count")
         return len(self.records)
+
+    def wait_compacted(
+        self, collection: SourceCollection, waiting: Callable[[int, int], None]
+    ) -> dict[str, int] | None:
+        self.calls.append("wait_compacted")
+        if self.wait_error is not None:
+            raise self.wait_error
+        for unindexed, total in self.waits:
+            waiting(unindexed, total)
+        return None if self.compaction is None else self._compaction()
+
+    def compaction_state(self, collection: SourceCollection) -> dict[str, int]:
+        self.calls.append("compaction_state")
+        return self._compaction()
+
+    def _compaction(self) -> dict[str, int]:
+        assert self.compaction is not None, "compaction_state needs compaction"
+        if len(self.compaction) > 1:
+            return self.compaction.pop(0)
+        return self.compaction[0]
 
     def sample(
         self,
@@ -194,6 +228,7 @@ class FakeSource:
         rng: random.Random,
         with_vectors: bool,
     ) -> list[Record]:
+        self.calls.append("sample")
         picked = rng.sample(self.records, min(size, len(self.records)))
         if with_vectors:
             return picked

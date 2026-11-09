@@ -7,8 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from to_weaviate.sources.base import Partition
-from to_weaviate.sources.chroma.client import CHROMA_MAX_PAGE, ChromaError
+from to_weaviate.sources.base import Partition, SourceNotCompacted
+from to_weaviate.sources.chroma.client import (
+    CHROMA_MAX_PAGE,
+    COLLECTION_GONE_HINT,
+    ChromaError,
+)
 from to_weaviate.sources.chroma.source import ChromaSource, _sample_pages
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -22,8 +26,19 @@ class Call:
     where: dict | None
 
 
+def _next(items):
+    """The first item of `items`, removed unless it is the last."""
+    return items.pop(0) if len(items) > 1 else items[0]
+
+
 class FakeClient:
-    """`page_cap` caps the rows of a get; `ignore_offset` serves offset 0 always."""
+    """`page_cap` caps the rows of a get; `ignore_offset` serves offset 0 always.
+
+    `statuses` None makes `indexing_status` return None, as the client does
+    for single-node Chroma. `indexing_status` and `collection_by_name` return
+    the next item of `statuses` and `states` and are named in
+    `compaction_calls`.
+    """
 
     def __init__(self, collection, records):
         self.collection = collection
@@ -33,6 +48,9 @@ class FakeClient:
         self.count_calls = 0
         self.page_cap: int | None = None
         self.ignore_offset = False
+        self.statuses: list[dict] | None = None
+        self.states: list[dict] = [{"version": 0, "log_position": 0}]
+        self.compaction_calls: list[str] = []
 
     def databases(self, tenant):
         return ["db"]
@@ -43,6 +61,14 @@ class FakeClient:
     def count(self, tenant, database, collection_id):
         self.count_calls += 1
         return len(self.records)
+
+    def indexing_status(self, tenant, database, collection_id):
+        self.compaction_calls.append("indexing_status")
+        return None if self.statuses is None else _next(self.statuses)
+
+    def collection_by_name(self, tenant, database, name):
+        self.compaction_calls.append("collection_by_name")
+        return {**self.collection, **_next(self.states)}
 
     def get(
         self, tenant, database, collection_id, *, limit, offset, include, where=None
@@ -516,3 +542,99 @@ def test_inspect_takes_a_dimension_that_the_listing_lacks_from_the_sample(
 
 def test_inspect_keeps_the_dimension_of_the_listing(inspected):
     assert (inspected.dimension, inspected.dimension_from) == (1536, "listing")
+
+
+class Clock:
+    """A monotonic clock that only `sleep` moves."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def __call__(self):
+        return self.now
+
+
+def test_wait_compacted_returns_the_state_when_nothing_waits(fake_client, inspected):
+    clock, seen = Clock(), []
+    source = ChromaSource(fake_client, tenant="t", sleep=clock.sleep, clock=clock)
+    fake_client.statuses = [{"num_unindexed_ops": 0, "total_ops": 650}]
+    fake_client.states = [{"version": 3, "log_position": 650}]
+    state = source.wait_compacted(inspected, lambda u, t: seen.append((u, t)))
+    assert state == {"version": 3, "log_position": 650}
+    assert fake_client.compaction_calls == [
+        "indexing_status",
+        "collection_by_name",
+        "indexing_status",
+    ]
+    assert clock.sleeps == [] and seen == []
+
+
+def test_wait_compacted_polls_until_nothing_waits(fake_client, inspected):
+    clock, seen = Clock(), []
+    source = ChromaSource(fake_client, tenant="t", sleep=clock.sleep, clock=clock)
+    fake_client.statuses = [
+        {"num_unindexed_ops": n, "total_ops": 40000} for n in (30000, 30000, 10000, 0)
+    ]
+    fake_client.states = [
+        {"version": v, "log_position": p}
+        for v, p in ((1, 10000), (3, 30000), (4, 40000))
+    ]
+    state = source.wait_compacted(inspected, lambda u, t: seen.append((u, t)))
+    assert state == {"version": 4, "log_position": 40000}
+    assert seen == [(30000, 40000), (10000, 40000)]
+    assert clock.sleeps == [5.0, 5.0]
+
+
+def test_wait_compacted_raises_after_600_seconds(fake_client, inspected):
+    clock, seen = Clock(), []
+    source = ChromaSource(fake_client, tenant="t", sleep=clock.sleep, clock=clock)
+    fake_client.statuses = [{"num_unindexed_ops": 1200, "total_ops": 40000}]
+    with pytest.raises(SourceNotCompacted) as waited:
+        source.wait_compacted(inspected, lambda u, t: seen.append((u, t)))
+    e = waited.value
+    assert (e.collection, e.unindexed, e.total, e.seconds) == (
+        "docs",
+        1200,
+        40000,
+        600.0,
+    )
+    assert len(clock.sleeps) == 120 and sum(clock.sleeps) == 600.0
+    assert seen == [(1200, 40000)]
+
+
+def test_wait_compacted_on_single_node_sends_one_request(fake_client, inspected):
+    clock, seen = Clock(), []
+    source = ChromaSource(fake_client, tenant="t", sleep=clock.sleep, clock=clock)
+    assert source.wait_compacted(inspected, lambda u, t: seen.append((u, t))) is None
+    assert fake_client.compaction_calls == ["indexing_status"]
+    assert clock.sleeps == [] and seen == []
+
+
+def test_a_later_not_implemented_answer_keeps_the_guard_off(fake_client, inspected):
+    clock, seen = Clock(), []
+    source = ChromaSource(fake_client, tenant="t", sleep=clock.sleep, clock=clock)
+    waiting = {"num_unindexed_ops": 5, "total_ops": 9}
+    fake_client.statuses = [waiting, waiting, None]
+    assert source.wait_compacted(inspected, lambda u, t: seen.append((u, t))) is None
+    assert fake_client.compaction_calls == [
+        "indexing_status",
+        "collection_by_name",
+        "indexing_status",
+        "collection_by_name",
+        "indexing_status",
+    ]
+    assert clock.sleeps == [5.0] and seen == [(5, 9)]
+
+
+def test_compaction_state_of_a_collection_created_again_names_inspect_force(
+    source, fake_client, inspected
+):
+    fake_client.states = [{"id": "created-again", "version": 0, "log_position": 0}]
+    with pytest.raises(ChromaError) as gone:
+        source.compaction_state(inspected)
+    assert (gone.value.status, gone.value.hint) == (200, COLLECTION_GONE_HINT)

@@ -1,5 +1,5 @@
 import random
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any, ClassVar, Protocol
 
@@ -48,6 +48,34 @@ class Page:
     next_cursor: str | None  # None means the partition is finished
 
 
+class SourceChanged(Exception):
+    """The source compacted `collection` during a read: `before` became `after`."""
+
+    def __init__(
+        self, collection: str, before: dict[str, int], after: dict[str, int]
+    ) -> None:
+        super().__init__(f"{collection} changed from {before} to {after}")
+        self.collection = collection
+        self.before = before
+        self.after = after
+
+
+class SourceNotCompacted(Exception):
+    """After `seconds`, `unindexed` of `total` operations were not compacted."""
+
+    def __init__(
+        self, collection: str, unindexed: int, total: int, seconds: float
+    ) -> None:
+        super().__init__(
+            f"{collection}: {unindexed} of {total} operations not compacted "
+            f"after {seconds} s"
+        )
+        self.collection = collection
+        self.unindexed = unindexed
+        self.total = total
+        self.seconds = seconds
+
+
 class Source(Protocol):
     name: ClassVar[str]
     capabilities: ClassVar[frozenset[str]]  # subset of vectors, vector_search, filter
@@ -92,6 +120,23 @@ class Source(Protocol):
         ...
 
     def count(self, collection: SourceCollection) -> int: ...
+
+    def wait_compacted(
+        self, collection: SourceCollection, waiting: Callable[[int, int], None]
+    ) -> dict[str, int] | None:
+        """Wait until the source has no write of `collection` left to compact.
+
+        Returns the compaction state for `compaction_state` to compare with,
+        or None when the source has no compaction; the caller then compares
+        nothing. `waiting(unindexed, total)` reports the wait. Raises
+        SourceNotCompacted when the wait ends first. The engine knows no
+        compaction: it only compares the states.
+        """
+        ...
+
+    def compaction_state(self, collection: SourceCollection) -> dict[str, int]:
+        """A state of `collection` that changes when the source compacts it."""
+        ...
 
     def sample(
         self,

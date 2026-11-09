@@ -241,6 +241,7 @@ def test_tenant_database_and_collection_id_are_percent_encoded_in_paths(tmp_path
         prefix,
         f"{prefix}/id%2Bplus/count",
         f"{prefix}/id%2Bplus/get",
+        f"{prefix}/id%2Bplus/indexing_status",
     }
     assert all(c.kind != "unknown" for c in server.calls), server.calls
     assert len(fakes.writer.objects) == 10
@@ -313,3 +314,73 @@ def test_an_inspection_written_before_dimension_from_still_loads(tmp_path):
         del collection["dimension_from"]
     path.write_text(json.dumps(found))
     assert copied(fakes)["copied"] == 10
+
+
+def kinds_of(server: ChromaServer, start: int) -> list[str]:
+    """The kinds of the requests after the first `start`, without identity."""
+    return [c.kind for c in server.calls[start:] if c.kind != "identity"]
+
+
+def test_copy_and_verify_wait_until_chroma_compacted():
+    server = ChromaServer(records(0, 10), indexing=[3, 3, 0], states=[(1, 10)])
+    fakes = inspected(server)
+    start = len(server.calls)
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    kinds = kinds_of(server, start)
+    assert kinds[:5] == [
+        "indexing_status",
+        "collection",
+        "indexing_status",
+        "collection",
+        "indexing_status",
+    ]
+    assert kinds[-1] == "collection" and "get" in kinds
+    assert fakes.sleeps == [5.0]
+    waited = "Waiting for Chroma to compact docs: 3 of 10 operations not compacted"
+    assert waited in r.stderr
+    events = [
+        json.loads(line) for line in (DIR / "events.jsonl").read_text().splitlines()
+    ]
+    waits = [
+        (e["unindexed"], e["total"]) for e in events if e["event"] == "compaction_wait"
+    ]
+    assert waits == [(3, 10)]
+    start = len(server.calls)
+    r = invoke(fakes, "verify", "--json")
+    assert r.exit_code == 0, r.output
+    kinds = kinds_of(server, start)
+    assert kinds[:3] == ["indexing_status", "collection", "indexing_status"]
+    assert kinds[-1] == "collection"
+
+
+def test_a_single_node_chroma_gets_one_indexing_status_request_per_command():
+    server = ChromaServer(records(0, 10))
+    fakes = inspected(server)
+    for command in ("copy", "verify"):
+        start = len(server.calls)
+        r = invoke(fakes, command, "--json")
+        assert r.exit_code == 0, (command, r.output)
+        kinds = kinds_of(server, start)
+        assert kinds[0] == "indexing_status", command
+        assert kinds.count("indexing_status") == 1, command
+        assert "collection" not in kinds, command
+    assert fakes.sleeps == []
+
+
+def test_a_chroma_without_the_indexing_status_route_copies_and_verifies_unguarded():
+    # Chroma before 1.4.1 answers 404 with an empty body on this route.
+    server = ChromaServer(records(0, 10))
+    fakes = inspected(server)
+    for command in ("copy", "verify"):
+        server.faults["indexing_status"] = [httpx.Response(404)]
+        start = len(server.calls)
+        r = invoke(fakes, command, "--json")
+        assert r.exit_code == 0, (command, r.output)
+        kinds = kinds_of(server, start)
+        assert kinds.count("indexing_status") == 1, command
+        assert "collection" not in kinds, command
+    assert len(fakes.writer.objects) == 10
+    checks = {c["name"]: c["detail"] for c in json.loads(r.stdout)["checks"]}
+    assert checks["ids"] == "missing 0, extra 0"
+    assert fakes.sleeps == []

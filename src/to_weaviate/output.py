@@ -25,6 +25,11 @@ ERROR_EXIT: dict[str, int] = {
     "auth_failed": 3,
     "source_unreachable": 4,
     "target_unreachable": 4,
+    # Like source_unreachable: the source cannot serve the command now, and
+    # the same command run again later resumes. Not 1: the stop comes before
+    # the report or rejects.jsonl that exit 1 points at. Not 2: no input must
+    # change.
+    "source_compacting": 4,
     "internal_error": 5,
 }
 

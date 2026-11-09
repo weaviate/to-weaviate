@@ -36,6 +36,7 @@ from to_weaviate import cli
 from to_weaviate.cli import app
 from to_weaviate.output import ERROR_EXIT, CliError
 from to_weaviate.plan import load_plan, save_plan
+from to_weaviate.sources.base import SourceNotCompacted
 from to_weaviate.sources.chroma.client import ChromaClient, ChromaError
 from to_weaviate.target.schema import collection_kwargs
 from to_weaviate.target.writer import WeaviateWriter
@@ -967,8 +968,45 @@ def test_error_exit_covers_every_code():
         "auth_failed": 3,
         "source_unreachable": 4,
         "target_unreachable": 4,
+        "source_compacting": 4,
         "internal_error": 5,
     }
+
+
+def test_a_compaction_during_copy_is_source_compacting_exit_4():
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    fakes.source.compaction = [
+        {"version": 0, "log_position": 0},
+        {"version": 1, "log_position": 10000},
+    ]
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 4, r.output
+    assert json.loads(r.stdout) == {
+        "status": "error",
+        "code": "source_compacting",
+        "message": "Chroma compacted the collection docs while it was read "
+        "(version 0 to 1, log_position 0 to 10000), so a page can have skipped "
+        "records. Run the command again.",
+        "hint": "Stop the writes to the collection, then run the command again.",
+        "collection": "docs",
+    }
+
+
+def test_a_collection_that_chroma_does_not_compact_is_source_compacting_exit_4():
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    fakes.source.wait_error = SourceNotCompacted("docs", 1200, 40000, 600.0)
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 4, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"], d["hint"]) == (
+        "source_compacting",
+        "Chroma has not compacted every write to the collection docs after 600 s: "
+        "1200 of 40000 operations are not compacted. Run the command again.",
+        "Stop the writes to the collection and run the command again once Chroma "
+        "has compacted them.",
+    )
 
 
 UNWRITABLE_HINT = "Make --dir and its files writable, or use another --dir."
