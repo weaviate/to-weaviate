@@ -170,7 +170,9 @@ takes a secret, and the tool prints no secret and writes none to a file.
 
 For a Weaviate server outside Weaviate Cloud, set both URLs, for example
 `WEAVIATE_URL=http://localhost:8080` and
-`WEAVIATE_GRPC_URL=http://localhost:50051`.
+`WEAVIATE_GRPC_URL=http://localhost:50051`. Without `WEAVIATE_GRPC_URL`
+the tool connects to port 443 of the `WEAVIATE_URL` host over TLS, so it
+refuses a `WEAVIATE_URL` that names another port.
 
 ## Migrate from a local Chroma directory
 
