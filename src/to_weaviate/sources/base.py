@@ -1,5 +1,5 @@
 import random
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, ClassVar, Protocol
 
@@ -46,6 +46,18 @@ class Partition:
 class Page:
     records: list[Record]
     next_cursor: str | None  # None means the partition is finished
+
+
+class Sample(list[Record]):
+    """The records of `Source.sample`, with the source count that the call read.
+
+    `source_count` tells an empty source from a sample that read no record,
+    without another count request.
+    """
+
+    def __init__(self, records: Iterable[Record], source_count: int) -> None:
+        super().__init__(records)
+        self.source_count = source_count
 
 
 class SourceChanged(Exception):
@@ -152,7 +164,7 @@ class Source(Protocol):
         size: int,
         rng: random.Random,
         with_vectors: bool,
-    ) -> list[Record]: ...
+    ) -> Sample: ...
 
     def vector_search(
         self, collection: SourceCollection, vector: list[float], limit: int

@@ -22,6 +22,7 @@ from to_weaviate.sources.base import (
     Page,
     Partition,
     Record,
+    Sample,
     SourceCollection,
 )
 from to_weaviate.target.schema import PlanMismatch
@@ -231,12 +232,12 @@ class FakeSource:
         size: int,
         rng: random.Random,
         with_vectors: bool,
-    ) -> list[Record]:
+    ) -> Sample:
         self.calls.append("sample")
         picked = rng.sample(self.records, min(size, len(self.records)))
-        if with_vectors:
-            return picked
-        return [replace(r, vector=None) for r in picked]
+        if not with_vectors:
+            picked = [replace(r, vector=None) for r in picked]
+        return Sample(picked, len(self.records))
 
     def vector_search(
         self, collection: SourceCollection, vector: list[float], limit: int

@@ -11,6 +11,7 @@ from to_weaviate.sources.base import (
     Page,
     Partition,
     Record,
+    Sample,
     SourceCollection,
     SourceNotCompacted,
 )
@@ -429,22 +430,23 @@ class ChromaSource:
         size: int,
         rng: random.Random,
         with_vectors: bool,
-    ) -> list[Record]:
+    ) -> Sample:
         """`min(size, count)` different records, read at the `_sample_pages` pages.
 
         `count` is the source count read at the start of the call, not
-        `collection.count`. A source that changes during the call can give
-        fewer records.
+        `collection.count`; the result holds it. A source that changes during
+        the call can give fewer records.
         """
         include = [*READ_INCLUDE, "embeddings"] if with_vectors else READ_INCLUDE
+        count = self.count(collection)
         seen: dict[str, Record] = {}
-        for offset, limit in _sample_pages(self.count(collection), size, rng):
+        for offset, limit in _sample_pages(count, size, rng):
             response = self._get(
                 collection, limit=limit, offset=offset, include=include
             )
             for record in _records(response):
                 seen.setdefault(record.id, record)
-        return list(seen.values())
+        return Sample(seen.values(), count)
 
     def vector_search(
         self, collection: SourceCollection, vector: list[float], limit: int

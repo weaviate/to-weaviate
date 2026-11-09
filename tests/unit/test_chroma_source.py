@@ -446,6 +446,14 @@ def test_sample_reads_the_live_count_not_the_inspected_one(
     assert fake_client.count_calls == 1
 
 
+@pytest.mark.parametrize("count", [0, 1000])
+def test_sample_holds_the_count_it_read(source, fake_client, inspected, count):
+    fake_client.records = LazyRecords(count)
+    fake_client.count_calls = 0
+    records = source.sample(replace(inspected, count=5), 300, random.Random(1), False)
+    assert records.source_count == count and fake_client.count_calls == 1
+
+
 def test_sample_of_300_from_100000_comes_from_10_places(source, fake_client, inspected):
     fake_client.records = LazyRecords(100_000)
     fake_client.calls.clear()

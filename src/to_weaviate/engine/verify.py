@@ -275,7 +275,7 @@ def verify_records(
     """
     with_vectors = any(v.mode == "keep" for v in entry.target.vectors)
     records = source.sample(collection, sample, rng, with_vectors)
-    if not records and source.count(collection) == 0:
+    if not records and records.source_count == 0:
         return _check("records", entry, True, "source is empty")
     expected: list[tuple[str, TargetObject]] = []
     for record in records:

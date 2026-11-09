@@ -21,8 +21,9 @@ from to_weaviate.engine.verify import (
     write_report,
 )
 from to_weaviate.plan import load_plan, save_plan
-from to_weaviate.sources.base import Record, SourceCollection
+from to_weaviate.sources.base import Record, Sample, SourceCollection
 from to_weaviate.sources.chroma.client import ChromaError
+from to_weaviate.sources.chroma.source import ChromaSource
 from to_weaviate.target.writer import TargetObject, to_object
 
 DIR = Path(".to-weaviate")
@@ -414,7 +415,7 @@ class EmptySampleSource(FakeSource):
     """FakeSource whose sample holds no record, as after deletes in the source."""
 
     def sample(self, collection, size, rng, with_vectors):
-        return []
+        return Sample([], len(self.records))
 
 
 def test_records_fail_when_no_record_was_compared_and_the_source_has_records():
@@ -448,6 +449,27 @@ def test_records_pass_on_an_empty_source():
         True,
         "source is empty",
     )
+
+
+class EmptyChroma:
+    """The ChromaClient calls of a sample of an empty collection; counts the counts."""
+
+    def __init__(self) -> None:
+        self.counts = 0
+
+    def count(self, tenant: str, database: str, collection_id: str) -> int:
+        self.counts += 1
+        return 0
+
+
+def test_records_of_an_empty_chroma_collection_read_the_count_once():
+    client = EmptyChroma()
+    source = ChromaSource(client, "t")  # type: ignore[arg-type]
+    collection = collection_of(FakeSource([]))
+    reader = FakeReader(FakeWriter())
+    check = verify_records(source, reader, ENTRY, collection, 300, random.Random(0))
+    assert (check.passed, check.detail) == (True, "source is empty")
+    assert client.counts == 1
 
 
 def test_records_detail_lists_at_most_10_failures():
