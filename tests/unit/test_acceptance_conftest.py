@@ -259,6 +259,14 @@ CLOUD_REFUSED = {
         ".weaviate.network",
     ),
     "not a url": ({"WEAVIATE_URL": "https://[abc"}, "WEAVIATE_URL is not a URL"),
+    "port not a number": (
+        {"WEAVIATE_URL": f"{CLOUD_URL}:bad"},
+        "WEAVIATE_URL is not a URL",
+    ),
+    "port out of range": (
+        {"WEAVIATE_URL": f"{CLOUD_URL}:99999"},
+        "WEAVIATE_URL is not a URL",
+    ),
     "no key": ({"WEAVIATE_API_KEY": None}, "WEAVIATE_API_KEY is not set"),
     "grpc url": (
         {"WEAVIATE_GRPC_URL": "https://grpc-abc.weaviate.cloud"},

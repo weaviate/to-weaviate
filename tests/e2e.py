@@ -317,6 +317,8 @@ def _cloud_url_problems(url: str) -> list[str]:
     try:
         parts = urlsplit(url)
         host = parts.hostname or ""
+        # urlsplit parses the port only when it is read.
+        _ = parts.port
     except ValueError:
         return ["WEAVIATE_URL is not a URL"]
     problems = []
