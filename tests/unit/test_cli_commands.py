@@ -2262,6 +2262,25 @@ def test_a_provider_that_refuses_the_key_is_auth_failed_naming_its_variables():
     assert len(client.writes_per_uuid) == 0
 
 
+def test_a_provider_that_refuses_the_key_of_one_object_is_auth_failed(tmp_path):
+    client = FakeInsertClient(
+        reject=lambda obj: PROVIDER_401 if obj.uuid == to_uuid("id-3") else None
+    )
+    writer = WeaviateWriter(client, sleep=lambda s: None)  # type: ignore[arg-type]
+    source = FakeSource(cli_records(10))
+    fakes = inspected(FakeFactories(source, writer=writer, store=client))
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 3, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"]) == (
+        "auth_failed",
+        "OpenAI API refused the request: the API key is missing or wrong.",
+    )
+    assert "sk-made" not in r.output
+    rejects = tmp_path / DIR / "rejects.jsonl"
+    assert not rejects.exists() or rejects.read_text() == ""
+
+
 def test_a_provider_without_a_variable_is_named_in_the_hint():
     refusal = "connection to Ollama API failed with status: 403 error: forbidden"
     fakes, client = refusing(10, lambda n: all_failed(refusal))

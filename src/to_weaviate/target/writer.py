@@ -240,8 +240,10 @@ class WeaviateWriter:
         retried like a transient error. An object that Weaviate refuses with
         an error of a node outage is sent again, with the others of its chunk
         that it refused so, after a delay. When the retries are used up, this
-        raises BatchRefused. An object refused for anything else is a reject,
-        and so is a chunk of one object that gRPC refuses for its size.
+        raises BatchRefused. A model provider that refuses the key, for the
+        chunk or for one object, raises ProviderRefused. An object refused for
+        anything else is a reject, and so is a chunk of one object that gRPC
+        refuses for its size.
         """
         collection = self._client.collections.get(entry.target.name)
         if entry.target.tenant:
@@ -292,6 +294,9 @@ class WeaviateWriter:
             again: list[TargetObject] = []
             reason = ""
             for index, error in result.errors.items():
+                refused_key = provider_refusal(error.message)
+                if refused_key is not None:
+                    raise refused_key
                 if node_outage(error.message):
                     again.append(pending[index])
                     reason = reason or error.message
