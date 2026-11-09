@@ -203,7 +203,7 @@ def test_401_fails_without_retry():
     assert len(calls) == 1 and sleeps == []
 
 
-def test_gives_up_after_six_attempts():
+def test_gives_up_after_seven_attempts():
     calls = []
 
     def handler(request):
@@ -214,7 +214,7 @@ def test_gives_up_after_six_attempts():
     with pytest.raises(ChromaError) as e:
         client.identity()
     assert e.value.status == 503 and e.value.message == "unavailable"
-    assert len(calls) == 6 and len(sleeps) == 5
+    assert len(calls) == 7 and len(sleeps) == 6
 
 
 def test_error_message_from_error_field_and_truncation():
@@ -453,7 +453,7 @@ def test_transport_errors_after_the_retries_raise_chroma_error():
         client.identity()
     assert e.value.status is None and isinstance(e.value.__cause__, httpx.ConnectError)
     assert str(e.value) == "ConnectError: down"
-    assert len(calls) == 6 and len(sleeps) == 5
+    assert len(calls) == 7 and len(sleeps) == 6
 
 
 def _answer(status: int):

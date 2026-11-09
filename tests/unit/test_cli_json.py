@@ -700,7 +700,7 @@ def test_copy_retries_a_retry_error_and_then_reports_target_unreachable():
     assert r.exit_code == 4
     d = json.loads(r.stdout)
     assert d["code"] == "target_unreachable" and "WeaviateRetryError" in d["message"]
-    assert client.calls == 6
+    assert client.calls == 7
 
 
 def test_click_errors_and_version_keep_their_behavior():

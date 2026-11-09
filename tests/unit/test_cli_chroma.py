@@ -106,13 +106,13 @@ def assert_resumable(directory: Path, writer) -> None:
 ERROR = {"error": "InternalError", "message": "boom"}
 # Faults on the second /get of the second of three partitions of 900 records.
 MID_PAGE = {
-    "transport-error": ([httpx.ReadError("connection reset")], [0.0]),
+    "transport-error": ([httpx.ReadError("connection reset")], [0.25]),
     "503-then-429": (
         [
             httpx.Response(503, json=ERROR),
             httpx.Response(429, json=ERROR, headers={"Retry-After": "2"}),
         ],
-        [0.0, 2.0],
+        [0.25, 2.0],
     ),
 }
 
@@ -132,13 +132,13 @@ def test_a_fault_in_the_middle_of_a_page_is_retried(faults, sleeps):
 def test_a_page_that_fails_every_attempt_stops_copy_and_resumes(tmp_path):
     server = ChromaServer(records(0, 2700))
     fakes = inspected(server)
-    server.faults[("get", 1200)] = [httpx.Response(500, json=ERROR)] * 6
+    server.faults[("get", 1200)] = [httpx.Response(500, json=ERROR)] * 7
     r = invoke(fakes, "copy", "--parallelism", "3", "--json")
     assert r.exit_code == 4, r.output
     d = json.loads(r.stdout)
     assert d["code"] == "source_unreachable"
     assert d["message"] == "Chroma returned HTTP 500: boom"
-    assert fakes.sleeps == [0.0] * 5
+    assert fakes.sleeps == [0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
     stored = partitions(tmp_path / DIR)
     assert stored["900-1800"][2:] == ("1200", False)
     assert_resumable(tmp_path / DIR, fakes.writer)
@@ -151,7 +151,7 @@ def test_a_page_that_fails_every_attempt_stops_copy_and_resumes(tmp_path):
 def test_a_count_that_fails_after_the_pages_resumes_without_pages(tmp_path):
     server = ChromaServer(records(0, 2700))
     fakes = inspected(server)
-    server.faults["count"] = [httpx.Response(500, json=ERROR)] * 6
+    server.faults["count"] = [httpx.Response(500, json=ERROR)] * 7
     r = invoke(fakes, "copy", "--parallelism", "3", "--json")
     assert r.exit_code == 4 and json.loads(r.stdout)["code"] == "source_unreachable"
     assert all(done for *_, done in partitions(tmp_path / DIR).values())

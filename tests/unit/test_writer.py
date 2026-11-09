@@ -291,7 +291,7 @@ def test_objects_that_a_node_outage_keeps_refusing_are_a_refused_batch():
     )
     assert [[o.uuid for o in call] for call in data.calls] == [["u0", "u1", "u2"]] + [
         ["u0", "u2"]
-    ] * 6
+    ] * 7
 
 
 def test_objects_that_a_node_outage_refuses_on_every_attempt_are_a_refused_batch():
@@ -304,7 +304,7 @@ def test_objects_that_a_node_outage_refuses_on_every_attempt_are_a_refused_batch
     assert str(info.value) == (
         "Weaviate refused 1 object of a batch of 3 in My_docs: " + OUTAGE_ERRORS[2]
     )
-    assert len(data.calls) == 6
+    assert len(data.calls) == 7
 
 
 def test_objects_refused_for_their_content_are_rejects_at_once():
@@ -327,7 +327,7 @@ def test_a_single_object_that_a_node_outage_refuses_is_a_refused_batch():
     assert str(info.value) == (
         "Weaviate refused every object of a batch of 1 in My_docs: " + OUTAGE_ERRORS[0]
     )
-    assert len(data.calls) == 6
+    assert len(data.calls) == 7
 
 
 PROVIDER_401 = (
@@ -409,7 +409,7 @@ def test_all_failed_batch_is_retried_and_then_raises():
     assert str(info.value) == (
         "Weaviate refused every object of a batch of 2 in My_docs: bad vector"
     )
-    assert len(data.calls) == 6
+    assert len(data.calls) == 7
 
 
 def test_all_failed_batch_that_a_retry_writes_gives_no_rejects():
@@ -446,7 +446,7 @@ def test_exhausted_retries_raise():
     with pytest.raises(UnexpectedStatusCodeError) as info:
         writer.write(ENTRY_KEEP, objects(2))
     assert info.value is err
-    assert len(data.calls) == 6
+    assert len(data.calls) == 7
 
 
 def test_writer_retries_transient_and_raises_others():
@@ -483,7 +483,7 @@ def test_a_chunk_of_two_that_grpc_refuses_for_its_size_is_retried():
     writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
     with pytest.raises(WeaviateBatchError):
         writer.write(ENTRY_KEEP, objects(2))
-    assert len(data.calls) == 6
+    assert len(data.calls) == 7
 
 
 def _int_entry(kind: str) -> p.CollectionPlan:
