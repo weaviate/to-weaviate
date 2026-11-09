@@ -1,4 +1,5 @@
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,6 +46,22 @@ API_KEY_MAP = {
     "XAI_APIKEY": "X-Xai-Api-Key",
     "XAI_API_KEY": "X-Xai-Api-Key",
 }
+
+
+def key_variables(provider: str) -> list[str]:
+    """The variables of API_KEY_MAP for the provider that Weaviate calls `provider`.
+
+    Weaviate names a provider as in "OpenAI API" or "Google", or by the host
+    it called. A header matches when its first word, such as "openai" of
+    X-OpenAI-Api-Key or "goog" of X-Goog-Vertex-Api-Key, is in that name.
+    """
+    name = re.sub(r"[^a-z0-9]", "", provider.lower())
+    out = []
+    for var, header in API_KEY_MAP.items():
+        word = header.lower().removeprefix("x-").split("-")[0]
+        if word in name:
+            out.append(var)
+    return out
 
 
 URL_VARIABLES = ("CHROMA_URL", "WEAVIATE_URL", "WEAVIATE_GRPC_URL")
