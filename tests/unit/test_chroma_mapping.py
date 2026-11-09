@@ -1,6 +1,12 @@
 import pytest
 
-from to_weaviate.sources.chroma.mapping import vectorizer_for
+from to_weaviate.plan import CollectionPlan, SourceRef, TargetPlan, VectorPlan
+from to_weaviate.sources.chroma.mapping import (
+    CONFIG_KEYS,
+    stored_embedding,
+    vectorizer_for,
+)
+from to_weaviate.target.schema import collection_kwargs
 
 
 def known(name, **config):
@@ -27,6 +33,38 @@ def test_openai_never_copies_the_key_variable():
     )
     assert v is not None
     assert v.options == {"model": "m", "base_url": "https://x"}
+
+
+@pytest.mark.parametrize(
+    ("api_base", "base_url"),
+    [
+        ("https://proxy.example.com/v1", "https://proxy.example.com"),
+        ("https://proxy.example.com/v1/", "https://proxy.example.com"),
+        ("https://proxy.example.com/", "https://proxy.example.com"),
+        ("https://proxy.example.com/openai/v1", "https://proxy.example.com/openai"),
+        ("https://proxy.example.com/v1/v1", "https://proxy.example.com/v1"),
+    ],
+)
+def test_openai_api_base_loses_one_trailing_v1(api_base, base_url):
+    v, notes = vectorizer_for(known("openai", model_name="m", api_base=api_base))
+    assert v is not None
+    assert v.options == {"model": "m", "base_url": base_url}
+    assert [n for n in notes if "Weaviate server must reach" in n and base_url in n]
+
+
+@pytest.mark.parametrize(
+    "api_base",
+    [
+        "https://api.openai.com/v1",
+        "https://api.openai.com/v1/",
+        "https://api.openai.com",
+    ],
+)
+def test_openai_default_base_gives_no_base_url(api_base):
+    v, notes = vectorizer_for(known("openai", model_name="m", api_base=api_base))
+    assert v is not None
+    assert v.options == {"model": "m"}
+    assert notes == []
 
 
 def test_openai_azure_has_no_mapping():
@@ -59,7 +97,7 @@ def test_null_options_are_left_out():
             "text2vec-jinaai",
             {"model": "j", "dimensions": 8},
         ),
-        ("voyageai", {"model_name": "v"}, "text2vec-voyageai", {}),
+        ("voyageai", {"model_name": "v"}, "text2vec-voyageai", {"model": "v"}),
         ("mistral", {"model": "mm"}, "text2vec-mistral", {"model": "mm"}),
         (
             "huggingface",
@@ -87,12 +125,155 @@ def test_google_ai_studio(name):
     assert v is not None
     assert v.module == "text2vec-google"
     assert v.options.get("project_id") is None
+    assert v.options == {"model": "x"}
 
 
 def test_google_vertex():
-    v, _ = vectorizer_for(known("google_vertex", project_id="p"))
+    v, _ = vectorizer_for(
+        known("google_vertex", model_name="m", project_id="p", region="europe-west1")
+    )
     assert v is not None
     assert v.module == "text2vec-google" and v.options["project_id"] == "p"
+    assert v.options == {"model": "m", "project_id": "p", "location": "europe-west1"}
+
+
+@pytest.mark.parametrize(
+    ("name", "config", "options"),
+    [
+        ("voyageai", {"model_name": "voyage-3-large"}, {"model": "voyage-3-large"}),
+        (
+            "google_generative_ai",
+            {"model_name": "models/text-embedding-004", "dimension": 768},
+            {"model": "text-embedding-004", "dimensions": 768},
+        ),
+        (
+            "google_gemini",
+            {"model_name": "gemini-embedding-001"},
+            {"model": "gemini-embedding-001"},
+        ),
+        (
+            "google_gemini",
+            {"model_name": "gemini-embedding-001", "vertexai": False, "project": "p"},
+            {"model": "gemini-embedding-001"},
+        ),
+        (
+            "google_gemini",
+            {
+                "model_name": "gemini-embedding-001",
+                "vertexai": True,
+                "project": "p",
+                "location": "europe-west4",
+            },
+            {
+                "model": "gemini-embedding-001",
+                "project_id": "p",
+                "location": "europe-west4",
+            },
+        ),
+        (
+            "google_vertex",
+            {
+                "model_name": "text-embedding-005",
+                "project_id": "p",
+                "region": "us-central1",
+            },
+            {
+                "model": "text-embedding-005",
+                "project_id": "p",
+                "location": "us-central1",
+            },
+        ),
+    ],
+)
+def test_voyage_and_google_keep_the_model(name, config, options):
+    v, _ = vectorizer_for(known(name, **config))
+    assert v is not None
+    assert v.options == options
+
+
+@pytest.mark.parametrize(
+    ("name", "config", "missing"),
+    [
+        ("voyageai", {}, "model_name"),
+        ("google_generative_ai", {"dimension": 768}, "model_name"),
+        ("google_gemini", {}, "model_name"),
+        ("google_gemini", {"vertexai": True, "project": "p"}, "model_name"),
+        ("google_gemini", {"model_name": "m", "vertexai": True}, "project"),
+        ("google_vertex", {"project_id": "p"}, "model_name"),
+        ("google_vertex", {"model_name": "m", "project_id": None}, "project_id"),
+    ],
+)
+def test_voyage_and_google_without_a_required_key_have_no_vectorizer(
+    name, config, missing
+):
+    v, notes = vectorizer_for(known(name, **config))
+    assert v is None
+    assert len(notes) == 1 and missing in notes[0] and name in notes[0]
+
+
+@pytest.mark.parametrize(
+    ("name", "config", "expected"),
+    [
+        ("voyageai", {"model_name": "voyage-3-large"}, {"model": "voyage-3-large"}),
+        (
+            "google_generative_ai",
+            {"model_name": "models/text-embedding-004", "dimension": 768},
+            {"modelId": "text-embedding-004", "dimensions": 768, "projectId": None},
+        ),
+        (
+            "google_gemini",
+            {"model_name": "m", "vertexai": True, "project": "p", "location": "l"},
+            {"modelId": "m", "projectId": "p", "location": "l"},
+        ),
+        (
+            "google_gemini",
+            {"model_name": "m", "dimension": 256},
+            {"modelId": "m", "dimensions": 256, "projectId": None},
+        ),
+        (
+            "google_gemini",
+            {"model_name": "m", "dimension": 256, "vertexai": True, "project": "p"},
+            {"modelId": "m", "dimensions": 256, "projectId": "p"},
+        ),
+        (
+            "google_vertex",
+            {"model_name": "m", "project_id": "p", "region": "l"},
+            {"modelId": "m", "projectId": "p", "location": "l"},
+        ),
+    ],
+)
+def test_voyage_and_google_options_reach_the_collection_config(name, config, expected):
+    v, _ = vectorizer_for(known(name, **config))
+    entry = CollectionPlan(
+        source=SourceRef(
+            ref="r",
+            namespace="n",
+            name="docs",
+            count=1,
+            dimension=2,
+            distance="cosine",
+            embedding=None,
+        ),
+        target=TargetPlan(
+            name="Docs", vectors=[VectorPlan(vectorizer=v)], properties=[]
+        ),
+    )
+    found = collection_kwargs([entry])["vector_config"][0].vectorizer
+    assert {key: getattr(found, key) for key in expected} == expected
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [{}, {"vertexai": True, "project": "p", "location": "europe-west4"}],
+)
+def test_google_gemini_maps_the_dimension(variant):
+    v, _ = vectorizer_for(
+        known(
+            "google_gemini", model_name="gemini-embedding-001", dimension=256, **variant
+        )
+    )
+    assert v is not None
+    assert v.options["dimensions"] == 256
 
 
 def test_default_model_has_no_mapping():
@@ -108,3 +289,133 @@ def test_chroma_hosted_model_note():
 def test_unmapped_name_is_named_in_a_note():
     v, notes = vectorizer_for(known("onnx_thing"))
     assert v is None and any("onnx_thing" in n for n in notes)
+
+
+def test_config_keys_are_the_keys_the_mapping_reads():
+    assert CONFIG_KEYS == {
+        "openai": {"model_name", "dimensions", "api_base", "api_type"},
+        "cohere": {"model_name"},
+        "jina": {"model_name", "dimensions"},
+        "voyageai": {"model_name"},
+        "mistral": {"model"},
+        "huggingface": {"model_name"},
+        "google_generative_ai": {"model_name", "dimension"},
+        "google_gemini": {
+            "model_name",
+            "dimension",
+            "vertexai",
+            "project",
+            "location",
+        },
+        "google_vertex": {"model_name", "project_id", "region"},
+        "ollama": {"url", "model_name"},
+    }
+
+
+def test_stored_embedding_keeps_only_the_listed_keys():
+    embedding = {
+        **known(
+            "openai",
+            api_key_env_var="OPENAI_API_KEY",
+            model_name="m",
+            api_base="https://bob:made-up-pw@proxy.example.com/v1?k=made-up-q#f",
+            default_headers={"Authorization": "Bearer made-up-header"},
+            organization_id=None,
+            api_type=None,
+        ),
+        "extra": "made-up-extra",
+    }
+    stored, notes = stored_embedding(embedding)
+    assert stored == {
+        "type": "known",
+        "name": "openai",
+        "config": {
+            "model_name": "m",
+            "api_base": "https://proxy.example.com/v1",
+            "api_type": None,
+        },
+    }
+    assert len(notes) == 1
+    for key in ("api_key_env_var", "default_headers", "extra"):
+        assert key in notes[0]
+    for value in ("made-up", "bob", "OPENAI_API_KEY", "organization_id"):
+        assert value not in notes[0]
+
+
+def test_stored_embedding_names_only_the_dropped_keys_with_a_value():
+    nulls = {
+        "api_key_env_var": None,
+        "organization_id": None,
+        "api_version": None,
+        "deployment_id": None,
+        "default_headers": None,
+    }
+    stored, notes = stored_embedding(known("openai", model_name="m", **nulls))
+    assert stored == known("openai", model_name="m")
+    assert notes == []
+    _, notes = stored_embedding(
+        known("openai", model_name="m", **{**nulls, "organization_id": "made-up"})
+    )
+    assert len(notes) == 1 and "organization_id" in notes[0]
+    assert [key for key in nulls if key in notes[0]] == ["organization_id"]
+
+
+def test_stored_embedding_of_an_unmapped_function_keeps_no_config_key():
+    stored, notes = stored_embedding(known("onnx_thing", token="made-up-token"))
+    assert stored == {"type": "known", "name": "onnx_thing", "config": {}}
+    assert len(notes) == 1 and "token" in notes[0] and "made-up" not in notes[0]
+
+
+def test_stored_embedding_cleans_the_ollama_url():
+    stored, _ = stored_embedding(
+        known("ollama", url="http://u:made-up@ollama:11434/api?x=1#f", model_name="n")
+    )
+    assert stored is not None
+    assert stored["config"] == {"url": "http://ollama:11434/api", "model_name": "n"}
+
+
+def test_stored_embedding_without_dropped_keys_has_no_note():
+    embedding = known("cohere", model_name="c")
+    assert stored_embedding(embedding) == (embedding, [])
+
+
+def test_stored_embedding_of_none():
+    assert stored_embedding(None) == (None, [])
+
+
+def test_keys_outside_the_table_are_ignored():
+    full = known(
+        "openai",
+        api_key_env_var="OPENAI_API_KEY",
+        model_name="m",
+        api_base="https://proxy.example.com/v1",
+        default_headers={"X-Custom": "made-up"},
+        organization_id="o",
+    )
+    stored, _ = stored_embedding(full)
+    assert vectorizer_for(full) == vectorizer_for(stored)
+
+
+@pytest.mark.parametrize(
+    ("name", "config", "options"),
+    [
+        (
+            "openai",
+            {
+                "model_name": "m",
+                "api_base": "https://bob:made-up-pw@proxy.example.com/v1?k=made-up#f",
+            },
+            {"model": "m", "base_url": "https://proxy.example.com"},
+        ),
+        (
+            "ollama",
+            {"model_name": "n", "url": "http://bob:made-up-pw@ollama:11434?k=made-up"},
+            {"model": "n", "api_endpoint": "http://ollama:11434"},
+        ),
+    ],
+)
+def test_vectorizer_options_have_no_userinfo_query_or_fragment(name, config, options):
+    v, notes = vectorizer_for(known(name, **config))
+    assert v is not None
+    assert v.options == options
+    assert not [n for n in notes if "made-up" in n or "bob" in n]

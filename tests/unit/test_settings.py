@@ -5,6 +5,7 @@ from to_weaviate.settings import (
     chroma_settings,
     load_env,
     normalized_host,
+    stored_url,
     url_passwords,
     weaviate_settings,
     without_userinfo,
@@ -72,6 +73,21 @@ def test_environ_wins_over_dotenv(tmp_path, monkeypatch):
 )
 def test_without_userinfo(url, expected):
     assert without_userinfo(url) == expected
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://user:pw@host:8000/path?q=1#f", "https://host:8000/path"),
+        ("https://host/v1?api-key=k", "https://host/v1"),
+        ("https://host#f?q", "https://host"),
+        ("https://host/v1", "https://host/v1"),
+        ("user:pw@host:8099/p?q", "host:8099/p"),
+        ("http://user:pw@[::1?q", "http://[::1"),
+    ],
+)
+def test_stored_url(url, expected):
+    assert stored_url(url) == expected
 
 
 @pytest.mark.parametrize(

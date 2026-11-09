@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Literal
 
@@ -223,17 +223,20 @@ def _draft_collection(
     vectorizer: VectorizerPlan | None,
     index: IndexPlan,
     vectorizer_for: VectorizerMapper | None,
+    source_notes: list[str],
 ) -> CollectionPlan:
-    notes: list[str] = []
+    notes = list(source_notes)
     name = collection_name(source.name, taken_names)
     taken_names.add(name)
     props, dropped = _properties(source)
 
-    def kept(vector_name: str, use_mapper: bool) -> VectorPlan:
-        chosen = vectorizer
-        if chosen is None and use_mapper and vectorizer_for is not None:
-            chosen, mapper_notes = vectorizer_for(source.embedding)
-            notes.extend(mapper_notes)
+    def kept(vector_name: str, with_vectorizer: bool) -> VectorPlan:
+        chosen = None
+        if with_vectorizer:
+            chosen = vectorizer
+            if chosen is None and vectorizer_for is not None:
+                chosen, mapper_notes = vectorizer_for(source.embedding)
+                notes.extend(mapper_notes)
         vector_index = index
         if source.distance in ("l2-squared", "dot") and index.type == "default":
             vector_index = index.model_copy(update={"type": "hnsw"})
@@ -297,11 +300,19 @@ def draft_plan(
     vectorizer: VectorizerPlan | None = None,
     index: IndexPlan | None = None,
     vectorizer_for: VectorizerMapper | None = None,
+    source_notes: Mapping[str, list[str]] | None = None,
 ) -> Plan:
+    """A plan for `collections`. `source_notes` holds notes by source ref."""
     taken: set[str] = set()
     drafted = [
         _draft_collection(
-            c, taken, vectors, vectorizer, index or IndexPlan(), vectorizer_for
+            c,
+            taken,
+            vectors,
+            vectorizer,
+            index or IndexPlan(),
+            vectorizer_for,
+            (source_notes or {}).get(c.ref, []),
         )
         for c in collections
     ]
