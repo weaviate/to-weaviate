@@ -1298,6 +1298,56 @@ def test_copy_refuses_a_tenant_change(tmp_path):
     assert d["message"].endswith("collection Docs, tenant b.")
 
 
+SOURCE_CHANGED_HINT = (
+    "Run to-weaviate inspect chroma --force to inspect the new source, or set "
+    "CHROMA_URL and CHROMA_TENANT back to the source of the plan."
+)
+PLANNED_SOURCE = "https://api.trychroma.com, the tenant of the API key"
+
+
+@pytest.mark.parametrize("cmd", ["copy", "verify"])
+@pytest.mark.parametrize(
+    ("env", "now"),
+    [
+        (
+            {"CHROMA_URL": "https://user:MADE-UP-PW@other.example.com/?t=MADE-UP-T"},
+            "https://other.example.com/, the tenant of the API key",
+        ),
+        ({"CHROMA_TENANT": "other"}, "https://api.trychroma.com, tenant other"),
+    ],
+    ids=["url", "tenant"],
+)
+def test_copy_and_verify_refuse_another_chroma_source_than_the_plan(cmd, env, now):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    r = invoke(fakes, cmd, "--json", **env)
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"], d["hint"]) == (
+        "invalid_plan",
+        f"{DIR / 'plan.yaml'} was inspected from {PLANNED_SOURCE}. "
+        f"CHROMA_URL and CHROMA_TENANT now name {now}.",
+        SOURCE_CHANGED_HINT,
+    )
+    assert fakes.source_calls == 1 and fakes.writer.calls == 0
+    assert "MADE-UP" not in r.output
+
+
+def test_copy_compares_the_planned_source_url_without_its_userinfo(tmp_path):
+    # A hand-edited source URL: its password is neither compared nor printed.
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    path = tmp_path / DIR / "plan.yaml"
+    plan = load_plan(path)
+    plan.source.url = "https://user:MADE-UP-PW@chroma.example.com"
+    save_plan(plan, path)
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 2, r.output
+    message = json.loads(r.stdout)["message"]
+    assert "was inspected from https://chroma.example.com, the tenant" in message
+    assert "MADE-UP" not in r.output
+    r = invoke(fakes, "copy", "--json", CHROMA_URL="https://chroma.example.com")
+    assert r.exit_code == 0, r.output
+
+
 @pytest.mark.parametrize("partial", [True, False])
 def test_copy_refuses_a_target_without_the_collection(partial):
     source = FakeSource(cli_records(10), page_size=2)

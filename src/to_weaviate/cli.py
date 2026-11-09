@@ -107,6 +107,7 @@ from to_weaviate.settings import (
     chroma_settings,
     key_variables,
     load_env,
+    stored_url,
     weaviate_settings,
     without_userinfo,
 )
@@ -132,6 +133,7 @@ from to_weaviate.state import (
 from to_weaviate.target.connect import connect
 from to_weaviate.target.reader import TargetReader, WeaviateReader
 from to_weaviate.target.schema import (
+    USERINFO_TEXT,
     PlanMismatch,
     PropertyRejected,
     Schema,
@@ -203,6 +205,10 @@ STATE_HINT = (
     "target, use another --dir."
 )
 GONE_HINT = "To copy it again, use another --dir."
+SOURCE_CHANGED_HINT = (
+    "Run to-weaviate inspect chroma --force to inspect the new source, or set "
+    "CHROMA_URL and CHROMA_TENANT back to the source of the plan."
+)
 UNREADABLE_STATE_HINT = "Start again with another --dir, or restore the file."
 UNWRITABLE_HINT = "Make --dir and its files writable, or use another --dir."
 DISK_FULL_HINT = "Free space on the disk of --dir, or use another --dir."
@@ -533,6 +539,31 @@ def _load_plan(directory: Path) -> Plan:
     if errors:
         raise _plan_errors(errors, [])
     return plan
+
+
+def _chroma_text(url: str | None, tenant: str | None) -> str:
+    where = url if url is not None else f"a URL that {USERINFO_TEXT}"
+    which = f"tenant {tenant}" if tenant else "the tenant of the API key"
+    return f"{where}, {which}"
+
+
+def _require_planned_source(
+    plan: Plan, settings: ChromaSettings, directory: Path
+) -> None:
+    """Refuse CHROMA_URL and CHROMA_TENANT when they name another source than the plan.
+
+    The URLs are compared and printed in their stored form, without userinfo:
+    plan.yaml can be edited by hand.
+    """
+    planned = (stored_url(plan.source.url), plan.source.tenant)
+    current = (settings.stored_url, settings.tenant)
+    if planned != current:
+        raise CliError(
+            "invalid_plan",
+            f"{directory / PLAN_FILE} was inspected from {_chroma_text(*planned)}. "
+            f"CHROMA_URL and CHROMA_TENANT now name {_chroma_text(*current)}.",
+            SOURCE_CHANGED_HINT,
+        )
 
 
 def _source_collection(raw: dict[str, Any]) -> SourceCollection:
@@ -1029,6 +1060,7 @@ def _copy(
         raise _plan_errors(errors, warnings)
     env = load_env(Path.cwd())
     source_settings = chroma_settings(env)
+    _require_planned_source(plan, source_settings, directory)
     target_settings = weaviate_settings(env)
     _require_provider_keys(
         plan.model_copy(update={"collections": entries}), target_settings
@@ -1153,6 +1185,7 @@ def _verify(
     plan, inspected = _load_plan_and_inspection(directory)
     env = load_env(Path.cwd())
     source_settings = chroma_settings(env)
+    _require_planned_source(plan, source_settings, directory)
     target_settings = weaviate_settings(env)
     source = factories.source(source_settings)
     reader = factories.reader(target_settings)
