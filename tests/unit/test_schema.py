@@ -1405,10 +1405,22 @@ def test_differences_compare_each_planned_index_option(planned, stored, expected
     assert found == [expected]
 
 
-def test_differences_accept_equal_index_options_and_skip_unset_ones():
+def test_differences_accept_equal_index_options():
     # hnsw() stores 0 for every option; the plan sets two of them.
     index = p.IndexPlan(type="hnsw", options={"ef": 0, "max_connections": 0})
     cfg = config(index=hnsw())
+    assert differences(FakeClient(FakeCollection(cfg)), [entry(index=index)]) == []  # type: ignore[arg-type]
+
+
+def test_differences_skip_an_index_option_that_the_stored_index_does_not_report():
+    stored = _VectorIndexConfigDynamic(
+        distance_metric=VectorDistances.COSINE,
+        hnsw=hnsw(),
+        flat=_flat_with(None),
+        threshold=None,  # type: ignore[arg-type]
+    )
+    index = p.IndexPlan(type="dynamic", options={"threshold": 500})
+    cfg = config(index=stored)
     assert differences(FakeClient(FakeCollection(cfg)), [entry(index=index)]) == []  # type: ignore[arg-type]
 
 
