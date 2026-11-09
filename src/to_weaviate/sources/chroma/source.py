@@ -136,6 +136,7 @@ class ChromaSource:
         # Workers read other partitions at the same time.
         self._last_pages: dict[tuple[str, str], tuple[int, set[str]]] = {}
         self._pages_lock = threading.Lock()
+        self._searched: list[str] = []
 
     def _get(
         self,
@@ -167,6 +168,10 @@ class ChromaSource:
     def namespaces(self) -> list[str]:
         return self._client.databases(self._tenant)
 
+    @property
+    def searched_namespaces(self) -> list[str]:
+        return list(self._searched)
+
     def inspect(
         self,
         namespaces: list[str] | None,
@@ -174,6 +179,7 @@ class ChromaSource:
         sample_pages: int | None,
     ) -> list[SourceCollection]:
         databases = self.namespaces() if namespaces is None else namespaces
+        self._searched = list(databases)
         found: list[SourceCollection] = []
         for database in databases:
             for raw in self._client.collections(self._tenant, database):

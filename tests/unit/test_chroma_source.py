@@ -191,6 +191,15 @@ def test_inspect_sample_pages_limits_metadata_pages(fake_client):
     assert fake_client.calls_including(["metadatas"]) == 2
 
 
+@pytest.mark.parametrize(
+    ("asked", "searched"), [(None, ["db"]), (["other", "db"], ["other", "db"])]
+)
+def test_inspect_exposes_the_namespaces_it_searched(source, asked, searched):
+    assert source.searched_namespaces == []
+    source.inspect(asked, ["nope"], None)
+    assert source.searched_namespaces == searched
+
+
 def test_inspect_filters_by_name_and_namespace(source):
     assert source.inspect(None, ["nope"], None) == []
     assert source.inspect(["other"], None, None) == []

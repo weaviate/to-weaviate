@@ -76,6 +76,7 @@ class FakeSource:
         self.read_delay = read_delay
         self.embedding = embedding
         self.inspected_namespaces: list[list[str] | None] = []
+        self.searched_namespaces: list[str] = []
         self.compaction: list[dict[str, int]] | None = None
         self.waits: list[tuple[int, int]] = []
         self.wait_error: Exception | None = None
@@ -101,6 +102,9 @@ class FakeSource:
         sample_pages: int | None,
     ) -> list[SourceCollection]:
         self.inspected_namespaces.append(namespaces)
+        self.searched_namespaces = (
+            [self.NAMESPACE] if namespaces is None else namespaces
+        )
         if namespaces is not None and self.NAMESPACE not in namespaces:
             return []
         if collections is not None and self.COLLECTION not in collections:

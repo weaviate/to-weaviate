@@ -726,7 +726,7 @@ def _inspect_chroma(
             "another database.",
         )
     if not collections:
-        raise _no_collection(source.tenant, databases or source.namespaces())
+        raise _no_collection(source.tenant, source.searched_namespaces)
     collections, source_notes = _stored_collections(collections)
     try:
         plan = draft_plan(

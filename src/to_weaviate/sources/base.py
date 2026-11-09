@@ -92,6 +92,14 @@ class Source(Protocol):
         """Every namespace of the tenant, in the order the source lists them."""
         ...
 
+    @property
+    def searched_namespaces(self) -> list[str]:
+        """The namespaces that the last `inspect` searched, in search order.
+
+        With `namespaces` None, `inspect` searched the `namespaces()` it read.
+        """
+        ...
+
     def inspect(
         self,
         namespaces: list[str] | None,

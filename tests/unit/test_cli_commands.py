@@ -585,6 +585,25 @@ def test_inspect_of_every_database_names_them_in_the_order_chroma_lists_them():
     assert not DIR.exists()
 
 
+class ChangingDatabases(NoCollections):
+    """NoCollections that lists the next item of `listings` on each call."""
+
+    def __init__(self, listings: list[list[str]]) -> None:
+        super().__init__([])
+        self.listings = listings
+
+    def databases(self, tenant: str) -> list[str]:
+        return self.listings.pop(0)
+
+
+def test_inspect_that_finds_no_collection_names_the_databases_of_one_listing():
+    client = ChangingDatabases([["db-a"], ["db-a", "db-new"]])
+    source = ChromaSource(client, "t")  # type: ignore[arg-type]
+    r = invoke(FakeFactories(source), "inspect", "chroma", "--json")  # type: ignore[arg-type]
+    assert error_of(r)[2] == "Chroma tenant t has no collection in database db-a."
+    assert client.listings == [["db-a", "db-new"]]
+
+
 def test_inspect_of_a_tenant_without_a_database_exits_2():
     source = ChromaSource(NoCollections([]), "t")
     r = invoke(FakeFactories(source), "inspect", "chroma", "--json")  # type: ignore[arg-type]
