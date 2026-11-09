@@ -1,10 +1,12 @@
 from collections import Counter
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from to_weaviate.naming import reserved_suffix, sidecar_word
 from to_weaviate.plan import (
     DISTANCES,
+    INDEX_DISTANCES,
     CollectionPlan,
     Plan,
     PropertyPlan,
@@ -99,6 +101,115 @@ def _duplicate_findings(entries: list[CollectionPlan]) -> list[Finding]:
                     "own tenant or its own target name",
                 )
             )
+    return out
+
+
+# The settings of a property that the collection stores, in message order.
+PROPERTY_SETTINGS = (
+    "type",
+    "tokenization",
+    "searchable",
+    "filterable",
+    "range_filters",
+)
+# Vector fields whose values can hold a URL or a credential, so a message
+# names them without their values.
+UNQUOTED_VECTOR_FIELDS = ("vectorizer",)
+
+
+def _first_difference(
+    first: dict[str, Any], other: dict[str, Any], prefix: str = ""
+) -> tuple[str, Any, Any] | None:
+    """The first field, in field order, whose values differ, with both values.
+
+    Nested mappings are compared field by field; the path joins names by dots.
+    """
+    for key in dict.fromkeys([*first, *other]):
+        a, b = first.get(key), other.get(key)
+        if a == b:
+            continue
+        if isinstance(a, dict) and isinstance(b, dict):
+            found = _first_difference(a, b, f"{prefix}{key}.")
+            if found is not None:
+                return found
+        return f"{prefix}{key}", a, b
+    return None
+
+
+def _vector_difference(first: CollectionPlan, entry: CollectionPlan) -> str:
+    """The first vector setting in which `entry` differs from `first`."""
+    names = [v.name for v in first.target.vectors]
+    others = [v.name for v in entry.target.vectors]
+    if names != others:
+        return (
+            f"vectors {', '.join(names)} in {_describe(first)}, "
+            f"{', '.join(others)} in {_describe(entry)}"
+        )
+    for a, b in zip(first.target.vectors, entry.target.vectors, strict=True):
+        found = _first_difference(a.model_dump(mode="json"), b.model_dump(mode="json"))
+        if found is None:
+            continue
+        field, value_a, value_b = found
+        if field.split(".")[0] in UNQUOTED_VECTOR_FIELDS:
+            return (
+                f"vector {a.name}: {field} differs between {_describe(first)} "
+                f"and {_describe(entry)}"
+            )
+        return (
+            f"vector {a.name}: {field} {value_a} in {_describe(first)}, "
+            f"{value_b} in {_describe(entry)}"
+        )
+    return f"the vectors of {_describe(first)} and {_describe(entry)} differ"
+
+
+def _shared_collection_findings(entries: list[CollectionPlan]) -> list[Finding]:
+    """Entries of one collection that disagree on its vectors or on a property.
+
+    copy creates the collection with the vectors of the first entry, and each
+    property with the settings of the first entry that has it. Entries may
+    have properties that others lack.
+    """
+    by_key: dict[str, list[CollectionPlan]] = {}
+    for entry in entries:
+        by_key.setdefault(collection_key(entry.target.name), []).append(entry)
+    out: list[Finding] = []
+    for key, group in by_key.items():
+        first = group[0]
+        for entry in group[1:]:
+            if entry.target.vectors != first.target.vectors:
+                out.append(
+                    Finding(
+                        "conflicting_vectors",
+                        key,
+                        f"{_vector_difference(first, entry)}; copy creates "
+                        f"collection {key} with the vectors of the first entry, "
+                        f"so give every entry of {key} the same vectors",
+                    )
+                )
+        owners: dict[str, tuple[CollectionPlan, PropertyPlan]] = {}
+        for entry in group:
+            for prop in entry.target.properties:
+                owner, planned = owners.setdefault(prop.name, (entry, prop))
+                field = next(
+                    (
+                        f
+                        for f in PROPERTY_SETTINGS
+                        if getattr(prop, f) != getattr(planned, f)
+                    ),
+                    None,
+                )
+                if field is not None:
+                    out.append(
+                        Finding(
+                            "conflicting_property",
+                            key,
+                            f"property {prop.name}: {field} "
+                            f"{getattr(planned, field)} in {_describe(owner)}, "
+                            f"{getattr(prop, field)} in {_describe(entry)}; give "
+                            "it the same type and index settings in every entry "
+                            f"of {key}",
+                        )
+                    )
     return out
 
 
@@ -357,6 +468,35 @@ def _unmapped_findings(
     ]
 
 
+def _segment_findings(entry: CollectionPlan) -> list[Finding]:
+    """pq segments that do not divide the dimension of a kept vector.
+
+    Weaviate refuses every object of such a collection. The dimension of an
+    embedded vector comes from the model, so it is not known here.
+    """
+    dimension = entry.source.dimension
+    out: list[Finding] = []
+    for vector in entry.target.vectors:
+        quantizer = vector.index.quantizer
+        segments = quantizer.segments
+        if (
+            vector.mode == "keep"
+            and quantizer.type == "pq"
+            and segments
+            and dimension
+            and dimension % segments
+        ):
+            out.append(
+                Finding(
+                    "invalid_quantizer",
+                    entry.target.name,
+                    f"vector {vector.name}: pq segments {segments} do not divide "
+                    f"the dimension {dimension} of the source vectors",
+                )
+            )
+    return out
+
+
 def _value_findings(entry: CollectionPlan) -> list[Finding]:
     """Property types and distances that the schema mapping does not have."""
     name = entry.target.name
@@ -380,6 +520,22 @@ def _value_findings(entry: CollectionPlan) -> list[Finding]:
         for vector in entry.target.vectors
         if vector.distance is not None and vector.distance not in DISTANCES
     )
+    for vector in entry.target.vectors:
+        accepted = INDEX_DISTANCES.get(vector.index.type)
+        if (
+            accepted
+            and vector.distance in DISTANCES
+            and vector.distance not in accepted
+        ):
+            out.append(
+                Finding(
+                    "invalid_distance",
+                    name,
+                    f"vector {vector.name}: distance {vector.distance} is not "
+                    f"supported by index type {vector.index.type}; it supports "
+                    f"{', '.join(accepted)}",
+                )
+            )
     return out
 
 
@@ -415,6 +571,28 @@ def cleaned_option_findings(
     ]
 
 
+def async_indexing_findings(
+    groups: Mapping[str, list[CollectionPlan]],
+) -> list[Finding]:
+    """Warnings for each dynamic index of a target collection.
+
+    Weaviate creates a dynamic index only with ASYNC_INDEXING=true, which no
+    endpoint of the server reports. `collection_kwargs` sends the vectors of
+    the first entry of a group.
+    """
+    return [
+        Finding(
+            "needs_async_indexing",
+            name,
+            f"vector {vector.name}: the dynamic index needs ASYNC_INDEXING=true "
+            "on the server; check cannot read that setting",
+        )
+        for name, group in groups.items()
+        for vector in group[0].target.vectors
+        if vector.index.type == "dynamic"
+    ]
+
+
 def userinfo_only(errors: list[Finding]) -> bool:
     """Whether every one of `errors` is a URL option that keeps its userinfo."""
     return bool(errors) and all(
@@ -433,8 +611,10 @@ def plan_findings(
     warnings: list[Finding] = []
     errors.extend(_duplicate_findings(plan.collections))
     errors.extend(_duplicate_source_findings(plan.collections))
+    errors.extend(_shared_collection_findings(plan.collections))
     value_errors = [f for e in plan.collections for f in _value_findings(e)]
     errors.extend(value_errors)
+    errors.extend(f for e in plan.collections for f in _segment_findings(e))
     # collection_kwargs cannot map a group that has a value error.
     unmapped = {f.collection for f in value_errors}
     groups = target_groups(plan.collections)
@@ -442,6 +622,7 @@ def plan_findings(
         vectorizer_findings({n: g for n, g in groups.items() if n not in unmapped})
     )
     warnings.extend(cleaned_option_findings(groups))
+    warnings.extend(async_indexing_findings(groups))
     for entry in plan.collections:
         errors.extend(_keep_model_findings(entry, vectorizer_for))
         errors.extend(_unmapped_findings(entry, inspected))

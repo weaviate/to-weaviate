@@ -36,6 +36,44 @@ QUANTIZER_FIELDS: dict[str, set[str]] = {
     "bq": {"rescore_limit", "cache"},
 }
 
+# The quantizer types that Weaviate 1.40.4 creates for each named index type.
+# It refuses the others, except none with hfresh, which it stores as rq. A
+# dynamic index sends its quantizer to its hnsw part and its flat part, so it
+# takes the types that both parts take.
+INDEX_QUANTIZERS: dict[str, tuple[str, ...]] = {
+    "hnsw": ("default", "none", "rq", "sq", "pq", "bq"),
+    "flat": ("default", "none", "rq", "bq"),
+    "dynamic": ("default", "none", "rq", "bq"),
+    "hfresh": ("default", "rq"),
+}
+# The rq bits that Weaviate 1.40.4 accepts for each named index type. It
+# accepts rq centering only with hnsw and 4 bits; without bits, hnsw uses 8.
+RQ_BITS: dict[str, tuple[int, ...]] = {
+    "hnsw": (1, 4, 8),
+    "flat": (1, 8),
+    "dynamic": (1, 8),
+    "hfresh": (1,),
+}
+CENTERING_INDEX = "hnsw"
+CENTERING_BITS = 4
+# The quantizer fields that Weaviate 1.40.4 drops without an error, by index
+# type and quantizer type. A dynamic index applies a field that its hnsw part
+# or its flat part applies, so it drops none.
+IGNORED_FIELDS: dict[str, dict[str, tuple[str, ...]]] = {
+    "hnsw": {"rq": ("cache",), "bq": ("cache", "rescore_limit")},
+    "flat": {"rq": ("training_limit",)},
+    "hfresh": {"rq": ("cache", "training_limit")},
+}
+# Quantizer types that Weaviate trains on the vectors of the index; rq with
+# centering is trained too. Without ASYNC_INDEXING, Weaviate 1.40.4 does not
+# train such a quantizer that the collection was created with, and trains it
+# when a config update enables it on an index that holds vectors. With
+# ASYNC_INDEXING that update changes nothing.
+TRAINED_QUANTIZERS = ("sq", "pq")
+# The distances that Weaviate 1.40.4 accepts for an index type that does not
+# take every distance.
+INDEX_DISTANCES: dict[str, tuple[str, ...]] = {"hfresh": ("cosine", "l2-squared")}
+
 # The distances that target.schema maps to VectorDistances.
 DISTANCES = tuple(sorted(d.value for d in VectorDistances))
 KEEP_DISTANCES_WITHOUT_INDEX = (None, "cosine")
@@ -83,6 +121,12 @@ class QuantizerPlan(_Model):
                 )
         return self
 
+    def needs_training(self) -> bool:
+        """Whether Weaviate trains this quantizer on the vectors of the index."""
+        return self.type in TRAINED_QUANTIZERS or (
+            self.type == "rq" and bool(self.centering)
+        )
+
 
 class IndexPlan(_Model):
     type: Literal["default", "hnsw", "flat", "dynamic", "hfresh"] = "default"
@@ -96,12 +140,43 @@ class IndexPlan(_Model):
             raise ValueError(
                 f"index option(s) {unknown} are not valid for index type {self.type!r}"
             )
-        if self.quantizer.type != "default" and self.type == "default":
+        quantizer = self.quantizer.type
+        if quantizer != "default" and self.type == "default":
             raise ValueError(
-                f"quantizer type {self.quantizer.type!r} needs a named index "
-                "type, not 'default'"
+                f"quantizer type {quantizer!r} needs a named index type, not 'default'"
             )
+        supported = INDEX_QUANTIZERS.get(self.type)
+        if supported is not None and quantizer not in supported:
+            raise ValueError(
+                f"quantizer type {quantizer!r} is not supported by index type "
+                f"{self.type!r}; it supports {', '.join(supported)}"
+            )
+        for field in IGNORED_FIELDS.get(self.type, {}).get(quantizer, ()):
+            value = getattr(self.quantizer, field)
+            if value is not None:
+                raise ValueError(
+                    f"{field}={value!r} of quantizer type {quantizer!r} is not "
+                    f"applied by index type {self.type!r}; remove it"
+                )
+        if quantizer == "rq":
+            self._check_rq()
         return self
+
+    def _check_rq(self) -> None:
+        bits = self.quantizer.bits
+        supported = RQ_BITS[self.type]
+        if bits is not None and bits not in supported:
+            raise ValueError(
+                f"bits={bits} of quantizer type 'rq' is not supported by index "
+                f"type {self.type!r}; it supports {', '.join(map(str, supported))}"
+            )
+        if self.quantizer.centering and (
+            self.type != CENTERING_INDEX or bits != CENTERING_BITS
+        ):
+            raise ValueError(
+                "centering=True is supported only by index type "
+                f"{CENTERING_INDEX!r} with bits={CENTERING_BITS}"
+            )
 
 
 class VectorPlan(_Model):

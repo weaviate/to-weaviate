@@ -7,6 +7,7 @@ function here that sends a request reads CHROMA_URL and runs only when it is
 TEST_URL.
 """
 
+import math
 import os
 import random
 import sys
@@ -18,7 +19,27 @@ import httpx
 
 DATABASE_PATH = "/api/v2/tenants/default_tenant/databases/default_database"
 ADD_BATCH = 300
+# The records of one add when a collection is made. Chroma 1.5.9 accepts at
+# most 5461 (max_batch_size of /api/v2/pre-flight-checks).
+LARGE_ADD_BATCH = 5000
+# Records of the resume collection. A copy in both mode embeds about 300
+# records a second on the CPU of a development machine, so a full copy runs
+# about 28 seconds there.
+RESUME_COUNT = 8000
+TOPICS = ("rivers", "mountains", "cities", "forests", "deserts", "oceans")
 TEST_URL = "http://localhost:8001"
+# Every collection that `seed` makes, in the order it makes them.
+COLLECTIONS = (
+    "docs-cosine",
+    "tiny.l2",
+    "docs-rq",
+    "docs-ip",
+    "tenant-a",
+    "tenant-b",
+    "rejects",
+    "openai-proxy",
+    "resume",
+)
 CATEGORIES = ("guide", "reference", "tutorial")
 TAGS = ("red", "green", "blue", "small", "large")
 
@@ -29,7 +50,7 @@ class Record:
     embedding: list[float]
     document: str | None
     metadata: dict[str, Any]
-    uri: str
+    uri: str | None
 
 
 def _vector(rng: random.Random, dimension: int) -> list[float]:
@@ -39,25 +60,29 @@ def _vector(rng: random.Random, dimension: int) -> list[float]:
 def docs_cosine(rng: random.Random) -> list[Record]:
     """700 records of 8 dimensions.
 
-    `code` is text in 50 records and int in the others. 20 records have no
-    document.
+    `code` is text in 50 records and int in the others. `reviewer` is in 70
+    records only. 20 records have no document.
     """
     records = []
     for i in range(700):
         category = CATEGORIES[i % len(CATEGORIES)]
+        metadata: dict[str, Any] = {
+            "category": category,
+            "year": 2000 + i % 25,
+            "tags": rng.sample(TAGS, k=1 + i % 3),
+            "code": f"C-{i}" if i % 14 == 0 else i,
+            "score": rng.random(),
+            "weights": [rng.random() for _ in range(3)],
+            "published": i % 2 == 0,
+        }
+        if i % 10 == 3:
+            metadata["reviewer"] = f"reviewer-{i % 7}"
         records.append(
             Record(
                 id=f"doc-{i:04d}",
                 embedding=_vector(rng, 8),
                 document=None if i % 35 == 0 else f"Document {i} is a {category}.",
-                metadata={
-                    "category": category,
-                    "year": 2000 + i % 25,
-                    "tags": rng.sample(TAGS, k=1 + i % 3),
-                    "code": f"C-{i}" if i % 14 == 0 else i,
-                    "score": rng.random(),
-                    "weights": [rng.random() for _ in range(3)],
-                },
+                metadata=metadata,
                 uri=f"https://example.com/docs/{i}",
             )
         )
@@ -92,8 +117,133 @@ def docs_rq(rng: random.Random) -> list[Record]:
     ]
 
 
+def docs_ip(rng: random.Random) -> list[Record]:
+    """40 records of 8 dimensions with unit length.
+
+    With unit vectors the largest inner product with a record's own vector is
+    that record's, so a nearest-neighbor query by its vector returns it first.
+    """
+    records = []
+    for i in range(40):
+        vector = _vector(rng, 8)
+        norm = math.sqrt(sum(x * x for x in vector))
+        records.append(
+            Record(
+                id=f"ip-{i:02d}",
+                embedding=[x / norm for x in vector],
+                document=f"Record {i} of the ip collection.",
+                metadata={"group": i % 4},
+                uri=f"https://example.com/ip/{i}",
+            )
+        )
+    return records
+
+
+def tenant_records(rng: random.Random, tenant: str, count: int) -> list[Record]:
+    """`count` records of 8 dimensions for the tenant collection `tenant-<tenant>`.
+
+    Only the records of tenant b have the key `region`.
+    """
+    records = []
+    for i in range(count):
+        metadata: dict[str, Any] = {"position": i}
+        if tenant == "b":
+            metadata["region"] = ("north", "south")[i % 2]
+        records.append(
+            Record(
+                id=f"{tenant}-{i:02d}",
+                embedding=_vector(rng, 8),
+                document=f"Record {i} of tenant {tenant}.",
+                metadata=metadata,
+                uri=f"https://example.com/{tenant}/{i}",
+            )
+        )
+    return records
+
+
+def rejects(rng: random.Random) -> list[Record]:
+    """301 records of 4 dimensions; the int key `rank` holds 300.5 in rej-300.
+
+    rej-300 is the first record of the second page, so an inspection of the
+    first page only sees int values. rej-005 has no document.
+    """
+    return [
+        Record(
+            id=f"rej-{i:03d}",
+            embedding=_vector(rng, 4),
+            document=None if i == 5 else f"Record {i} of the rejects collection.",
+            metadata={"rank": 300.5 if i == 300 else i},
+            uri=f"https://example.com/rejects/{i}",
+        )
+        for i in range(301)
+    ]
+
+
+def resume(rng: random.Random) -> list[Record]:
+    """RESUME_COUNT records of 64 dimensions, each with a document."""
+    return [
+        Record(
+            id=f"res-{i:05d}",
+            embedding=_vector(rng, 64),
+            document=f"Record {i} of the resume collection is about "
+            f"{TOPICS[i % len(TOPICS)]}.",
+            metadata={"position": i},
+            uri=f"https://example.com/resume/{i}",
+        )
+        for i in range(RESUME_COUNT)
+    ]
+
+
+# Made-up secrets of the embedding function of openai-proxy. The tool must
+# neither store nor print them.
+PROXY_USER = "b8-proxy-user"
+PROXY_PASSWORD = "made-up-password-b8"
+PROXY_QUERY_TOKEN = "made-up-query-token-b8"
+PROXY_HEADER_TOKEN = "made-up-header-token-b8"
+PROXY_API_BASE = (
+    f"https://{PROXY_USER}:{PROXY_PASSWORD}@proxy.example.invalid/openai/v1"
+    f"?sig={PROXY_QUERY_TOKEN}"
+)
+# The configuration that chromadb 1.5.9 sends for an OpenAIEmbeddingFunction
+# (get_config). With api_type azure the tool maps it to no vectorizer, so no
+# provider key is needed.
+OPENAI_PROXY_FUNCTION = {
+    "type": "known",
+    "name": "openai",
+    "config": {
+        "api_key_env_var": "CHROMA_OPENAI_API_KEY",
+        "model_name": "text-embedding-3-small",
+        "organization_id": None,
+        "api_base": PROXY_API_BASE,
+        "api_type": "azure",
+        "api_version": "2024-02-01",
+        "deployment_id": "b8-deployment",
+        "default_headers": {"X-Proxy-Token": PROXY_HEADER_TOKEN},
+        "dimensions": None,
+    },
+}
+
+
+def openai_proxy(rng: random.Random) -> list[Record]:
+    """10 records of 8 dimensions."""
+    return [
+        Record(
+            id=f"proxy-{i}",
+            embedding=_vector(rng, 8),
+            document=f"Record {i} of the openai-proxy collection.",
+            metadata={"position": i},
+            uri=None,
+        )
+        for i in range(10)
+    ]
+
+
 def _recreate(
-    http: httpx.Client, name: str, space: str | None, records: list[Record]
+    http: httpx.Client,
+    name: str,
+    space: str | None,
+    records: list[Record],
+    embedding_function: dict[str, Any] | None = None,
 ) -> None:
     # Chroma 1.5.9 keeps the array metadata rows of a deleted collection. A
     # record created later on the same server can then show an array key that
@@ -104,14 +254,21 @@ def _recreate(
     body: dict[str, Any] = {"name": name}
     if space is not None:
         body["configuration"] = {"hnsw": {"space": space}}
+    if embedding_function is not None:
+        body.setdefault("configuration", {})["embedding_function"] = embedding_function
     created = http.post("/collections", json=body)
     created.raise_for_status()
-    _add(http, created.json()["id"], records)
+    _add(http, created.json()["id"], records, LARGE_ADD_BATCH)
 
 
-def _add(http: httpx.Client, collection_id: str, records: list[Record]) -> None:
-    for start in range(0, len(records), ADD_BATCH):
-        batch = records[start : start + ADD_BATCH]
+def _add(
+    http: httpx.Client,
+    collection_id: str,
+    records: list[Record],
+    batch_size: int = ADD_BATCH,
+) -> None:
+    for start in range(0, len(records), batch_size):
+        batch = records[start : start + batch_size]
         added = http.post(
             f"/collections/{collection_id}/add",
             json={
@@ -142,12 +299,20 @@ def _collection_id(http: httpx.Client, name: str) -> str:
 
 
 def seed() -> None:
-    """Delete and recreate docs-cosine, tiny.l2 and docs-rq on the test server."""
+    """Delete and recreate the COLLECTIONS on the test server."""
     rng = random.Random(0)
     with _test_server() as http:
         _recreate(http, "docs-cosine", "cosine", docs_cosine(rng))
         _recreate(http, "tiny.l2", None, tiny_l2(rng))
         _recreate(http, "docs-rq", "cosine", docs_rq(rng))
+        _recreate(http, "docs-ip", "ip", docs_ip(rng))
+        _recreate(http, "tenant-a", "cosine", tenant_records(rng, "a", 30))
+        _recreate(http, "tenant-b", "cosine", tenant_records(rng, "b", 20))
+        _recreate(http, "rejects", "cosine", rejects(rng))
+        _recreate(
+            http, "openai-proxy", "cosine", openai_proxy(rng), OPENAI_PROXY_FUNCTION
+        )
+        _recreate(http, "resume", "cosine", resume(rng))
 
 
 def _extra_tiny_l2(start: int, count: int) -> list[Record]:
@@ -179,13 +344,42 @@ def delete_from_tiny_l2(ids: list[str]) -> None:
         deleted.raise_for_status()
 
 
-def tiny_l2_count() -> int:
-    """The number of records in tiny.l2."""
+def records(name: str, limit: int = 10) -> list[Record]:
+    """The first `limit` records of the collection `name`, read from the server."""
     with _test_server() as http:
-        collection_id = _collection_id(http, "tiny.l2")
+        found = http.post(
+            f"/collections/{_collection_id(http, name)}/get",
+            json={
+                "limit": limit,
+                "include": ["embeddings", "documents", "metadatas", "uris"],
+            },
+        )
+        found.raise_for_status()
+        rows = found.json()
+    return [
+        Record(
+            id=rows["ids"][i],
+            embedding=rows["embeddings"][i],
+            document=rows["documents"][i],
+            metadata=rows["metadatas"][i] or {},
+            uri=rows["uris"][i],
+        )
+        for i in range(len(rows["ids"]))
+    ]
+
+
+def count(name: str) -> int:
+    """The number of records in the collection `name`."""
+    with _test_server() as http:
+        collection_id = _collection_id(http, name)
         counted = http.get(f"/collections/{collection_id}/count")
         counted.raise_for_status()
         return int(counted.json())
+
+
+def tiny_l2_count() -> int:
+    """The number of records in tiny.l2."""
+    return count("tiny.l2")
 
 
 if __name__ == "__main__":
@@ -193,4 +387,4 @@ if __name__ == "__main__":
         seed()
     except (ValueError, httpx.HTTPError) as exc:
         sys.exit(f"seed.py: {exc}")
-    print("Seeded docs-cosine, tiny.l2 and docs-rq.")
+    print(f"Seeded {', '.join(COLLECTIONS)}.")

@@ -269,7 +269,7 @@ def _as_cli_error(exc: Exception) -> CliError:
     if isinstance(exc, SchemaRejected):
         return CliError(
             "target_rejected_schema",
-            f"Weaviate refused to create the collection: {exc}",
+            f"Weaviate refused to {exc.action}: {exc}",
             SCHEMA_HINT,
         )
     if isinstance(exc, BatchRefused):
@@ -516,7 +516,9 @@ def _index_plan(
         raise CliError(
             "usage",
             f"--index {index} --quantizer {quantizer}: {_validation_text(exc)}",
-            "A quantizer needs a named --index; --quantizer-bits takes 1, 4 or 8.",
+            "A quantizer needs a named --index that supports it; "
+            "--quantizer-bits takes 1, 4 or 8 with hnsw, 1 or 8 with flat and "
+            "dynamic, and 1 with hfresh.",
         ) from exc
 
 
@@ -829,6 +831,14 @@ def _planned_targets(
     return planned
 
 
+def _needs_quantizer_update(entry: CollectionPlan) -> bool:
+    """Whether copy enables a quantizer of `entry` again after its pages.
+
+    Without ASYNC_INDEXING, Weaviate trains such a quantizer only then.
+    """
+    return any(v.index.quantizer.needs_training() for v in entry.target.vectors)
+
+
 @contextmanager
 def _copy_lock(directory: Path) -> Iterator[None]:
     """Hold the lock that lets one copy at a time use `directory`."""
@@ -908,7 +918,15 @@ def _copy(
                 schema.ensure(group)
             events = Events(directory / EVENTS_FILE)
             for entry in entries:
-                state.set_target(entry.source.ref, targets[entry.source.ref])
+                ref = entry.source.ref
+                state.set_target(ref, targets[ref])
+                trained = _needs_quantizer_update(entry)
+                if trained:
+                    state.expect_quantizer_update(ref)
+                else:
+                    # A row from a run with an earlier plan would keep the
+                    # entry not done.
+                    state.quantizers_updated(ref)
                 info(json_output, f"Copying {entry.source.name} to {entry.target.name}")
                 result = copy_collection(
                     source,
@@ -916,9 +934,16 @@ def _copy(
                     state,
                     events,
                     entry,
-                    inspected[entry.source.ref],
+                    inspected[ref],
                     parallelism,
                 )
+                if trained:
+                    info(
+                        json_output,
+                        f"Enabling the trained quantizers of {entry.target.name}",
+                    )
+                    schema.enable_trained_quantizers(entry)
+                    state.quantizers_updated(ref)
                 info(
                     json_output,
                     f"Copied {entry.source.name}: {_plural(result.copied, 'record')}, "

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from fakes import (
     FakeFactories,
     FakeInsertClient,
@@ -20,7 +21,14 @@ from typer.testing import Result
 
 from to_weaviate.ids import to_uuid
 from to_weaviate.lock import Locked, exclusive_lock
-from to_weaviate.plan import DroppedKey, load_plan, save_plan
+from to_weaviate.plan import (
+    DroppedKey,
+    IndexPlan,
+    QuantizerPlan,
+    VectorizerPlan,
+    load_plan,
+    save_plan,
+)
 from to_weaviate.sources.base import Page, Partition, Record, SourceCollection
 from to_weaviate.sources.chroma.client import ChromaError
 from to_weaviate.sources.chroma.source import ChromaSource
@@ -322,6 +330,112 @@ def test_inspect_usage_errors(tmp_path, args, named):
     r = invoke(FakeFactories(FakeSource(cli_records(10))), "inspect", "chroma", *args)
     assert r.exit_code == 2 and named in r.output
     assert not (tmp_path / DIR / "plan.yaml").exists()
+
+
+def _set_index(path: Path, index: dict[str, Any]) -> None:
+    """Give every vector of the plan.yaml at `path` the index `index`.
+
+    The file is edited as YAML, so the plan model does not check `index`.
+    """
+    plan = yaml.safe_load(path.read_text(encoding="utf-8"))
+    for entry in plan["collections"]:
+        for vector in entry["target"]["vectors"]:
+            vector["index"] = index
+    path.write_text(yaml.safe_dump(plan, sort_keys=False), encoding="utf-8")
+
+
+def test_inspect_refuses_a_quantizer_that_the_index_does_not_support(tmp_path):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    r = invoke(
+        fakes, "inspect", "chroma", "--index", "flat", "--quantizer", "sq", "--json"
+    )
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert d["code"] == "usage"
+    assert "quantizer type 'sq' is not supported by index type 'flat'" in d["message"]
+    assert not (tmp_path / DIR / "plan.yaml").exists()
+
+
+@pytest.mark.parametrize("command", ["check", "copy"])
+def test_a_quantizer_that_the_index_does_not_support_is_refused(tmp_path, command):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    index = {"type": "hfresh", "quantizer": {"type": "none"}}
+    _set_index(tmp_path / DIR / "plan.yaml", index)
+    r = invoke(fakes, command, "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert d["code"] == "invalid_plan"
+    assert (
+        "quantizer type 'none' is not supported by index type 'hfresh'"
+        in (d["message"])
+    )
+    assert fakes.schema_calls == 0 and fakes.schema.ensured == []
+
+
+def test_inspect_refuses_rq_bits_that_the_index_does_not_support(tmp_path):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    args = ("--index", "hfresh", "--quantizer", "rq", "--quantizer-bits", "8")
+    r = invoke(fakes, "inspect", "chroma", *args, "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert d["code"] == "usage"
+    assert (
+        "bits=8 of quantizer type 'rq' is not supported by index type 'hfresh'"
+        in (d["message"])
+    )
+    assert not (tmp_path / DIR / "plan.yaml").exists()
+
+
+@pytest.mark.parametrize("command", ["check", "copy"])
+def test_rq_centering_that_the_index_does_not_support_is_refused(tmp_path, command):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    quantizer = {"type": "rq", "bits": 8, "centering": True}
+    _set_index(tmp_path / DIR / "plan.yaml", {"type": "hnsw", "quantizer": quantizer})
+    r = invoke(fakes, command, "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert d["code"] == "invalid_plan"
+    assert (
+        "centering=True is supported only by index type 'hnsw' with bits=4"
+        in (d["message"])
+    )
+    assert fakes.schema_calls == 0 and fakes.schema.ensured == []
+
+
+@pytest.mark.parametrize("command", ["check", "copy"])
+def test_a_quantizer_field_that_the_index_does_not_apply_is_refused(tmp_path, command):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    quantizer = {"type": "bq", "rescore_limit": 30}
+    _set_index(tmp_path / DIR / "plan.yaml", {"type": "hnsw", "quantizer": quantizer})
+    r = invoke(fakes, command, "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert d["code"] == "invalid_plan"
+    assert (
+        "rescore_limit=30 of quantizer type 'bq' is not applied by index type 'hnsw'"
+    ) in d["message"]
+    assert fakes.schema_calls == 0 and fakes.schema.ensured == []
+
+
+def test_check_warns_that_a_dynamic_index_needs_async_indexing():
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))), "--index", "dynamic")
+    r = invoke(fakes, "check", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["warnings"] == [
+        {
+            "code": "needs_async_indexing",
+            "collection": "Docs",
+            "message": "vector default: the dynamic index needs ASYNC_INDEXING=true "
+            "on the server; check cannot read that setting",
+        }
+    ]
+
+
+def test_check_gives_no_async_indexing_warning_without_a_dynamic_index():
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))), "--index", "hnsw")
+    r = invoke(fakes, "check", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["warnings"] == []
 
 
 def test_inspect_unknown_collection_hint_names_both_database_settings():
@@ -788,6 +902,182 @@ def test_check_accepts_entries_that_write_to_separate_places(
     two_entries(tmp_path / DIR, (name_a, tenant_a), (name_b, tenant_b))
     r = invoke(fakes, "check", "--json")
     assert r.exit_code == 0, r.output
+
+
+def change_second_entry(directory: Path, **update: Any) -> None:
+    """Replace fields of the target of the second plan entry."""
+    plan = load_plan(directory / "plan.yaml")
+    first, second = plan.collections
+    target = second.target.model_copy(update=update)
+    entries = [first, second.model_copy(update={"target": target})]
+    save_plan(plan.model_copy(update={"collections": entries}), directory / "plan.yaml")
+
+
+ENTRY_A = "docs -> Docs (tenant a)"
+ENTRY_B = "docs -> Docs (tenant b)"
+
+
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_entries_of_one_collection_with_other_vectors_are_an_invalid_plan(
+    tmp_path, cmd
+):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    two_entries(tmp_path / DIR, ("Docs", "a"), ("Docs", "b"))
+    second = load_plan(tmp_path / DIR / "plan.yaml").collections[1].target
+    update = {"distance": "dot", "index": IndexPlan(type="hnsw")}
+    vectors = [v.model_copy(update=update) for v in second.vectors]
+    change_second_entry(tmp_path / DIR, vectors=vectors)
+    r = invoke(fakes, cmd, "--json")
+    message = (
+        f"vector default: distance cosine in {ENTRY_A}, dot in {ENTRY_B}; copy "
+        "creates collection Docs with the vectors of the first entry, so give "
+        "every entry of Docs the same vectors"
+    )
+    assert plan_errors(r) == [
+        {"code": "conflicting_vectors", "collection": "Docs", "message": message}
+    ]
+    assert fakes.schema.ensured == [] and fakes.writer.calls == 0
+
+
+def test_a_vectorizer_difference_is_named_without_its_values(tmp_path):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    two_entries(tmp_path / DIR, ("Docs", "a"), ("Docs", "b"))
+    second = load_plan(tmp_path / DIR / "plan.yaml").collections[1].target
+    vectorizer = VectorizerPlan(
+        module="text2vec-openai", options={"base_url": "https://proxy.example"}
+    )
+    vectors = [v.model_copy(update={"vectorizer": vectorizer}) for v in second.vectors]
+    change_second_entry(tmp_path / DIR, vectors=vectors)
+    r = invoke(fakes, "check", "--json", OPENAI_API_KEY="openai-key")
+    (error,) = [e for e in plan_errors(r) if e["code"] == "conflicting_vectors"]
+    assert error["message"].startswith(
+        f"vector default: vectorizer differs between {ENTRY_A} and {ENTRY_B};"
+    )
+    assert "proxy.example" not in r.stdout
+
+
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_entries_of_one_collection_with_other_property_settings_are_an_invalid_plan(
+    tmp_path, cmd
+):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    two_entries(tmp_path / DIR, ("Docs", "a"), ("Docs", "b"))
+    second = load_plan(tmp_path / DIR / "plan.yaml").collections[1].target
+    update = {"type": "text", "tokenization": "field", "range_filters": False}
+    properties = [
+        p.model_copy(update=update) if p.name == "year" else p
+        for p in second.properties
+    ]
+    change_second_entry(tmp_path / DIR, properties=properties)
+    r = invoke(fakes, cmd, "--json")
+    message = (
+        f"property year: type int in {ENTRY_A}, text in {ENTRY_B}; give it the "
+        "same type and index settings in every entry of Docs"
+    )
+    assert plan_errors(r) == [
+        {"code": "conflicting_property", "collection": "Docs", "message": message}
+    ]
+    assert fakes.schema.ensured == [] and fakes.writer.calls == 0
+
+
+def test_entries_of_one_collection_may_have_other_properties_and_source_keys(
+    tmp_path,
+):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    two_entries(tmp_path / DIR, ("Docs", "a"), ("Docs", "b"))
+    second = load_plan(tmp_path / DIR / "plan.yaml").collections[1].target
+    properties = [
+        p.model_copy(update={"coerced_from": ["text"]}) if p.name == "year" else p
+        for p in second.properties
+        if p.name != "uri"
+    ]
+    change_second_entry(tmp_path / DIR, properties=properties)
+    r = invoke(fakes, "check", "--json")
+    assert r.exit_code == 0, r.output
+
+
+# (quantizer in plan.yaml, whether copy enables it again after the pages).
+TRAINING = {
+    "sq": ({"type": "sq", "training_limit": 100}, True),
+    "pq": ({"type": "pq", "segments": 2, "training_limit": 100}, True),
+    "rq-centering": ({"type": "rq", "bits": 4, "centering": True}, True),
+    "rq": ({"type": "rq", "bits": 8}, False),
+    "bq": ({"type": "bq"}, False),
+    "none": ({"type": "none"}, False),
+    "default": ({"type": "default"}, False),
+}
+
+
+@pytest.mark.parametrize(("quantizer", "sent"), TRAINING.values(), ids=TRAINING)
+def test_copy_enables_a_quantizer_that_needs_training_after_the_pages(
+    tmp_path, quantizer, sent
+):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    _set_index(tmp_path / DIR / "plan.yaml", {"type": "hnsw", "quantizer": quantizer})
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert fakes.schema.updated == ([("Docs", None)] if sent else [])
+    assert len(fakes.writer.objects) == 10
+
+
+def test_copy_enables_the_quantizer_once_per_tenant_entry(tmp_path):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    _set_index(
+        tmp_path / DIR / "plan.yaml", {"type": "hnsw", "quantizer": {"type": "sq"}}
+    )
+    two_entries(tmp_path / DIR, ("Docs", "a"), ("Docs", "b"))
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert fakes.schema.updated == [("Docs", "a"), ("Docs", "b")]
+
+
+def test_a_refused_quantizer_update_stops_copy_and_resumes_without_pages(tmp_path):
+    refused = SchemaRejected("sq is not supported", "enable the quantizers of Docs")
+    fakes = inspected(
+        FakeFactories(
+            FakeSource(cli_records(10)), schema=FakeSchema(update_error=refused)
+        )
+    )
+    _set_index(
+        tmp_path / DIR / "plan.yaml", {"type": "hnsw", "quantizer": {"type": "sq"}}
+    )
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert d["code"] == "target_rejected_schema"
+    assert d["message"] == (
+        "Weaviate refused to enable the quantizers of Docs: sq is not supported"
+    )
+    status = json.loads(invoke(fakes, "status", "--json").stdout)["collections"][0]
+    assert (status["copied"], status["done"]) == (10, False)
+    reads = fakes.source.read_calls
+    fakes.schema.update_error = None
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert fakes.source.read_calls == reads
+    assert fakes.schema.updated == [("Docs", None)]
+    status = json.loads(invoke(fakes, "status", "--json").stdout)["collections"][0]
+    assert (status["copied"], status["done"]) == (10, True)
+
+
+def test_an_entry_is_done_again_when_its_plan_stops_needing_the_update(tmp_path):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    plan = tmp_path / DIR / "plan.yaml"
+    rq = {"type": "rq", "bits": 4}
+    _set_index(plan, {"type": "hnsw", "quantizer": rq})
+    assert invoke(fakes, "copy", "--json").exit_code == 0
+    # The server refuses to add centering to the existing rq index.
+    fakes.schema.update_error = SchemaRejected(
+        "rq centering is immutable", "enable the quantizers of Docs"
+    )
+    _set_index(plan, {"type": "hnsw", "quantizer": {**rq, "centering": True}})
+    assert invoke(fakes, "copy", "--json").exit_code == 2
+    _set_index(plan, {"type": "hnsw", "quantizer": rq})
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["collections"][0]["done"] is True
+    status = json.loads(invoke(fakes, "status", "--json").stdout)["collections"][0]
+    assert status["done"] is True
 
 
 def test_copy_requires_provider_key():
@@ -1336,6 +1626,80 @@ def test_a_distance_without_a_mapping_and_the_default_index_is_an_invalid_plan(
         {"code": "invalid_distance", "collection": "Docs", "message": message}
     ]
     assert fakes.writer.calls == 0
+
+
+def _with_pq_segments(vectors: list[Any], segments: int) -> list[Any]:
+    quantizer = QuantizerPlan(type="pq", segments=segments)
+    return [
+        v.model_copy(
+            update={"index": v.index.model_copy(update={"quantizer": quantizer})}
+        )
+        for v in vectors
+    ]
+
+
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_pq_segments_that_do_not_divide_the_dimension_are_an_invalid_plan(
+    tmp_path, cmd
+):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))), "--index", "hnsw")
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    edit_target(tmp_path / DIR, vectors=_with_pq_segments(target.vectors, 3))
+    r = invoke(fakes, cmd, "--json")
+    message = (
+        "vector default: pq segments 3 do not divide the dimension 2 of the "
+        "source vectors"
+    )
+    assert plan_errors(r) == [
+        {"code": "invalid_quantizer", "collection": "Docs", "message": message}
+    ]
+    assert fakes.writer.calls == 0 and fakes.schema.ensured == []
+
+
+def test_pq_segments_of_an_embedded_vector_are_not_compared_with_the_source(
+    tmp_path,
+):
+    fakes = inspected(
+        FakeFactories(FakeSource(cli_records(10))),
+        "--vectors",
+        "both",
+        "--index",
+        "hnsw",
+    )
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    assert [v.mode for v in target.vectors] == ["keep", "embed"]
+    kept, embedded = target.vectors
+    vectors = [*_with_pq_segments([kept], 2), *_with_pq_segments([embedded], 3)]
+    edit_target(tmp_path / DIR, vectors=vectors)
+    r = invoke(fakes, "check", "--json")
+    assert r.exit_code == 0, r.output
+
+
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_hfresh_with_a_dot_distance_is_an_invalid_plan(tmp_path, cmd):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))), "--index", "hfresh")
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    vectors = [v.model_copy(update={"distance": "dot"}) for v in target.vectors]
+    edit_target(tmp_path / DIR, vectors=vectors)
+    r = invoke(fakes, cmd, "--json")
+    message = (
+        "vector default: distance dot is not supported by index type hfresh; "
+        "it supports cosine, l2-squared"
+    )
+    assert plan_errors(r) == [
+        {"code": "invalid_distance", "collection": "Docs", "message": message}
+    ]
+    assert fakes.writer.calls == 0 and fakes.schema.ensured == []
+
+
+@pytest.mark.parametrize("distance", ["cosine", "l2-squared", None])
+def test_hfresh_with_a_cosine_or_l2_distance_passes_check(tmp_path, distance):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))), "--index", "hfresh")
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    vectors = [v.model_copy(update={"distance": distance}) for v in target.vectors]
+    edit_target(tmp_path / DIR, vectors=vectors)
+    r = invoke(fakes, "check", "--json")
+    assert r.exit_code == 0, r.output
 
 
 @pytest.mark.parametrize("cmd", ["check", "copy", "status", "verify"])

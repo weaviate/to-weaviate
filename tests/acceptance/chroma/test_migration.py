@@ -1,19 +1,61 @@
 from chroma.seed import (
+    COLLECTIONS,
     add_to_tiny_l2,
+    count,
     delete_from_tiny_l2,
     extra_tiny_l2_ids,
     tiny_l2_count,
 )
-from conftest import run, weaviate_config, weaviate_count, weaviate_object
+from conftest import (
+    SUITE_COLLECTIONS,
+    copy_and_verify,
+    read_plan,
+    run,
+    weaviate_by_source_id,
+    weaviate_config,
+    weaviate_count,
+    weaviate_object,
+    write_plan,
+)
+
+
+def test_every_seeded_collection_in_one_run(seeded, tmp_path):
+    r = run(["inspect", "chroma"], tmp_path)
+    assert r.exit_code == 0, r
+    targets = {row["source"]: row["target"] for row in r.data["collections"]}
+    assert set(COLLECTIONS) <= set(targets), r
+    assert {targets[name] for name in COLLECTIONS} <= set(SUITE_COLLECTIONS)
+    # The test server can hold collections that the seed does not make, and
+    # the suite writes only to its own target collections.
+    plan = read_plan(tmp_path)
+    plan["collections"] = [
+        e for e in plan["collections"] if e["source"]["name"] in COLLECTIONS
+    ]
+    write_plan(tmp_path, plan)
+    r = copy_and_verify(tmp_path)
+    checks = r.data["checks"]
+    assert len(checks) == 3 * len(COLLECTIONS) and all(c["passed"] for c in checks)
+    r = run(["status"], tmp_path)
+    assert r.exit_code == 0, r
+    rows = {row["target"]: row for row in r.data["collections"]}
+    assert len(rows) == len(COLLECTIONS), r
+    for name in COLLECTIONS:
+        expected = count(name)
+        row = rows[targets[name]]
+        assert (row["total"], row["copied"], row["rejects"], row["done"]) == (
+            expected,
+            expected,
+            0,
+            True,
+        ), row
+        assert weaviate_count(targets[name]) == expected, name
 
 
 def test_end_to_end(seeded, tmp_path):
     names = ["--collection", "docs-cosine", "--collection", "tiny.l2"]
     r = run(["inspect", "chroma", *names], tmp_path)
     assert r.exit_code == 0, r
-    for cmd in (["check"], ["copy"], ["verify"]):
-        r = run(cmd, tmp_path)
-        assert r.exit_code == 0 and r.data["status"] == "success", r
+    copy_and_verify(tmp_path)
     assert weaviate_count("Docs_cosine") == 700 and weaviate_count("Tiny_l2") == 10
     # The seed gives tiny.l2 UUID ids, and a source id that is a UUID is kept.
     tiny = weaviate_object("Tiny_l2")
@@ -22,6 +64,61 @@ def test_end_to_end(seeded, tmp_path):
     assert types["code"].value == "text"
     r = run(["copy"], tmp_path)
     assert r.exit_code == 0 and weaviate_count("Docs_cosine") == 700, r
+
+
+# The property types that the metadata of docs-cosine maps to.
+DOCS_COSINE_TYPES = {
+    "document": "text",
+    "source_id": "text",
+    "uri": "text",
+    "category": "text",
+    "year": "int",
+    "tags": "text[]",
+    "code": "text",
+    "score": "number",
+    "weights": "number[]",
+    "published": "boolean",
+    "reviewer": "text",
+}
+
+
+def test_metadata_shapes_map_to_property_types(seeded, tmp_path):
+    r = run(["inspect", "chroma", "--collection", "docs-cosine"], tmp_path)
+    assert r.exit_code == 0, r
+    r = copy_and_verify(tmp_path)
+    records_check = next(c for c in r.data["checks"] if c["name"] == "records")
+    assert records_check["detail"].startswith("sampled 300, compared 300,"), r
+    properties = weaviate_config("Docs_cosine").properties
+    assert {p.name: p.data_type.value for p in properties} == DOCS_COSINE_TYPES
+    # The index settings of each property are the plan's.
+    planned = {
+        p["name"]: p
+        for p in read_plan(tmp_path)["collections"][0]["target"]["properties"]
+    }
+    for found in properties:
+        plan = planned[found.name]
+        tokenization = found.tokenization.value if found.tokenization else None
+        assert (
+            tokenization,
+            found.index_filterable,
+            found.index_range_filters,
+        ) == (plan["tokenization"], plan["filterable"], plan["range_filters"]), found
+        if plan["type"] in ("text", "text[]"):
+            assert found.index_searchable == plan["searchable"], found
+    # doc-0000 has no document, no reviewer and a text code; doc-0003 has a
+    # reviewer and an int code, which is stored as text.
+    first = weaviate_by_source_id("Docs_cosine", "doc-0000")
+    assert first is not None
+    assert first.properties["document"] is None
+    assert first.properties["reviewer"] is None
+    assert first.properties["code"] == "C-0"
+    assert first.properties["published"] is True
+    third = weaviate_by_source_id("Docs_cosine", "doc-0003")
+    assert third is not None
+    assert third.properties["reviewer"] == "reviewer-3"
+    assert third.properties["code"] == "3"
+    assert third.properties["published"] is False
+    assert third.properties["year"] == 2003
 
 
 # (start, count) of each add to tiny.l2, after its 10 seed records.
@@ -79,8 +176,6 @@ def test_rq_bits_reach_the_server(seeded, tmp_path):
         tmp_path,
     )
     assert r.exit_code == 0, r
-    for cmd in (["check"], ["copy"], ["verify"]):
-        r = run(cmd, tmp_path)
-        assert r.exit_code == 0, r
+    copy_and_verify(tmp_path)
     vector = weaviate_config("Docs_rq").vector_config["default"]
     assert vector.vector_index_config.quantizer.bits == 4
