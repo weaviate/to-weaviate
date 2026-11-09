@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, TypeVar
 
+from to_weaviate.engine.copy import REJECTS_ARE_FINAL
 from to_weaviate.ids import to_uuid
 from to_weaviate.plan import CollectionPlan
 from to_weaviate.sources.base import Source, SourceCollection
@@ -27,8 +28,11 @@ REPORT_MD = "report.md"
 REPORT_JSON = "report.json"
 TARGET_BELOW_SOURCE = (
     "run to-weaviate copy again. If the counts still differ, records were "
-    "skipped or rejected: read rejects.jsonl and start the copy over in a new "
-    "--dir."
+    f"skipped or rejected: read rejects.jsonl. {REJECTS_ARE_FINAL}"
+)
+MISSING_IDS = (
+    "run to-weaviate copy again. If ids are still missing, records were "
+    f"skipped or rejected: read rejects.jsonl. {REJECTS_ARE_FINAL}"
 )
 TARGET_ABOVE_SOURCE = (
     "the target holds objects whose source records were deleted. This version "
@@ -173,6 +177,10 @@ def verify_ids(diff: IdDiff, entry: CollectionPlan) -> Check:
         detail += f"; missing ids {_quoted(diff.missing_sample)}"
     if diff.extra_sample:
         detail += f"; extra ids {_quoted(diff.extra_sample)}"
+    if diff.missing:
+        detail += f"; {MISSING_IDS}"
+    if diff.extra:
+        detail += f"; {TARGET_ABOVE_SOURCE}"
     return _check("ids", entry, diff.missing == diff.extra == 0, detail)
 
 

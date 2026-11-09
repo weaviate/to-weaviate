@@ -43,7 +43,8 @@ class FakeSource:
     """Source over an in-memory list with offset partitions, like ChromaSource.
 
     Cursors are decimal offsets into `records`. Reads are counted and timed so
-    tests can check paging and concurrency.
+    tests can check paging and concurrency. `id_reads` counts the `ids_at`
+    calls apart from `read_calls`.
     """
 
     name: ClassVar[str] = "fake"
@@ -70,6 +71,7 @@ class FakeSource:
         self.embedding = embedding
         self.inspected_namespaces: list[list[str] | None] = []
         self.read_calls = 0
+        self.id_reads = 0
         self.peak_concurrent_reads = 0
         self._active_reads = 0
         self._growth: list[Record] = []
@@ -174,6 +176,13 @@ class FakeSource:
 
     def ids(self, collection: SourceCollection) -> Iterator[str]:
         yield from [r.id for r in self.records]
+
+    def ids_at(
+        self, collection: SourceCollection, offset: int, limit: int
+    ) -> list[str]:
+        with self._lock:
+            self.id_reads += 1
+        return [r.id for r in self.records[offset : offset + limit]]
 
     def count(self, collection: SourceCollection) -> int:
         return len(self.records)

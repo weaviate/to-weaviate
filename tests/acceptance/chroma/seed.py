@@ -2,7 +2,8 @@
 
 Run it as a script, or call `seed()`. Each run deletes and recreates the
 collections, so every run sends the same data. `add_to_tiny_l2` and
-`delete_from_tiny_l2` add records to tiny.l2 and delete them again. Every
+`delete_from_tiny_l2` add records to tiny.l2 and delete them again;
+`restore_tiny_l2` makes tiny.l2 again from records read before. Every
 function here that sends a request reads CHROMA_URL and runs only when it is
 TEST_URL.
 """
@@ -12,7 +13,7 @@ import os
 import random
 import sys
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
@@ -441,10 +442,19 @@ def extra_tiny_l2_ids(start: int, count: int) -> list[str]:
     return [r.id for r in _extra_tiny_l2(start, count)]
 
 
-def add_to_tiny_l2(start: int, count: int) -> None:
-    """Add `count` records numbered from `start` to tiny.l2."""
+def add_to_tiny_l2(
+    start: int, count: int, metadata: dict[str, Any] | None = None
+) -> None:
+    """Add `count` records numbered from `start` to tiny.l2.
+
+    The keys of `metadata` are added to the metadata of each record.
+    """
+    added = [
+        replace(r, metadata={**r.metadata, **(metadata or {})})
+        for r in _extra_tiny_l2(start, count)
+    ]
     with _test_server() as http:
-        _add(http, _collection_id(http, "tiny.l2"), _extra_tiny_l2(start, count))
+        _add(http, _collection_id(http, "tiny.l2"), added)
 
 
 def delete_from_tiny_l2(ids: list[str]) -> None:
@@ -459,6 +469,16 @@ def delete_from_tiny_l2(ids: list[str]) -> None:
         collection_id = _collection_id(http, "tiny.l2")
         deleted = http.post(f"/collections/{collection_id}/delete", json={"ids": ids})
         deleted.raise_for_status()
+
+
+def restore_tiny_l2(records: list[Record]) -> None:
+    """Delete tiny.l2 and make it again with `records`, in their order.
+
+    Chroma puts a record that is added again after the others, so only a new
+    collection gives the records back their order.
+    """
+    with _test_server() as http:
+        _recreate(http, "tiny.l2", None, records)
 
 
 def records(name: str, limit: int = 10) -> list[Record]:

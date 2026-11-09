@@ -8,6 +8,8 @@ from conftest import (
     weaviate_update_object,
 )
 
+from to_weaviate.engine.verify import MISSING_IDS
+
 TARGET = "Tiny_l2"
 
 
@@ -32,7 +34,9 @@ def test_verify_finds_a_missing_and_a_changed_object(seeded, tmp_path):
     assert not checks["count"]["passed"]
     assert "source count 10, target count 9" in checks["count"]["detail"]
     assert not checks["ids"]["passed"]
-    assert checks["ids"]["detail"] == f'missing 1, extra 0; missing ids ["{source_id}"]'
+    assert checks["ids"]["detail"] == (
+        f'missing 1, extra 0; missing ids ["{source_id}"]; {MISSING_IDS}'
+    )
     assert f'"{source_id}": missing in the target' in checks["records"]["detail"]
 
     weaviate_insert_object(TARGET, stored)

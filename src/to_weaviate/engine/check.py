@@ -174,7 +174,9 @@ def _shared_collection_findings(entries: list[CollectionPlan]) -> list[Finding]:
 
     copy creates the collection with the vectors of the first entry, and each
     property with the settings of the first entry that has it. Entries may
-    have properties that others lack.
+    have properties that others lack, but no two names that differ only in
+    case: the server compares them in lower case. Names that repeat within one
+    entry are reported by the load findings.
     """
     by_key: dict[str, list[CollectionPlan]] = {}
     for entry in entries:
@@ -196,7 +198,21 @@ def _shared_collection_findings(entries: list[CollectionPlan]) -> list[Finding]:
         owners: dict[str, tuple[CollectionPlan, PropertyPlan]] = {}
         for entry in group:
             for prop in entry.target.properties:
-                owner, planned = owners.setdefault(prop.name, (entry, prop))
+                owner, planned = owners.setdefault(prop.name.lower(), (entry, prop))
+                if planned.name != prop.name:
+                    if owner is not entry:
+                        out.append(
+                            Finding(
+                                "duplicate_property",
+                                key,
+                                f"properties {planned.name} in {_describe(owner)} "
+                                f"and {prop.name} in {_describe(entry)} have the "
+                                "same name ignoring case; Weaviate compares "
+                                "property names in lower case, so give the "
+                                f"property one name in every entry of {key}",
+                            )
+                        )
+                    continue
                 field = next(
                     (
                         f

@@ -67,10 +67,11 @@ _QUANTIZER_CLASSES: dict[type, str] = {
 }
 
 
-# Quantizer fields that `differences` compares with the existing collection.
-# copy's config update after the pages sends them, and the server refuses a
-# change of bits or centering.
+# Quantizer fields that a plan can set and the server reports. `differences`
+# compares them with the existing collection. copy's config update after the
+# pages sends them, and the server refuses a change of bits or centering.
 COMPARED_QUANTIZER_FIELDS = (
+    "cache",
     "bits",
     "centering",
     "segments",

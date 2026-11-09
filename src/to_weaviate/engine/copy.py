@@ -2,6 +2,7 @@ import hashlib
 import json
 import math
 import threading
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
@@ -12,12 +13,20 @@ from to_weaviate.state import CollectionProgress, State
 from to_weaviate.target.writer import Reject, TargetObject, Writer, to_object
 
 NOT_A_NUMBER = "embedding holds a value that is not a number"
+SOURCE_CHANGED = "the source changed since the last run; re-reading from the start"
+REJECTS_ARE_FINAL = (
+    "Rejects are final for this directory. After fixing the cause, copy "
+    "plan.yaml and inspect.json to a new --dir and run to-weaviate copy there; "
+    "objects already in Weaviate are written again unchanged."
+)
 
 
 @dataclass(frozen=True)
 class CopyResult:
     copied: int
     rejects: int
+    # The start offset of a tail that reads records of earlier runs again.
+    reread_from: int | None = None
 
 
 def content_hash(record: Record) -> bytes:
@@ -51,28 +60,164 @@ def _progress(state: State, ref: str) -> CollectionProgress:
 
 
 def _covered(stored: list[Partition]) -> int | None:
-    """End offset of the stored partitions, or None when a tail has no end.
+    """End offset of the newest stored partition, or None when a tail has no end.
 
     Stored partitions can come from an earlier run with a smaller count, so
     this end can be lower than the current `collection.count`. A tail stores
     its end offset when it finishes. A finished tail without one comes from a
-    state written before tails stored it.
+    state written before tails stored it. After the source offsets shifted,
+    an older partition can end above the newest one.
     """
     if any(p.stop is None for p in stored):
         return None
-    return max((int(p.stop) for p in stored if p.stop is not None), default=0)
+    return int(stored[-1].stop or 0) if stored else 0
 
 
 def _tail(stored: list[Partition], start: int) -> Partition:
     """A new partition from `start` without a stop.
 
-    A tail that read no records ends at its start, so it can hold the key
-    `{start}-`. The new tail then gets a key with the partition count.
+    A tail that read no records ends at its start, and a tail after a shift
+    can start where an older one started, so `{start}-` can be taken. The new
+    tail then gets a key with a number from the partition count up.
     """
-    key = f"{start}-"
-    if any(p.key == key for p in stored):
-        key = f"{start}-{len(stored)}"
+    keys = {p.key for p in stored}
+    key, number = f"{start}-", len(stored)
+    while key in keys:
+        key, number = f"{start}-{number}", number + 1
     return Partition(key, str(start), None)
+
+
+def _ids_between(
+    source: Source, collection: SourceCollection, start: int, stop: int
+) -> list[str]:
+    """The ids at the offsets from `start` to `stop`; fewer when the source ends.
+
+    A server can return fewer rows than the limit before its last page.
+    """
+    ids: list[str] = []
+    while start + len(ids) < stop:
+        more = source.ids_at(collection, start + len(ids), stop - start - len(ids))
+        if not more:
+            break
+        ids.extend(more)
+    return ids[: stop - start]
+
+
+@dataclass(frozen=True)
+class _Mark:
+    """The source id of the last record a partition read, and of the one before."""
+
+    last_id: str
+    previous_id: str | None
+
+
+def _ids_backwards(
+    source: Source, collection: SourceCollection, below: int
+) -> Iterator[tuple[int, str]]:
+    """(offset, id) of each record below offset `below`, highest offset first.
+
+    The ids are read without a payload, one page of the source's page size
+    at a time, when the caller asks for them.
+    """
+    stop = below
+    while stop > 0:
+        start = max(0, stop - source.page_size)
+        ids = _ids_between(source, collection, start, stop)
+        for offset in reversed(range(start, start + len(ids))):
+            yield offset, ids[offset - start]
+        stop = start
+
+
+def _last_read(
+    source: Source, collection: SourceCollection, wanted: list[_Mark], below: int
+) -> tuple[int, int] | None:
+    """(index in `wanted`, offset) of the first of `wanted` found below `below`.
+
+    `wanted` holds marks, newest first. A last id counts as found only when the
+    id at the offset below it is the mark's previous id, or when the mark has
+    none. The ids are read backwards from offset `below` until `wanted[0]` is
+    found or offset 0 is reached.
+    """
+    rank: dict[str, int] = {}
+    for place, mark in enumerate(wanted):
+        rank.setdefault(mark.last_id, place)
+    best: tuple[int, int] | None = None
+    # A last id found at an offset, whose previous id is checked next.
+    waiting: tuple[int, int] | None = None
+    for offset, record_id in _ids_backwards(source, collection, below):
+        if waiting is not None:
+            checked, found = waiting
+            waiting = None
+            if offset == found - 1 and record_id == wanted[checked].previous_id:
+                best = (checked, found)
+                if checked == 0:
+                    break
+        index = rank.get(record_id)
+        if index is not None and (best is None or index < best[0]):
+            if wanted[index].previous_id is not None:
+                waiting = (index, offset)
+            else:
+                best = (index, offset)
+                if index == 0:
+                    break
+    return best
+
+
+def _unshifted(
+    source: Source, collection: SourceCollection, mark: _Mark, covered: int
+) -> bool:
+    """Whether the ids that end at offset `covered` are the mark's. One read."""
+    if mark.previous_id is None or covered < 2:
+        return source.ids_at(collection, covered - 1, 1) == [mark.last_id]
+    ids = source.ids_at(collection, covered - 2, 2)
+    return ids == [mark.previous_id, mark.last_id]
+
+
+@dataclass(frozen=True)
+class _TailPlace:
+    start: int
+    mark: _Mark | None  # the records at `start - 1` and `start - 2`
+    superseded: list[str]  # keys of the partitions whose records the tail reads
+
+
+def _tail_place(
+    source: Source,
+    collection: SourceCollection,
+    stored: list[Partition],
+    marks: dict[str, _Mark],
+    covered: int,
+    count: int,
+) -> _TailPlace:
+    """Where the next tail starts, found from the marks of the partitions.
+
+    A source orders its records by insertion: a deletion moves each later
+    record one offset to the left, and an addition goes after the last one.
+    So a stored last id is at or below the offset it was read at, the records
+    after it were not read, and the records before it were. A deleted record
+    that is added again goes after the last one too, so a last id counts only
+    with its previous id below it. One read of the ids that end at `covered`
+    shows that nothing shifted. Otherwise the mark of the newest partition is
+    searched, then those of the partitions before it, newest first; the tail
+    reads the partitions after the one found again. When none is found, the
+    tail starts at 0 and reads every partition again.
+    """
+    if covered == 0:
+        return _TailPlace(0, None, [])
+    newest = marks.get(stored[-1].key)
+    if newest is not None and _unshifted(source, collection, newest, covered):
+        return _TailPlace(covered, newest, [])
+    keys = [p.key for p in reversed(stored) if p.key in marks]
+    wanted = [marks[key] for key in keys]
+    found = (
+        _last_read(source, collection, wanted, min(covered, count)) if wanted else None
+    )
+    if found is None:
+        return _TailPlace(0, None, [p.key for p in stored])
+    index, offset = found
+    position = next(i for i, p in enumerate(stored) if p.key == keys[index])
+    return _TailPlace(
+        offset + 1, wanted[index], [p.key for p in stored[position + 1 :]]
+    )
 
 
 def _tail_end(partition: Partition, cursor: str | None, page: Page) -> str | None:
@@ -188,7 +333,13 @@ class _CollectionCopy:
                 self._ref, [(record_id, digests[record_id]) for record_id in written]
             )
         self._state.advance(
-            self._ref, partition.key, page.next_cursor, len(written), stop=end
+            self._ref,
+            partition.key,
+            page.next_cursor,
+            len(written),
+            stop=end,
+            last_id=page.records[-1].id if page.records else None,
+            previous_id=page.records[-2].id if len(page.records) > 1 else None,
         )
         with self._lock:
             self._copied += len(written)
@@ -205,6 +356,7 @@ def copy_collection(
     collection: SourceCollection,
     parallelism: int,
     skip_unchanged: bool = False,
+    warn: Callable[[str], None] | None = None,
 ) -> CopyResult:
     """Copy one collection and return its totals over all runs.
 
@@ -215,6 +367,12 @@ def copy_collection(
     partition without a stop, a tail. A finished tail stores its end offset,
     so a later run adds the next tail. A finished tail without an end offset,
     from an older state, gets no later tail.
+
+    `_tail_place` decides where the tail starts. When the source offsets
+    shifted, the tail is added also without new records, so that the next
+    run starts from its end. When the tail reads records of earlier runs
+    again, `reread_from` holds its start. A tail from offset 0 writes a
+    `source_changed` warning event and passes the same text to `warn`.
     """
     ref = collection.ref
     state.init_collection(
@@ -229,12 +387,39 @@ def copy_collection(
     state.raise_total(ref, count)
     stored = state.partitions(ref)
     covered = _covered(stored)
-    if covered is not None and count > covered:
-        state.add_partition(ref, _tail(stored, covered))
-        copy.total = count
-        copy.run(state.pending(ref), parallelism)
-        # A tail reads to the last record, which can be past `count` now.
-        state.raise_total(ref, source.count(collection))
+    reread_from = None
+    if covered is not None:
+        previous = state.previous_ids(ref)
+        marks = {
+            key: _Mark(last_id, previous.get(key))
+            for key, last_id in state.last_ids(ref).items()
+        }
+        place = _tail_place(source, collection, stored, marks, covered, count)
+        shifted = place.start != covered
+        if place.superseded:
+            reread_from = place.start
+        if shifted and place.start == 0:
+            events.emit("warning", "source_changed", ref=ref, message=SOURCE_CHANGED)
+            if warn is not None:
+                warn(SOURCE_CHANGED)
+        if shifted or count > covered:
+            tail = _tail(stored, place.start)
+            mark = place.mark
+            state.add_partition(
+                ref,
+                tail,
+                mark.last_id if mark else None,
+                place.superseded,
+                previous_id=mark.previous_id if mark else None,
+            )
+            # The superseded counts are 0 now; a new copy reads the count again.
+            copy = _CollectionCopy(
+                source, writer, state, events, entry, collection, skip_unchanged
+            )
+            copy.total = count
+            copy.run(state.pending(ref), parallelism)
+            # A tail reads to the last record, which can be past `count` now.
+            state.raise_total(ref, source.count(collection))
     progress = _progress(state, ref)
     events.emit(
         "info",
@@ -243,4 +428,4 @@ def copy_collection(
         copied=progress.copied,
         rejects=progress.rejects,
     )
-    return CopyResult(progress.copied, progress.rejects)
+    return CopyResult(progress.copied, progress.rejects, reread_from)

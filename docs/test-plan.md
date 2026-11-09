@@ -667,6 +667,10 @@ Skips with the suite when the variables are missing.
   dimension in one collection, a NaN, an infinity or a null inside an
   embedding, an int outside int64, a unicode collection name. Unit cases
   cover the tool's side (U-05, the existing NaN tests).
+- A re-ingest with the same ids between two copies (R66): the last two
+  records read, deleted and added back in their old order with records
+  added in between, hide those records from the next `copy`; only the full
+  `verify` ids check finds them, and `sync` (Milestone 2) fixes it.
 - Windows (`copy` without the lock), Ctrl-C (deferred F39), a full disk,
   a read-only migration directory, a source of millions of records
   (`inspect` without `--sample-pages` reads every page; manual check: a

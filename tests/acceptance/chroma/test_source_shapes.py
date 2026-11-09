@@ -17,6 +17,8 @@ from conftest import (
     weaviate_exists,
 )
 
+from to_weaviate.engine.verify import MISSING_IDS
+
 
 def test_an_empty_collection_copies_and_verifies(seeded, tmp_path):
     r = run(["inspect", "chroma", "--collection", "empty"], tmp_path)
@@ -85,7 +87,9 @@ def test_values_at_the_limits_of_their_type_are_copied(seeded, tmp_path):
     assert checks["count"]["detail"].startswith("source count 40, target count 32;")
     ids = checks["ids"]["detail"]
     assert ids.startswith("missing 8, extra 0; missing ids "), ids
-    assert set(json.loads(ids.partition("missing ids ")[2])) == refused
+    listed, _, fix = ids.partition("missing ids ")[2].partition("; ")
+    assert set(json.loads(listed)) == refused
+    assert fix == MISSING_IDS
     assert checks["records"]["passed"], checks["records"]
     assert "rejects skipped 8, differing 0" in checks["records"]["detail"]
     for record in source:

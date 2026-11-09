@@ -49,6 +49,7 @@ API_KEY_MAP = {
 
 URL_VARIABLES = ("CHROMA_URL", "WEAVIATE_URL", "WEAVIATE_GRPC_URL")
 URL_HINT = "Percent-encode #, ?, / and @ in a password."
+NO_HOST_HINT = "Write it as scheme://host, with an optional :port."
 HTTP_SCHEMES = frozenset({"http", "https"})
 
 
@@ -151,11 +152,11 @@ def _parsed_url(
     """`url` split and its `stored_url` form, or InvalidSetting.
 
     Refused for every variable: a value that cannot be split, a port that is
-    not a number, a fragment, and an `@` in the path or the query, which is
-    where `stored_url` finds an `@` once the userinfo is removed. An
-    unencoded `#`, `?` or `/` in a password gives these shapes. `schemes` are
-    the accepted schemes, with "" for none; None accepts any scheme. Without
-    `any_path`, the path is empty or `/`.
+    not a number, a missing host, a fragment, and an `@` in the path or the
+    query, which is where `stored_url` finds an `@` once the userinfo is
+    removed. An unencoded `#`, `?` or `/` in a password gives these shapes.
+    `schemes` are the accepted schemes, with "" for none; None accepts any
+    scheme. Without `any_path`, the path is empty or `/`.
     """
     message = f"{var} is not a valid URL."
     try:
@@ -164,6 +165,8 @@ def _parsed_url(
     except ValueError:
         # The ValueError can quote the port text, which can be a password.
         raise InvalidSetting(message, URL_HINT) from None
+    if not parts.hostname:
+        raise InvalidSetting(message, NO_HOST_HINT)
     stored = stored_url(url)
     if (
         "#" in url

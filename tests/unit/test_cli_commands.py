@@ -24,6 +24,7 @@ from fakes import (
 from typer.testing import Result
 from weaviate.exceptions import InsufficientPermissionsError, WeaviateBatchError
 
+from to_weaviate.engine.verify import MISSING_IDS, TARGET_ABOVE_SOURCE
 from to_weaviate.ids import to_uuid
 from to_weaviate.lock import Locked, exclusive_lock
 from to_weaviate.plan import (
@@ -624,6 +625,35 @@ def test_copy_stops_when_the_target_refuses_the_schema():
     assert source.read_calls == 0
 
 
+def test_copy_refuses_a_module_that_the_target_lacks_before_it_creates_anything(
+    tmp_path,
+):
+    source = FakeSource(cli_records(10))
+    fakes = inspected(
+        FakeFactories(source, schema=FakeSchema(modules=["text2vec-weaviate"])),
+        "--vectors",
+        "embed",
+        "--vectorizer",
+        "text2vec-openai",
+    )
+    r = invoke(fakes, "copy", "--json", OPENAI_API_KEY="openai-key")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["hint"]) == (
+        "invalid_plan",
+        "Edit plan.yaml, or run to-weaviate inspect chroma --force to draft it again.",
+    )
+    assert [(e["code"], e["message"]) for e in d["errors"]] == [
+        (
+            "module_not_enabled",
+            "module text2vec-openai is not enabled on the target; enabled "
+            "modules: text2vec-weaviate",
+        )
+    ]
+    assert fakes.schema.ensured == [] and source.read_calls == 0
+    assert not (tmp_path / DIR / "state.sqlite").exists()
+
+
 def test_hint_of_a_refused_schema_tells_to_edit_the_plan():
     refused = SchemaRejected("'_additional' is a reserved property name")
     fakes = inspected(
@@ -1003,6 +1033,30 @@ def test_entries_of_one_collection_with_other_property_settings_are_an_invalid_p
     assert fakes.schema.ensured == [] and fakes.writer.calls == 0
 
 
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_entries_of_one_collection_may_not_name_a_property_in_two_cases(tmp_path, cmd):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    two_entries(tmp_path / DIR, ("Docs", "a"), ("Docs", "b"))
+    second = load_plan(tmp_path / DIR / "plan.yaml").collections[1].target
+    properties = [
+        p.model_copy(update={"name": "yEar"}) if p.name == "year" else p
+        for p in second.properties
+    ]
+    change_second_entry(tmp_path / DIR, properties=properties)
+    r = invoke(fakes, cmd, "--json")
+    message = (
+        f"properties year in {ENTRY_A} and yEar in {ENTRY_B} have the same name "
+        "ignoring case; Weaviate compares property names in lower case, so give "
+        "the property one name in every entry of Docs"
+    )
+    assert r.exit_code == 2, r.output
+    assert plan_errors(r) == [
+        {"code": "duplicate_property", "collection": "Docs", "message": message}
+    ]
+    assert json.loads(r.stdout)["code"] == "invalid_plan"
+    assert fakes.schema.ensured == [] and fakes.writer.calls == 0
+
+
 def test_entries_of_one_collection_may_have_other_properties_and_source_keys(
     tmp_path,
 ):
@@ -1172,6 +1226,8 @@ STATE_HINT = (
     "To resume, set WEAVIATE_URL and the target name back. To copy to the new "
     "target, use another --dir."
 )
+# The hint when the stored target collection or tenant no longer exists.
+GONE_HINT = "To copy it again, use another --dir."
 
 
 def retarget(directory: Path, name: str, tenant: str | None = None) -> None:
@@ -1183,14 +1239,14 @@ def retarget(directory: Path, name: str, tenant: str | None = None) -> None:
     save_plan(plan.model_copy(update={"collections": [entry]}), directory / "plan.yaml")
 
 
-def mismatch(r: Result) -> dict[str, Any]:
-    """The error document of a state_mismatch run."""
+def mismatch(r: Result, hint: str = STATE_HINT) -> dict[str, Any]:
+    """The error document of a state_mismatch run with `hint`."""
     assert r.exit_code == 2, r.output
     d = json.loads(r.stdout)
     assert (d["status"], d["code"], d["hint"]) == (
         "error",
         "state_mismatch",
-        STATE_HINT,
+        hint,
     )
     return d
 
@@ -1246,7 +1302,7 @@ def test_copy_refuses_a_target_without_the_collection(partial):
     assert first.exit_code == (5 if partial else 0), first.output
     reads = source.read_calls
     replaced = FakeFactories(source)
-    d = mismatch(invoke(replaced, "copy", "--json"))
+    d = mismatch(invoke(replaced, "copy", "--json"), GONE_HINT)
     assert d["message"] == (
         "The state in .to-weaviate holds a copy of docs to localhost:8099, "
         "collection Docs. That collection does not exist in the target now."
@@ -1262,7 +1318,7 @@ def test_copy_refuses_a_target_without_the_tenant(tmp_path):
     assert invoke(fakes, "copy").exit_code == 0
     replaced = FakeFactories(source)
     replaced.writer.stored[("Docs", "b")] = {}
-    d = mismatch(invoke(replaced, "copy", "--json"))
+    d = mismatch(invoke(replaced, "copy", "--json"), GONE_HINT)
     assert d["message"].endswith(
         "collection Docs, tenant a. That collection or tenant does not exist in "
         "the target now."
@@ -2080,7 +2136,24 @@ def test_an_object_that_weaviate_refuses_is_a_reject_with_its_message(tmp_path):
     assert r.exit_code == 1, r.output
     checks = {c["name"]: c for c in json.loads(r.stdout)["checks"]}
     assert not checks["count"]["passed"]
-    assert checks["ids"]["detail"] == 'missing 1, extra 0; missing ids ["id-7"]'
+    assert checks["ids"]["detail"] == (
+        f'missing 1, extra 0; missing ids ["id-7"]; {MISSING_IDS}'
+    )
+
+
+def test_the_rejects_hint_says_how_to_copy_a_rejected_record_again():
+    writer = FakeWriter(reject_ids={"id-3"})
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10)), writer=writer))
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 1, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["hint"]) == (
+        "rejects",
+        "See .to-weaviate/rejects.jsonl for each record and the reason. Rejects "
+        "are final for this directory. After fixing the cause, copy plan.yaml "
+        "and inspect.json to a new --dir and run to-weaviate copy there; "
+        "objects already in Weaviate are written again unchanged.",
+    )
 
 
 MIB = 1024 * 1024
@@ -2167,8 +2240,27 @@ def test_a_record_deleted_during_the_copy_shifts_another_one_past_the_cursor():
     assert r.exit_code == 1, r.output
     checks = {c["name"]: c for c in json.loads(r.stdout)["checks"]}
     assert checks["ids"]["detail"] == (
-        'missing 1, extra 1; missing ids ["id-200"]; extra ids ["id-150"]'
+        'missing 1, extra 1; missing ids ["id-200"]; extra ids ["id-150"]; '
+        f"{MISSING_IDS}; {TARGET_ABOVE_SOURCE}"
     )
+
+
+def test_copy_warns_when_it_reads_the_source_again_from_the_start():
+    source = FakeSource(cli_records(10))
+    fakes = inspected(FakeFactories(source))
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json")
+    assert r.exit_code == 0, r.output
+    assert "reread_from" not in json.loads(r.stdout)["collections"][0]
+    # id-9, the last record read, is deleted; id-10 and id-11 are added.
+    source.records = source.records[:9] + cli_records(12)[10:]
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["collections"][0]["reread_from"] == 0
+    assert (
+        "Warning: docs: the source changed since the last run; re-reading from "
+        "the start"
+    ) in r.stderr.splitlines()
+    assert len(fakes.writer.objects) == 12
 
 
 def _prop(entry: Any, name: str) -> Any:
