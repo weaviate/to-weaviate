@@ -887,6 +887,32 @@ def test_copy_resumes_at_the_refused_page_and_writes_each_object_once():
 
 
 # (first target name, first tenant, second target name, second tenant)
+@pytest.mark.parametrize("value", [True, False])
+def test_copy_rejects_a_record_whose_embedding_holds_a_boolean(value):
+    rows = [
+        {
+            "id": f"id-{i}",
+            "embedding": [float(i), 1.0],
+            "document": f"doc {i}",
+            "uri": None,
+            "metadata": {"year": 2000 + i},
+        }
+        for i in range(10)
+    ]
+    rows[4]["embedding"] = [value, 1.0]
+    fakes = inspected(FakeFactories(ChromaSource(ChromaRows(rows), "t")))  # type: ignore[arg-type]
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 1, r.output
+    row = json.loads(r.stdout)["collections"][0]
+    assert (row["copied"], row["rejects"]) == (9, 1)
+    assert to_uuid("id-4") not in fakes.writer.objects
+    reject = json.loads((DIR / "rejects.jsonl").read_text())
+    assert (reject["source_id"], reject["reason"]) == (
+        "id-4",
+        "embedding holds a value that is not a number",
+    )
+
+
 ONE_PLACE = [
     ("Docs", None, "Docs", None),
     ("Docs", "a", "Docs", "a"),

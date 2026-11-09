@@ -84,8 +84,13 @@ def _no_advance(collection: SourceCollection, offset: int) -> ChromaError:
 
 
 def _number(value: Any) -> float:
-    """`value` as a float. A value that is not a number, such as None, gives NaN."""
-    return float(value) if isinstance(value, int | float) else math.nan
+    """`value` as a float. A value that is not a number, such as None, gives NaN.
+
+    A JSON true or false is a bool, which is an int in Python.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return math.nan
+    return float(value)
 
 
 def _records(response: dict[str, Any]) -> list[Record]:

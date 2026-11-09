@@ -325,6 +325,16 @@ def test_read_decodes_a_null_in_an_embedding_as_nan(source, fake_client, inspect
     assert second is not None and math.isnan(second[0]) and second[1] == 1.0
 
 
+@pytest.mark.parametrize("value", [True, False])
+def test_read_decodes_a_boolean_in_an_embedding_as_nan(
+    source, fake_client, inspected, value
+):
+    fake_client.records[1]["vector"] = [value, 1.0]
+    page = source.read(inspected, Partition("0-3", "0", "3"), None, True)
+    vector = page.records[1].vector
+    assert vector is not None and math.isnan(vector[0]) and vector[1] == 1.0
+
+
 def test_read_without_vectors_gives_none(source, inspected):
     page = source.read(inspected, Partition("0-2", "0", "2"), None, False)
     assert all(r.vector is None for r in page.records)
