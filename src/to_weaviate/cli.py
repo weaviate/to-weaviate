@@ -107,11 +107,18 @@ from to_weaviate.sources.base import FieldStats, Source, SourceCollection
 from to_weaviate.sources.chroma.client import ChromaClient, ChromaError
 from to_weaviate.sources.chroma.mapping import stored_embedding, vectorizer_for
 from to_weaviate.sources.chroma.source import ChromaSource
-from to_weaviate.state import CollectionProgress, State, Target
+from to_weaviate.state import (
+    CollectionProgress,
+    State,
+    StateInUse,
+    StateUnreadable,
+    Target,
+)
 from to_weaviate.target.connect import connect
 from to_weaviate.target.reader import TargetReader, WeaviateReader
 from to_weaviate.target.schema import (
     PlanMismatch,
+    PropertyRejected,
     Schema,
     SchemaRejected,
     WeaviateSchema,
@@ -169,7 +176,13 @@ STATE_HINT = (
     "To resume, set WEAVIATE_URL and the target name back. To copy to the new "
     "target, use another --dir."
 )
+UNREADABLE_STATE_HINT = "Start again with another --dir, or restore the file."
+STATE_IN_USE_HINT = "Wait for it to end, then run the command again."
+ADD_PROPERTY_HINT = (
+    "Weaviate refused to add the property; read its message and edit plan.yaml."
+)
 BATCH_HINT = "Fix the cause and run to-weaviate copy again. It resumes at this page."
+MISSING_TEXT = "missing in the collection; copy will add it"
 # A part of a text in single or double quotes; a quote after a backslash is
 # part of it, as in a Python repr.
 _QUOTED = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
@@ -232,9 +245,16 @@ def _as_cli_error(exc: Exception) -> CliError:
         )
     if isinstance(exc, InvalidSetting):
         return CliError("usage", str(exc), exc.hint)
+    if isinstance(exc, StateUnreadable):
+        return CliError("invalid_state", str(exc), UNREADABLE_STATE_HINT)
+    if isinstance(exc, StateInUse):
+        return CliError("usage", str(exc), STATE_IN_USE_HINT)
     if isinstance(exc, ChromaError):
         if exc.status in (401, 403):
-            return _refused("Chroma", "CHROMA_API_KEY", exc.status == 403)
+            refused = _refused("Chroma", "CHROMA_API_KEY", exc.status == 403)
+            if exc.hint is not None:
+                refused.hint = exc.hint
+            return refused
         if exc.status is None:
             return CliError(
                 "source_unreachable", f"Chroma could not be reached: {exc}", CHROMA_HINT
@@ -270,7 +290,7 @@ def _as_cli_error(exc: Exception) -> CliError:
         return CliError(
             "target_rejected_schema",
             f"Weaviate refused to {exc.action}: {exc}",
-            SCHEMA_HINT,
+            ADD_PROPERTY_HINT if isinstance(exc, PropertyRejected) else SCHEMA_HINT,
         )
     if isinstance(exc, BatchRefused):
         return CliError("target_unreachable", str(exc), BATCH_HINT)
@@ -469,15 +489,12 @@ def _load_plan_and_inspection(
     return plan, inspected
 
 
-def _option_value(text: str) -> Any:
-    if text.isascii() and text.isdigit():
-        return int(text)
-    if text in ("true", "false"):
-        return text == "true"
-    return text
-
-
 def _vectorizer_plan(module: str | None, options: list[str]) -> VectorizerPlan | None:
+    """The vectorizer plan of `module`.
+
+    Each option value stays the text given. The collection is created with
+    it as the type that the client declares for the option.
+    """
     parsed: dict[str, Any] = {}
     for option in options:
         key, sep, value = option.partition("=")
@@ -487,7 +504,7 @@ def _vectorizer_plan(module: str | None, options: list[str]) -> VectorizerPlan |
                 f"--vectorizer-option {option} is not KEY=VALUE.",
                 "Write each option as --vectorizer-option KEY=VALUE.",
             )
-        parsed[key] = _option_value(value)
+        parsed[key] = value
     if module is None:
         if parsed:
             raise CliError(
@@ -709,6 +726,10 @@ def _check(factories: _Factories, directory: Path, json_output: bool) -> None:
     for name, group in target_groups(plan.collections).items():
         for difference in schema.differences(group) or []:
             errors.append(Finding("plan_mismatch", name, difference))
+        warnings.extend(
+            Finding("missing_property", name, f"property {prop}: {MISSING_TEXT}")
+            for prop in schema.missing_properties(group)
+        )
     if errors:
         raise _plan_errors(errors, warnings)
     lines = _findings_text(errors, warnings)
@@ -914,8 +935,13 @@ def _copy(
                 source_names,
                 directory,
             )
-            for group in selected.values():
+            added: list[dict[str, str]] = []
+            for name, group in selected.items():
+                missing = schema.missing_properties(group)
                 schema.ensure(group)
+                for prop in missing:
+                    info(json_output, f"Added the property {prop} to {name}")
+                    added.append({"collection": name, "property": prop})
             events = Events(directory / EVENTS_FILE)
             for entry in entries:
                 ref = entry.source.ref
@@ -954,6 +980,7 @@ def _copy(
             state.close()
     rows = _rows(entries, progress)
     document, text = _progress_output(entries, rows)
+    document["added_properties"] = added
     rejects = sum(row["rejects"] for row in rows)
     if rejects:
         raise CliError(

@@ -19,6 +19,7 @@ ERROR_EXIT: dict[str, int] = {
     "plan_mismatch": 2,
     "target_rejected_schema": 2,
     "state_mismatch": 2,
+    "invalid_state": 2,
     "missing_credential": 3,
     "auth_failed": 3,
     "source_unreachable": 4,

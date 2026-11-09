@@ -2,7 +2,9 @@ import pytest
 
 from to_weaviate.naming import (
     collection_name,
+    collection_name_problem,
     property_name,
+    property_name_problem,
     reserved_suffix,
     sidecar_word,
 )
@@ -90,3 +92,65 @@ def test_sidecar_word_follows_the_server_rule(name, word):
 def test_a_drafted_name_is_neither_sidecar_shaped_nor_reserved(key):
     name = property_name(key, set())
     assert sidecar_word(name) is None and reserved_suffix(name) is None
+
+
+LONG_KEY = "k" * 300
+# (source key, drafted name), drafted in this order into one collection, as
+# the draft does after document, source_id and uri. Weaviate 1.40.4 accepts
+# every drafted name; it refuses the property names vector (the client), id
+# in any case of its first letter, and names longer than 231 characters.
+DRAFTED_IN_ORDER = [
+    ("日本", "__"),
+    ("中国", "___2"),
+    ("", "p_"),
+    ("1st key", "p_1st_key"),
+    ("my key", "my_key"),
+    ("ID", "iD"),
+    ("Id", "id_meta"),
+    ("id", "id_meta_2"),
+    ("_additional", "_additional_meta"),
+    ("__meta", "__meta"),
+    ("vector", "vector_meta"),
+    ("Vector", "vector_meta_2"),
+    (LONG_KEY, "key_1"),
+    (LONG_KEY + "x", "key_2"),
+]
+
+
+def test_drafted_property_names_are_names_the_server_accepts():
+    taken = {"document", "source_id", "uri"}
+    for key, expected in DRAFTED_IN_ORDER:
+        name = property_name(key, taken)
+        assert name == expected, key
+        taken.add(name)
+
+
+def test_a_reserved_name_near_the_length_limit_falls_back_to_a_numbered_key():
+    assert property_name("t" * 226 + "_temp", set()) == "key_1"
+
+
+def test_a_long_collection_name_is_cut_to_the_server_limit():
+    long = "c" * 300
+    first = collection_name(long, set())
+    second = collection_name(long, {first})
+    assert len(first) == 255 and len(second) <= 255
+    assert second.lower() != first.lower()
+    assert collection_name_problem(first) is None
+    assert collection_name_problem(second) is None
+
+
+def test_drafted_collection_names_in_order():
+    taken: set[str] = set()
+    found = []
+    for source in ["文档", "1-leading-digit", "Mixed-Case", "mixed-case", "class"]:
+        found.append(collection_name(source, taken))
+        taken.add(found[-1])
+    assert found == ["C___", "C_1_leading_digit", "Mixed_Case", "Mixed_case_2", "Class"]
+
+
+@pytest.mark.parametrize(
+    "key", ["Position", "ID", "Year", "_X", "日本", "1st", "Vector"]
+)
+def test_a_drafted_property_name_is_stored_as_drafted(key):
+    name = property_name(key, set())
+    assert property_name_problem(name) is None, name

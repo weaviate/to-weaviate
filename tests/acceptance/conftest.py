@@ -19,6 +19,7 @@ from chroma.seed import seed
 from e2e import (
     Result,
     close_weaviate,
+    create_target_collection,
     delete_target_collections,
     weaviate_by_source_id,
     weaviate_compressed,
@@ -27,9 +28,12 @@ from e2e import (
     weaviate_delete_object,
     weaviate_exists,
     weaviate_insert_object,
+    weaviate_modules,
     weaviate_near_text,
     weaviate_near_vector,
     weaviate_object,
+    weaviate_set_shard_status,
+    weaviate_set_tenant_status,
     weaviate_tenants,
     weaviate_update_object,
 )
@@ -40,8 +44,10 @@ __all__ = [
     "KnownFinding",
     "Result",
     "copy_and_verify",
+    "create_target_collection",
     "read_plan",
     "run",
+    "run_text",
     "start",
     "weaviate_by_source_id",
     "weaviate_compressed",
@@ -50,9 +56,12 @@ __all__ = [
     "weaviate_delete_object",
     "weaviate_exists",
     "weaviate_insert_object",
+    "weaviate_modules",
     "weaviate_near_text",
     "weaviate_near_vector",
     "weaviate_object",
+    "weaviate_set_shard_status",
+    "weaviate_set_tenant_status",
     "weaviate_tenants",
     "weaviate_update_object",
     "write_plan",
@@ -86,6 +95,17 @@ SUITE_COLLECTIONS = [
     "Tiny_l2_renamed",
     "Openai_proxy",
     "Resume",
+    "Empty",
+    "Edge",
+    # The draft names the two mixed-case collections in the order Chroma
+    # lists them.
+    "Mixed_Case",
+    "Mixed_case",
+    "Mixed_Case_2",
+    "Mixed_case_2",
+    "C_1_leading_digit",
+    "Class",
+    "Bulk",
 ]
 
 
@@ -136,6 +156,14 @@ def run(args: list[str], workdir: Path, env: dict[str, str] | None = None) -> Re
     return e2e.run(args, workdir, {**cleared, **(env or {})})
 
 
+def run_text(
+    args: list[str], workdir: Path, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run the installed to-weaviate as `run` does, without --json."""
+    cleared = dict.fromkeys(CLEARED_VARIABLES, "")
+    return e2e.run_text(args, workdir, {**cleared, **(env or {})})
+
+
 def copy_and_verify(workdir: Path) -> Result:
     """Run check, copy and verify in `workdir`; each must succeed.
 
@@ -178,6 +206,23 @@ def _test_endpoints() -> Iterator[None]:
 @pytest.fixture(scope="session")
 def seeded(_test_endpoints: None) -> None:
     seed()
+
+
+@pytest.fixture(autouse=True)
+def _no_secret_in_a_file(tmp_path: Path) -> Iterator[None]:
+    """After the test, no file under its directory holds a secret value.
+
+    The secrets are the values of the secret variables of every command the
+    test ran. state.sqlite is read as bytes like the other files.
+    """
+    e2e.take_secrets()
+    yield
+    secrets = [s.encode("utf-8") for s in e2e.take_secrets()]
+    for path in sorted(p for p in tmp_path.rglob("*") if p.is_file()):
+        data = path.read_bytes()
+        assert not any(
+            s in data for s in secrets
+        ), f"{path.relative_to(tmp_path)} holds a secret value"
 
 
 @pytest.fixture(autouse=True)

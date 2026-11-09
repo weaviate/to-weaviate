@@ -3,15 +3,22 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from to_weaviate.naming import reserved_suffix, sidecar_word
+from to_weaviate.naming import (
+    collection_name_problem,
+    property_name_problem,
+    reserved_suffix,
+    sidecar_word,
+)
 from to_weaviate.plan import (
     DISTANCES,
+    EMBED_INSTEAD,
     INDEX_DISTANCES,
     CollectionPlan,
     Plan,
     PropertyPlan,
     VectorizerMapper,
     VectorizerPlan,
+    has_no_vectors,
 )
 from to_weaviate.sources.base import SourceCollection
 from to_weaviate.target.schema import (
@@ -468,6 +475,22 @@ def _unmapped_findings(
     ]
 
 
+def _no_vector_findings(entry: CollectionPlan) -> list[Finding]:
+    """A kept vector of a source that holds records but no vector."""
+    if not has_no_vectors(entry.source):
+        return []
+    return [
+        Finding(
+            "no_source_vectors",
+            entry.target.name,
+            f"{entry.source.name} has records without vectors, but vector "
+            f"{vector.name} keeps the source vectors; {EMBED_INSTEAD}",
+        )
+        for vector in entry.target.vectors
+        if vector.mode == "keep"
+    ]
+
+
 def _segment_findings(entry: CollectionPlan) -> list[Finding]:
     """pq segments that do not divide the dimension of a kept vector.
 
@@ -537,6 +560,23 @@ def _value_findings(entry: CollectionPlan) -> list[Finding]:
                 )
             )
     return out
+
+
+def _invalid_name_findings(entries: list[CollectionPlan]) -> list[Finding]:
+    """Collection and property names that Weaviate or its client refuses."""
+    out: dict[tuple[str, str], Finding] = {}
+    for entry in entries:
+        name = entry.target.name
+        problem = collection_name_problem(name)
+        if problem is not None:
+            message = f"collection {name}: {problem}"
+            out.setdefault((name, message), Finding("invalid_name", name, message))
+        for prop in entry.target.properties:
+            problem = property_name_problem(prop.name)
+            if problem is not None:
+                message = f"property {prop.name}: {problem}"
+                out.setdefault((name, message), Finding("invalid_name", name, message))
+    return list(out.values())
 
 
 def vectorizer_findings(groups: Mapping[str, list[CollectionPlan]]) -> list[Finding]:
@@ -613,9 +653,11 @@ def plan_findings(
     errors.extend(_duplicate_source_findings(plan.collections))
     errors.extend(_shared_collection_findings(plan.collections))
     value_errors = [f for e in plan.collections for f in _value_findings(e)]
+    value_errors.extend(_invalid_name_findings(plan.collections))
     errors.extend(value_errors)
     errors.extend(f for e in plan.collections for f in _segment_findings(e))
-    # collection_kwargs cannot map a group that has a value error.
+    # collection_kwargs cannot map a group that has a value error or a name
+    # that the client refuses.
     unmapped = {f.collection for f in value_errors}
     groups = target_groups(plan.collections)
     errors.extend(
@@ -624,6 +666,7 @@ def plan_findings(
     warnings.extend(cleaned_option_findings(groups))
     warnings.extend(async_indexing_findings(groups))
     for entry in plan.collections:
+        errors.extend(_no_vector_findings(entry))
         errors.extend(_keep_model_findings(entry, vectorizer_for))
         errors.extend(_unmapped_findings(entry, inspected))
         for prop in entry.target.properties:

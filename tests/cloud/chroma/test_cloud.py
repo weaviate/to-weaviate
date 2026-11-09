@@ -9,6 +9,7 @@ import os
 from collections.abc import Iterator
 
 import pytest
+import yaml
 from e2e import (
     close_weaviate,
     delete_target_collection,
@@ -76,5 +77,22 @@ def test_chroma_cloud_to_weaviate_cloud(tmp_path):
         assert seeded == {"category": "text", "position": "int", "tags": "text[]"}
         vector = config.vector_config["default"].vector_index_config
         assert vector.distance_metric.value == "cosine", vector
+        # A second run copies nothing more and the copy stays done.
+        for cmd in (["copy"], ["status"], ["verify", "--quick", "--sample", "50"]):
+            r = run(cmd, tmp_path)
+            assert r.exit_code == 0 and r.data["status"] == "success", r
+            if cmd == ["status"]:
+                row = r.data["collections"][0]
+                assert (row["copied"], row["done"]) == (2000, True), row
+        assert weaviate_count(TARGET) == 2000
     finally:
         delete_target_collection(TARGET)
+
+
+def test_inspect_of_the_whole_database(tmp_path):
+    r = run(["inspect", "chroma", "--sample-pages", "1"], tmp_path)
+    assert r.exit_code == 0, r
+    assert "to-weaviate-ci" in [c["source"] for c in r.data["collections"]], r
+    plan = yaml.safe_load((tmp_path / "plan.yaml").read_text(encoding="utf-8"))
+    tenant = os.environ.get("CHROMA_TENANT", "").strip() or None
+    assert plan["source"]["tenant"] == tenant

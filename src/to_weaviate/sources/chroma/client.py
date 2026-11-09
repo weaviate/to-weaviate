@@ -18,6 +18,14 @@ REDIRECT_HINT = "Set CHROMA_URL to the address the server redirects to."
 NOT_JSON_HINT = (
     "Check that CHROMA_URL points at the Chroma API and not at a proxy or a web page."
 )
+DATABASES_FORBIDDEN_HINT = (
+    "Check CHROMA_API_KEY in the environment or in .env. A key for one database "
+    "cannot list the databases: set CHROMA_DATABASE or use --database."
+)
+COLLECTION_GONE_HINT = (
+    "The collection is gone from Chroma, or it was created again with a new id. "
+    "Run to-weaviate inspect chroma --force to inspect it again."
+)
 
 
 class ChromaError(Exception):
@@ -168,12 +176,28 @@ class ChromaClient:
             f"/collections/{_seg(collection_id)}"
         )
 
+    def _hinted_request(
+        self, status: int, hint: str, method: str, path: str, **kwargs: Any
+    ) -> Any:
+        """`_request`, whose ChromaError of HTTP `status` carries `hint`."""
+        try:
+            return self._request(method, path, **kwargs)
+        except ChromaError as exc:
+            if exc.status != status:
+                raise
+            raise ChromaError(status, exc.message, hint=hint) from exc
+
+    def _collection_request(self, method: str, path: str, **kwargs: Any) -> Any:
+        """`_request` on a collection path. A 404 means the collection id is gone."""
+        return self._hinted_request(404, COLLECTION_GONE_HINT, method, path, **kwargs)
+
     def identity(self) -> dict[str, Any]:
         result: dict[str, Any] = self._request("GET", "/api/v2/auth/identity")
         return result
 
     def databases(self, tenant: str) -> list[str]:
-        rows = self._request("GET", f"/api/v2/tenants/{_seg(tenant)}/databases")
+        path = f"/api/v2/tenants/{_seg(tenant)}/databases"
+        rows = self._hinted_request(403, DATABASES_FORBIDDEN_HINT, "GET", path)
         return [row["name"] for row in rows]
 
     def collections(self, tenant: str, database: str) -> list[dict[str, Any]]:
@@ -204,7 +228,7 @@ class ChromaClient:
 
     def count(self, tenant: str, database: str, collection_id: str) -> int:
         path = self._collection_path(tenant, database, collection_id) + "/count"
-        return int(self._request("GET", path))
+        return int(self._collection_request("GET", path))
 
     def get(
         self,
@@ -225,7 +249,7 @@ class ChromaClient:
         if where is not None:
             body["where"] = where
         path = self._collection_path(tenant, database, collection_id) + "/get"
-        result: dict[str, Any] = self._request("POST", path, json=body)
+        result: dict[str, Any] = self._collection_request("POST", path, json=body)
         return result
 
     def query(
@@ -239,6 +263,6 @@ class ChromaClient:
     ) -> list[str]:
         body = {"query_embeddings": [embedding], "n_results": n_results, "include": []}
         path = self._collection_path(tenant, database, collection_id) + "/query"
-        result = self._request("POST", path, json=body)
+        result = self._collection_request("POST", path, json=body)
         ids: list[str] = result["ids"][0]
         return ids

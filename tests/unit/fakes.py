@@ -297,14 +297,23 @@ class FakeInsertClient:
     """The part of a WeaviateClient that WeaviateWriter uses. Thread-safe.
 
     Call `n` (1-based) of `insert_many` raises `fail(n)` when that returns an
-    error. Otherwise it stores the objects and reports no errors. `stored` has
-    the shape of `FakeWriter.stored`, so a FakeReader can read it.
+    error. `refuse(objects)` is called next and may raise. An object for
+    which `reject(object)` returns a message is not stored and is reported
+    with it, as the server reports a refused object; when every object of a
+    call is refused, the call raises what the client raises. The other
+    objects are stored. `stored` has the shape of `FakeWriter.stored`, so a
+    FakeReader can read it.
     """
 
     def __init__(
-        self, fail: Callable[[int], Exception | None] = lambda n: None
+        self,
+        fail: Callable[[int], Exception | None] = lambda n: None,
+        reject: Callable[[Any], str | None] = lambda obj: None,
+        refuse: Callable[[list[Any]], None] = lambda objects: None,
     ) -> None:
         self.fail = fail
+        self.reject = reject
+        self.refuse = refuse
         self.calls = 0
         self.stored: dict[tuple[str, str | None], dict[str, TargetObject]] = {}
         self.writes_per_uuid: Counter[str] = Counter()
@@ -322,12 +331,19 @@ class FakeInsertClient:
             error = self.fail(self.calls)
             if error is not None:
                 raise error
-            for obj in objects:
+            self.refuse(objects)
+            refused = {i: m for i, o in enumerate(objects) if (m := self.reject(o))}
+            if objects and len(refused) == len(objects):
+                raise all_failed("\n".join(set(refused.values())))
+            for index, obj in enumerate(objects):
+                if index in refused:
+                    continue
                 uuid = str(obj.uuid)
                 vectors = dict(obj.vector or {})
                 stored[uuid] = TargetObject(uuid, dict(obj.properties), vectors)
                 self.writes_per_uuid[uuid] += 1
-        return SimpleNamespace(errors={})
+        errors = {i: SimpleNamespace(message=m) for i, m in refused.items()}
+        return SimpleNamespace(errors=errors)
 
 
 class _InsertCollection:
@@ -401,9 +417,11 @@ class FakeSchema:
     """Schema over a dict of existing target collections.
 
     `existing` maps a target name to the differences its collection has from
-    the plan. `ensure` raises `ensure_error` when it is set.
-    `enable_trained_quantizers` records (target name, tenant) and raises
-    `update_error` when it is set.
+    the plan. `ensure` raises `ensure_error` when it is set. `properties`
+    holds the property names of each collection that `ensure` created;
+    `ensure` adds the planned properties that such a collection lacks and
+    records them in `added`. `enable_trained_quantizers` records (target
+    name, tenant) and raises `update_error` when it is set.
     """
 
     def __init__(
@@ -419,12 +437,21 @@ class FakeSchema:
         self.update_error = update_error
         self.ensured: list[str] = []
         self.updated: list[tuple[str, str | None]] = []
+        self.properties: dict[str, set[str]] = {}
+        self.added: list[tuple[str, str]] = []
 
     def modules(self) -> set[str]:
         return set(self.enabled)
 
     def differences(self, group: list[CollectionPlan]) -> list[str] | None:
         return self.existing.get(group[0].target.name)
+
+    def missing_properties(self, group: list[CollectionPlan]) -> list[str]:
+        stored = self.properties.get(group[0].target.name)
+        if stored is None:
+            return []
+        planned = dict.fromkeys(p.name for e in group for p in e.target.properties)
+        return [name for name in planned if name not in stored]
 
     def ensure(self, group: list[CollectionPlan]) -> Literal["created", "exists"]:
         if self.ensure_error is not None:
@@ -434,6 +461,11 @@ class FakeSchema:
         if found:
             raise PlanMismatch("; ".join(found))
         self.ensured.append(name)
+        missing = self.missing_properties(group)
+        self.added.extend((name, prop) for prop in missing)
+        self.properties.setdefault(name, set()).update(
+            p.name for e in group for p in e.target.properties
+        )
         if found is None:
             self.existing[name] = []
             return "created"

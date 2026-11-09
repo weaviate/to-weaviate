@@ -35,11 +35,13 @@ from to_weaviate.target import connect as connect_module
 from to_weaviate.target import schema
 from to_weaviate.target.schema import (
     PlanMismatch,
+    PropertyRejected,
     SchemaRejected,
     WeaviateSchema,
     collection_kwargs,
     differences,
     ensure_collection,
+    missing_properties,
     quantizer_updates,
 )
 
@@ -158,6 +160,30 @@ def test_kwargs_vectorizer_options():
     assert vec(k).vectorizer.vectorizeClassName is False
 
 
+# (options as plan.yaml holds them, as the client gets them). A text option
+# is sent as the type that the factory declares for it.
+SENT_OPTIONS = [
+    ({"model": "007", "dimensions": "0256"}, {"model": "007", "dimensions": 256}),
+    ({"dimensions": 256}, {"dimensions": 256}),
+    ({"type_": "text"}, {"type_": "text"}),
+]
+
+
+@pytest.mark.parametrize(("planned", "sent"), SENT_OPTIONS)
+def test_kwargs_send_a_text_option_as_the_declared_type(planned, sent):
+    v = p.VectorizerPlan(module="text2vec-openai", options=planned)
+    config = vec(collection_kwargs([entry(mode="embed", vectorizer=v)])).vectorizer
+    assert {k: getattr(config, k) for k in sent} == sent
+
+
+def test_kwargs_send_a_text_boolean_option_as_a_boolean():
+    v = p.VectorizerPlan(
+        module="text2vec-huggingface", options={"wait_for_model": "true"}
+    )
+    config = vec(collection_kwargs([entry(mode="embed", vectorizer=v)])).vectorizer
+    assert config.waitForModel is True
+
+
 def test_kwargs_unknown_vectorizer_module():
     v = p.VectorizerPlan(module="text2vec-nope")
     with pytest.raises(PlanMismatch, match="text2vec-nope is not supported"):
@@ -191,8 +217,17 @@ class FakeCollection:
         self._cfg = cfg
         self.updates: list[Any] = []
         self.update_fail: list[Exception] = []
-        self.config = SimpleNamespace(get=lambda: self._cfg, update=self._update)
+        self.added: list[Any] = []
+        self.add_fail: list[Exception] = []
+        self.config = SimpleNamespace(
+            get=lambda: self._cfg, update=self._update, add_property=self._add
+        )
         self.tenants = FakeTenants()
+
+    def _add(self, prop: Any) -> None:
+        if self.add_fail:
+            raise self.add_fail.pop(0)
+        self.added.append(prop)
 
     def _update(self, *, vector_config: Any) -> None:
         if self.update_fail:
@@ -344,11 +379,42 @@ def test_differences_skip_a_property_type_without_a_mapping():
     assert found == []
 
 
-def test_differences_missing_property():
+def test_a_missing_property_is_no_difference_and_is_listed_as_missing():
     cfg = config()
     cfg.properties = [x for x in cfg.properties if x.name != "year"]
-    found = differences(FakeClient(FakeCollection(cfg)), [entry()])  # type: ignore[arg-type]
-    assert found and "year" in found[0]
+    client = FakeClient(FakeCollection(cfg))
+    assert differences(client, [entry()]) == []  # type: ignore[arg-type]
+    assert missing_properties(client, [entry()]) == ["year"]  # type: ignore[arg-type]
+
+
+def test_no_property_is_missing_from_a_collection_that_does_not_exist():
+    assert missing_properties(FakeClient(None), [entry()]) == []  # type: ignore[arg-type]
+
+
+def test_ensure_adds_a_missing_property_to_the_existing_collection():
+    cfg = config()
+    cfg.properties = [x for x in cfg.properties if x.name != "year"]
+    existing = FakeCollection(cfg)
+    existing.add_fail = [WeaviateConnectionError("down")]
+    client = FakeClient(existing)
+    result = ensure_collection(client, [entry()], sleep=lambda s: None)  # type: ignore[arg-type]
+    assert result == "exists" and client.collections.created == []
+    assert [(x.name, x.dataType.value) for x in existing.added] == [("year", "int")]
+
+
+@pytest.mark.parametrize("status", [400, 422])
+def test_a_refused_property_addition_is_schema_rejected(status):
+    cfg = config()
+    cfg.properties = [x for x in cfg.properties if x.name != "year"]
+    existing = FakeCollection(cfg)
+    body = {"error": [{"message": "property year already exists"}]}
+    existing.add_fail = [
+        UnexpectedStatusCodeError("refused", httpx.Response(status, json=body))
+    ]
+    with pytest.raises(PropertyRejected) as info:
+        WeaviateSchema(FakeClient(existing)).ensure([entry()])  # type: ignore[arg-type]
+    assert str(info.value) == "property year already exists"
+    assert info.value.action == "add the property year to My_docs"
 
 
 def test_differences_multi_tenancy():

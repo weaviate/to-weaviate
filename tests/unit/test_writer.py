@@ -307,3 +307,68 @@ def test_writer_retries_a_transient_grpc_failure():
     writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
     assert writer.write(ENTRY_KEEP, objects(1)) == []
     assert len(data.calls) == 2
+
+
+def test_one_object_that_grpc_refuses_for_its_size_is_a_reject():
+    data = FakeData(["RESOURCE_EXHAUSTED", SimpleNamespace(errors={})])
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    rejects = writer.write(ENTRY_KEEP, objects(1))
+    assert rejects == [Reject("s0", "fake gRPC failure RESOURCE_EXHAUSTED")]
+    assert len(data.calls) == 1
+
+
+def test_a_chunk_of_two_that_grpc_refuses_for_its_size_is_retried():
+    data = FakeData(["RESOURCE_EXHAUSTED"] * 10)
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    with pytest.raises(WeaviateBatchError):
+        writer.write(ENTRY_KEEP, objects(2))
+    assert len(data.calls) == 6
+
+
+def _int_entry(kind: str) -> p.CollectionPlan:
+    entry = make_entry()
+    entry.target.properties.append(
+        p.PropertyPlan(source_key="int_edge", name="int_edge", type=kind)
+    )
+    return entry
+
+
+def _int_record(value: Any) -> Record:
+    return Record("edge-3", [0.1], "doc", None, {"int_edge": value, "year": 2020})
+
+
+INT_REJECT = (
+    "int_edge: int 9223372036854775807 cannot be stored: Weaviate keeps ints as "
+    "doubles and refuses this value; type the property text"
+)
+
+
+@pytest.mark.parametrize(
+    ("kind", "value"), [("int", 2**63 - 1), ("int[]", [3, 2**63 - 1])]
+)
+def test_an_int_whose_double_is_2_to_the_63_is_a_reject(kind, value):
+    assert to_object(_int_record(value), _int_entry(kind)) == Reject(
+        "edge-3", INT_REJECT
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "value"),
+    [
+        ("int", 2**63 - 1024),
+        ("int", 2**63 - 513),
+        ("int", -(2**63)),
+        ("int[]", [-(2**63), 2**53 + 1]),
+        ("number", 2**63 - 1),
+    ],
+)
+def test_an_int_below_the_double_2_to_the_63_is_stored(kind, value):
+    obj = to_object(_int_record(value), _int_entry(kind))
+    assert isinstance(obj, TargetObject)
+    expected = float(value) if kind == "number" else value
+    assert obj.properties == {
+        "source_id": "edge-3",
+        "document": "doc",
+        "year": "2020",
+        "int_edge": expected,
+    }

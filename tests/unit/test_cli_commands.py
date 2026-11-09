@@ -1,9 +1,12 @@
 import json
+import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 import yaml
 from fakes import (
@@ -16,8 +19,10 @@ from fakes import (
     cli_records,
     invoke,
     old_state_file,
+    raise_grpc_failure,
 )
 from typer.testing import Result
+from weaviate.exceptions import InsufficientPermissionsError, WeaviateBatchError
 
 from to_weaviate.ids import to_uuid
 from to_weaviate.lock import Locked, exclusive_lock
@@ -33,7 +38,7 @@ from to_weaviate.sources.base import Page, Partition, Record, SourceCollection
 from to_weaviate.sources.chroma.client import ChromaError
 from to_weaviate.sources.chroma.source import ChromaSource
 from to_weaviate.state import State
-from to_weaviate.target.schema import SchemaRejected
+from to_weaviate.target.schema import PropertyRejected, SchemaRejected
 from to_weaviate.target.writer import WeaviateWriter
 
 DIR = Path(".to-weaviate")
@@ -261,7 +266,7 @@ def test_inspect_vectorizer_options(tmp_path):
     assert vector.vectorizer.options == {"model": "m"}
 
 
-def test_inspect_vectorizer_option_values_are_typed(tmp_path):
+def test_inspect_vectorizer_option_values_are_strings(tmp_path):
     options = ["dimensions=256", "flag=true", "other=false", "model=3-small"]
     args = [x for o in options for x in ("--vectorizer-option", o)]
     inspected(
@@ -273,11 +278,29 @@ def test_inspect_vectorizer_option_values_are_typed(tmp_path):
     vector = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target.vectors[0]
     assert vector.vectorizer is not None
     assert vector.vectorizer.options == {
-        "dimensions": 256,
-        "flag": True,
-        "other": False,
+        "dimensions": "256",
+        "flag": "true",
+        "other": "false",
         "model": "3-small",
     }
+
+
+def test_an_all_digit_vectorizer_option_keeps_its_text(tmp_path):
+    fakes = inspected(
+        FakeFactories(FakeSource(cli_records(10))),
+        "--vectors",
+        "embed",
+        "--vectorizer",
+        "text2vec-openai",
+        "--vectorizer-option",
+        "model=007",
+        "--vectorizer-option",
+        "dimensions=0256",
+    )
+    text = (tmp_path / DIR / "plan.yaml").read_text()
+    assert "model: '007'" in text and "dimensions: '0256'" in text
+    r = invoke(fakes, "check", "--json", OPENAI_API_KEY="openai-key")
+    assert r.exit_code == 0, r.output
 
 
 def test_inspect_index_and_quantizer_options(tmp_path):
@@ -1736,11 +1759,12 @@ def test_property_names_that_differ_only_in_case_are_an_invalid_plan(tmp_path, c
     fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
     target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
     year = next(p for p in target.properties if p.name == "year")
-    twin = year.model_copy(update={"name": "Year"})
+    # A first letter in upper case would also be an invalid_name in check.
+    twin = year.model_copy(update={"name": "yeaR"})
     edit_target(tmp_path / DIR, properties=[*target.properties, twin])
     r = invoke(fakes, cmd, "--json")
     message = (
-        "properties year, Year have the same name ignoring case; give each "
+        "properties year, yeaR have the same name ignoring case; give each "
         "property its own name"
     )
     assert plan_errors(r) == [
@@ -1997,3 +2021,449 @@ def test_a_yaml_error_does_not_print_an_alias_or_tag_name(
     password = "B6-MADE-UP-PW"
     for part in (password[i : i + 4] for i in range(len(password) - 3)):
         assert part not in r.stdout and part not in r.stderr
+
+
+FORBIDDEN = "Weaviate refused the request: the API key lacks a permission."
+
+
+def test_copy_creates_nothing_when_the_key_may_not_create_the_collection():
+    forbidden = InsufficientPermissionsError(httpx.Response(403))
+    source = FakeSource(cli_records(10))
+    fakes = inspected(FakeFactories(source, schema=FakeSchema(ensure_error=forbidden)))
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 3, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"]) == ("auth_failed", FORBIDDEN)
+    assert "WEAVIATE_API_KEY" in d["hint"]
+    assert fakes.writer.calls == 0
+    row = json.loads(invoke(fakes, "status", "--json").stdout)["collections"][0]
+    assert row["copied"] == 0 and "stored_target" not in row
+
+
+def test_a_403_on_insert_is_not_retried_and_copy_resumes_at_its_page():
+    def fail(n: int) -> Exception | None:
+        return InsufficientPermissionsError(httpx.Response(403)) if n == 2 else None
+
+    fakes, client = refusing(250, fail)
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json")
+    assert r.exit_code == 3, r.output
+    assert json.loads(r.stdout)["message"] == FORBIDDEN
+    assert (client.calls, len(client.writes_per_uuid)) == (2, 100)
+    client.fail = lambda n: None
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json")
+    assert r.exit_code == 0, r.output
+    assert len(client.writes_per_uuid) == 250
+    assert set(client.writes_per_uuid.values()) == {1}
+
+
+LENGTH_MESSAGE = "new node has a vector with length 1. Existing nodes have length 2"
+
+
+def test_an_object_that_weaviate_refuses_is_a_reject_with_its_message(tmp_path):
+    records = cli_records(21)
+    records[7] = replace(records[7], vector=[7.0])
+
+    def reject(obj: Any) -> str | None:
+        return LENGTH_MESSAGE if len(obj.vector["default"]) != 2 else None
+
+    client = FakeInsertClient(reject=reject)
+    writer = WeaviateWriter(client, sleep=lambda s: None)  # type: ignore[arg-type]
+    fakes = inspected(FakeFactories(FakeSource(records), writer=writer, store=client))
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 1 and json.loads(r.stdout)["code"] == "rejects", r.output
+    lines = (tmp_path / DIR / "rejects.jsonl").read_text().splitlines()
+    found = [json.loads(line) for line in lines]
+    assert [(f["source_id"], f["reason"]) for f in found] == [("id-7", LENGTH_MESSAGE)]
+    assert len(client.writes_per_uuid) == 20
+    assert to_uuid("id-7") not in client.writes_per_uuid
+    r = invoke(fakes, "verify", "--json")
+    assert r.exit_code == 1, r.output
+    checks = {c["name"]: c for c in json.loads(r.stdout)["checks"]}
+    assert not checks["count"]["passed"]
+    assert checks["ids"]["detail"] == 'missing 1, extra 0; missing ids ["id-7"]'
+
+
+MIB = 1024 * 1024
+
+
+def test_an_object_above_the_message_limit_is_a_reject(tmp_path):
+    records = cli_records(6)
+    records[2] = replace(records[2], document="x" * (5 * MIB))
+
+    def refuse(objects: list[Any]) -> None:
+        if any(len(o.properties.get("document") or "") > MIB for o in objects):
+            raise_grpc_failure("RESOURCE_EXHAUSTED", WeaviateBatchError, batch=True)
+
+    client = FakeInsertClient(refuse=refuse)
+    writer = WeaviateWriter(client, sleep=lambda s: None)  # type: ignore[arg-type]
+    fakes = inspected(FakeFactories(FakeSource(records), writer=writer, store=client))
+    for _ in range(2):
+        r = invoke(fakes, "copy", "--json")
+        assert r.exit_code == 1, r.output
+        row = json.loads(r.stdout)["collections"][0]
+        assert (row["copied"], row["rejects"]) == (5, 1)
+    reject = json.loads((tmp_path / DIR / "rejects.jsonl").read_text())
+    assert (reject["source_id"], reject["reason"]) == (
+        "id-2",
+        "fake gRPC failure RESOURCE_EXHAUSTED",
+    )
+    assert to_uuid("id-2") not in client.writes_per_uuid
+    assert len(client.writes_per_uuid) == 5
+
+
+def test_two_source_ids_with_one_uuid_fail_verify(monkeypatch):
+    def colliding(source_id: str) -> str:
+        return to_uuid("a" if source_id == "b" else source_id)
+
+    monkeypatch.setattr("to_weaviate.target.writer.to_uuid", colliding)
+    monkeypatch.setattr("to_weaviate.engine.verify.to_uuid", colliding)
+    records = [
+        Record(i, [1.0, float(n)], f"doc {i}", None, {}) for n, i in enumerate("abc")
+    ]
+    fakes = inspected(FakeFactories(FakeSource(records)))
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["collections"][0]["copied"] == 3
+    assert len(fakes.writer.objects) == 2
+    r = invoke(fakes, "verify", "--json")
+    assert r.exit_code == 1, r.output
+    checks = {c["name"]: c for c in json.loads(r.stdout)["checks"]}
+    assert checks["count"]["detail"].startswith("source count 3, target count 2;")
+    # The id check compares uuids, so it does not see the collision.
+    assert (checks["ids"]["passed"], checks["ids"]["detail"]) == (
+        True,
+        "missing 0, extra 0",
+    )
+    assert not checks["records"]["passed"]
+    assert '"a": ' in checks["records"]["detail"]
+    assert "property source_id differs" in checks["records"]["detail"]
+
+
+class DeletingSource(FakeSource):
+    """Deletes record `id-150` once the page that holds it is read."""
+
+    def read(
+        self,
+        collection: SourceCollection,
+        partition: Partition,
+        cursor: str | None,
+        with_vectors: bool,
+    ) -> Page:
+        page = super().read(collection, partition, cursor, with_vectors)
+        if any(r.id == "id-150" for r in page.records):
+            self.records = [r for r in self.records if r.id != "id-150"]
+        return page
+
+
+def test_a_record_deleted_during_the_copy_shifts_another_one_past_the_cursor():
+    # The documented limit of copying by offset (finding F4): the record after
+    # the gap moves into the page that was read already.
+    fakes = inspected(FakeFactories(DeletingSource(cli_records(400))))
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json")
+    assert r.exit_code == 0, r.output
+    assert to_uuid("id-200") not in fakes.writer.objects
+    assert len(fakes.writer.objects) == 399
+    r = invoke(fakes, "verify", "--json")
+    assert r.exit_code == 1, r.output
+    checks = {c["name"]: c for c in json.loads(r.stdout)["checks"]}
+    assert checks["ids"]["detail"] == (
+        'missing 1, extra 1; missing ids ["id-200"]; extra ids ["id-150"]'
+    )
+
+
+def _prop(entry: Any, name: str) -> Any:
+    return next(p for p in entry.target.properties if p.name == name)
+
+
+def _rename_year(plan: Any) -> None:
+    _prop(plan.collections[0], "year").name = "publication_year"
+
+
+def _year_as_text(plan: Any) -> None:
+    year = _prop(plan.collections[0], "year")
+    year.type, year.tokenization, year.range_filters = "text", "field", False
+
+
+def _year_as_list(plan: Any) -> None:
+    _prop(plan.collections[0], "year").type = "int[]"
+
+
+def _document_flags(plan: Any) -> None:
+    document = _prop(plan.collections[0], "document")
+    document.searchable, document.filterable = False, True
+
+
+def _drop_uri(plan: Any) -> None:
+    target = plan.collections[0].target
+    target.properties = [p for p in target.properties if p.source_key != "#uri"]
+    target.dropped.append(DroppedKey(source_key="#uri", reason="not needed"))
+
+
+def _hnsw_l2(plan: Any) -> None:
+    vector = plan.collections[0].target.vectors[0]
+    vector.distance = "l2-squared"
+    vector.index = IndexPlan(type="hnsw", options={"ef": 32})
+
+
+def _edit_notes(plan: Any) -> None:
+    plan.collections[0].notes = ["checked by hand"]
+
+
+def _second_entry_first(plan: Any) -> None:
+    first = plan.collections[0]
+    target = first.target.model_copy(update={"name": "Docs2"})
+    source = first.source.model_copy(update={"ref": "other"})
+    plan.collections = [
+        first.model_copy(update={"source": source, "target": target}),
+        first,
+    ]
+
+
+# (edit of the draft, stored name of the year property, stored value of 2003)
+HAND_EDITS = {
+    "rename": (_rename_year, "publication_year", 2003),
+    "int-to-text": (_year_as_text, "year", "2003"),
+    "int-to-list": (_year_as_list, "year", [2003]),
+    "document-flags": (_document_flags, "year", 2003),
+    "drop-uri": (_drop_uri, "year", 2003),
+    "hnsw-l2": (_hnsw_l2, "year", 2003),
+    "notes": (_edit_notes, "year", 2003),
+    "reordered": (_second_entry_first, "year", 2003),
+}
+
+
+@pytest.mark.parametrize(("edit", "name", "value"), HAND_EDITS.values(), ids=HAND_EDITS)
+def test_an_allowed_edit_of_the_plan_is_applied_end_to_end(tmp_path, edit, name, value):
+    records = [replace(r, uri=f"https://example.com/{r.id}") for r in cli_records(30)]
+    fakes = inspected(FakeFactories(FakeSource(records)))
+    path = tmp_path / DIR / "plan.yaml"
+    plan = load_plan(path)
+    edit(plan)
+    save_plan(plan, path)
+    found = json.loads((tmp_path / DIR / "inspect.json").read_text())
+    found["collections"].append({**found["collections"][0], "ref": "other"})
+    (tmp_path / DIR / "inspect.json").write_text(json.dumps(found))
+    for command in ("check", "copy", "verify"):
+        r = invoke(fakes, command, "--json")
+        assert r.exit_code == 0, (command, r.output)
+    targets = [e.target.name for e in plan.collections]
+    assert sorted(fakes.schema.ensured) == sorted(targets)
+    for target in targets:
+        stored = fakes.writer.stored[(target, None)][to_uuid("id-3")].properties
+        assert stored[name] == value
+        dropped = edit is _drop_uri
+        assert ("uri" in stored) is not dropped
+        assert stored["source_id"] == "id-3"
+
+
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_a_property_name_that_the_client_refuses_is_an_invalid_plan(tmp_path, cmd):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    path = tmp_path / DIR / "plan.yaml"
+    plan = load_plan(path)
+    _prop(plan.collections[0], "year").name = "vector"
+    save_plan(plan, path)
+    r = invoke(fakes, cmd, "--json")
+    assert r.exit_code == 2, r.output
+    errors = json.loads(r.stdout)["errors"]
+    assert [(e["code"], e["message"]) for e in errors] == [
+        ("invalid_name", "property vector: Weaviate reserves the property name vector")
+    ]
+    assert fakes.writer.calls == 0
+
+
+STATE_HINT_UNREADABLE = "Start again with another --dir, or restore the file."
+
+
+@pytest.mark.parametrize("cmd", ["status", "copy"])
+def test_a_corrupted_state_file_is_an_invalid_state(tmp_path, cmd):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    (tmp_path / DIR / "state.sqlite").write_bytes(bytes(range(256)) * 16)
+    r = invoke(fakes, cmd, "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"], d["hint"]) == (
+        "invalid_state",
+        f"state.sqlite in {DIR} cannot be read.",
+        STATE_HINT_UNREADABLE,
+    )
+    assert fakes.writer.calls == 0
+
+
+def test_a_state_file_of_a_newer_schema_resumes(tmp_path):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(250))))
+    old_state_file(
+        tmp_path / DIR / "state.sqlite",
+        FakeSource.REF,
+        250,
+        Partition("0-250", "0", "250"),
+        "100",
+        100,
+    )
+    db = sqlite3.connect(tmp_path / DIR / "state.sqlite")
+    with db:
+        db.execute("CREATE TABLE later (x TEXT)")
+        db.execute("ALTER TABLE partitions ADD COLUMN later TEXT")
+        db.execute("UPDATE partitions SET later = 'kept'")
+    db.close()
+    # The earlier run created the collection in the target.
+    fakes.writer.stored[("Docs", None)] = {}
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json")
+    assert r.exit_code == 0, r.output
+    row = json.loads(r.stdout)["collections"][0]
+    assert (row["copied"], row["total"], row["done"]) == (250, 250, True)
+    assert len(fakes.writer.objects) == 150
+    r = invoke(fakes, "status", "--json")
+    assert r.exit_code == 0 and json.loads(r.stdout)["collections"][0]["done"]
+    db = sqlite3.connect(tmp_path / DIR / "state.sqlite")
+    assert db.execute("SELECT later FROM partitions").fetchall() == [("kept",)]
+    db.close()
+
+
+def _with_lang(records: list[Record]) -> list[Record]:
+    return [replace(r, metadata={**r.metadata, "lang": "en"}) for r in records]
+
+
+def test_copy_adds_a_planned_property_that_the_collection_lacks(tmp_path):
+    source = FakeSource(cli_records(10))
+    fakes = inspected(FakeFactories(source))
+    assert invoke(fakes, "copy").exit_code == 0
+    source.records += _with_lang(cli_records(15)[10:])
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 1, r.output
+    reasons = {json.loads(x)["reason"] for x in (DIR / "rejects.jsonl").open()}
+    assert reasons == {
+        "metadata key lang is not in plan.yaml; add a property for it or list it "
+        "under dropped"
+    }
+    assert invoke(fakes, "inspect", "chroma", "--force").exit_code == 0
+    r = invoke(fakes, "check", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["warnings"] == [
+        {
+            "code": "missing_property",
+            "collection": "Docs",
+            "message": "property lang: missing in the collection; copy will add it",
+        }
+    ]
+    r = invoke(fakes, "copy", "--json")
+    assert fakes.schema.added == [("Docs", "lang")]
+    assert "Added the property lang to Docs" in r.stderr
+    assert json.loads(r.stdout)["added_properties"] == [
+        {"collection": "Docs", "property": "lang"}
+    ]
+    # The five records were rejected by the run before and are not read again.
+    assert r.exit_code == 1 and json.loads(r.stdout)["code"] == "rejects", r.output
+    # A copy in a new directory writes them with the new property.
+    other = ["--dir", "other"]
+    assert invoke(fakes, "inspect", "chroma", *other).exit_code == 0
+    r = invoke(fakes, "copy", "--json", *other)
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["added_properties"] == []
+    assert fakes.writer.objects[to_uuid("id-12")].properties["lang"] == "en"
+    assert len(fakes.writer.objects) == 15
+
+
+def test_inspect_notes_and_check_refuses_a_source_without_vectors(tmp_path):
+    records = [replace(r, vector=None) for r in cli_records(10)]
+    fakes = FakeFactories(FakeSource(records))
+    r = invoke(fakes, "inspect", "chroma", "--json")
+    assert r.exit_code == 0, r.output
+    row = json.loads(r.stdout)["collections"][0]
+    assert (row["dimension"], row["vectors"][0]["mode"]) == (None, "keep")
+    assert NO_VECTORS_NOTE in row["notes"]
+    for cmd in ("check", "copy"):
+        r = invoke(fakes, cmd, "--json")
+        assert r.exit_code == 2, r.output
+        errors = json.loads(r.stdout)["errors"]
+        assert [(e["code"], e["message"]) for e in errors] == [
+            ("no_source_vectors", NO_VECTORS_ERROR)
+        ]
+    assert fakes.writer.calls == 0
+    args = ["--force", "--vectors", "embed", "--vectorizer", "text2vec-weaviate"]
+    r = invoke(fakes, "inspect", "chroma", *args, "--json")
+    assert r.exit_code == 0, r.output
+    assert NO_VECTORS_NOTE not in json.loads(r.stdout)["collections"][0]["notes"]
+    for cmd in ("check", "copy"):
+        assert invoke(fakes, cmd).exit_code == 0, cmd
+    assert len(fakes.writer.objects) == 10
+
+
+NO_VECTORS_NOTE = (
+    "the source has no vectors; run to-weaviate inspect chroma --force "
+    "--vectors embed --vectorizer MODULE"
+)
+NO_VECTORS_ERROR = (
+    "docs has records without vectors, but vector default keeps the source "
+    "vectors; run to-weaviate inspect chroma --force --vectors embed "
+    "--vectorizer MODULE"
+)
+
+
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_a_property_name_that_the_server_stores_otherwise_is_an_invalid_plan(
+    tmp_path, cmd
+):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    path = tmp_path / DIR / "plan.yaml"
+    plan = load_plan(path)
+    _prop(plan.collections[0], "year").name = "Year"
+    save_plan(plan, path)
+    r = invoke(fakes, cmd, "--json")
+    assert r.exit_code == 2, r.output
+    errors = json.loads(r.stdout)["errors"]
+    assert [(e["code"], e["message"].split(":")[0]) for e in errors] == [
+        ("invalid_name", "property Year")
+    ]
+    assert fakes.writer.calls == 0 and fakes.schema.ensured == []
+
+
+def test_a_state_file_that_another_process_locks_is_in_use(tmp_path, monkeypatch):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    assert invoke(fakes, "copy").exit_code == 0
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(
+        "to_weaviate.state.sqlite3.connect",
+        lambda *a, **k: _Locked(real_connect(*a, **k)),
+    )
+    r = invoke(fakes, "status", "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"], d["hint"]) == (
+        "usage",
+        f"Another to-weaviate process is using {DIR}.",
+        "Wait for it to end, then run the command again.",
+    )
+
+
+class _Locked:
+    """A sqlite connection whose statements find the file locked."""
+
+    def __init__(self, db: sqlite3.Connection) -> None:
+        self._db = db
+
+    def __enter__(self) -> "_Locked":
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def executescript(self, script: str) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    def close(self) -> None:
+        self._db.close()
+
+
+def test_a_refused_property_addition_names_the_plan_in_its_hint():
+    refused = PropertyRejected("conflict for property lang", "add the property lang")
+    source = FakeSource(cli_records(10))
+    fakes = inspected(FakeFactories(source, schema=FakeSchema(ensure_error=refused)))
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"], d["hint"]) == (
+        "target_rejected_schema",
+        "Weaviate refused to add the property lang: conflict for property lang",
+        "Weaviate refused to add the property; read its message and edit plan.yaml.",
+    )
