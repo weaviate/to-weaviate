@@ -1061,8 +1061,26 @@ SAME_URLS = [
     ("http://localhost:8099", "HTTP://LocalHost:8099", None, "localhost:8099"),
     ("http://localhost:8099", "http://localhost:8099/", None, "localhost:8099"),
     ("http://localhost:8099", "http://localhost.:8099", None, "localhost:8099"),
-    ("http://weaviate.test", "http://weaviate.test:80", None, "weaviate.test:80"),
+    (
+        "http://weaviate.test",
+        "http://weaviate.test:80",
+        "http://weaviate.test:50099",
+        "weaviate.test:80",
+    ),
     ("https://c.weaviate.cloud", "c.weaviate.cloud", None, "c.weaviate.cloud:443"),
+    # Without WEAVIATE_GRPC_URL the client connects to port 443 over TLS.
+    (
+        "http://c.weaviate.cloud",
+        "https://c.weaviate.cloud",
+        None,
+        "c.weaviate.cloud:443",
+    ),
+    (
+        "https://c.weaviate.cloud",
+        "http://c.weaviate.cloud",
+        None,
+        "c.weaviate.cloud:443",
+    ),
     (
         "https://c.weaviate.cloud/",
         "https://c.weaviate.cloud:443",

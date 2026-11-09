@@ -27,7 +27,7 @@ from weaviate.exceptions import (
 
 from to_weaviate.cli import app
 from to_weaviate.output import ERROR_EXIT, CliError
-from to_weaviate.plan import load_plan
+from to_weaviate.plan import load_plan, save_plan
 from to_weaviate.sources.chroma.client import ChromaError
 from to_weaviate.target.schema import collection_kwargs
 from to_weaviate.target.writer import WeaviateWriter
@@ -223,7 +223,7 @@ def test_secret_in_an_exception_is_redacted(mode):
 
 LONG_KEY = (
     "".join(chr(ord("a") + i * 7 % 26) for i in range(230))
-    + "\n"
+    + "é"
     + "".join(chr(ord("A") + i * 11 % 26) for i in range(230))
 )
 
@@ -248,11 +248,38 @@ def test_long_secret_is_redacted_before_shortening(mode):
 def test_secret_with_whitespace_is_redacted_before_collapsing(mode):
     fakes = FakeFactories(FakeSource(cli_records(10)))
     assert invoke(fakes, "inspect", "chroma").exit_code == 0
-    fakes.target_error = RuntimeError("headers: top\nsecret")
-    r = invoke(fakes, "check", *mode, WEAVIATE_API_KEY="top\nsecret")
+    fakes.target_error = RuntimeError("headers: top  secret")
+    r = invoke(fakes, "check", *mode, WEAVIATE_API_KEY="top  secret")
     assert r.exit_code == 5
     assert "top secret" not in r.output and "top\nsecret" not in r.output
     assert "secret" not in r.output
+
+
+@pytest.mark.parametrize("mode", [[], ["--json"]])
+@pytest.mark.parametrize(
+    ("cmd", "var"),
+    [
+        (["check"], "WEAVIATE_API_KEY"),
+        (["check"], "OPENAI_API_KEY"),
+        (["inspect", "chroma", "--force"], "CHROMA_API_KEY"),
+    ],
+)
+def test_key_with_a_control_character_is_a_usage_error(cmd, var, mode):
+    key = "B5-MADE-UP\nKEY-VALUE"
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    fakes.source_error = ChromaError(None, f"Illegal header value {key.encode()!r}")
+    fakes.target_error = httpx.LocalProtocolError(f"Illegal header {key.encode()!r}")
+    r = invoke(fakes, *cmd, *mode, TO_WEAVIATE_DEBUG="1", **{var: key})
+    assert r.exit_code == 2, r.output
+    message = f"{var} holds a control character."
+    if mode:
+        d = json.loads(r.stdout)
+        assert (d["code"], d["message"]) == ("usage", message)
+    else:
+        assert f"Error: {message}" in r.stderr
+    for part in ("B5-MADE", "UP\\nKEY", "KEY-VALUE"):
+        assert part not in r.output
 
 
 def test_url_password_is_not_stored_or_printed(tmp_path):
@@ -319,9 +346,108 @@ def test_embedding_config_secrets_are_not_stored_or_sent(tmp_path):
     assert [n for n in entry.notes if "api_key_env_var, default_headers" in n]
 
 
+@pytest.mark.parametrize("char", "/?#")
+def test_embedding_url_that_keeps_its_userinfo_is_not_stored_or_sent(tmp_path, char):
+    password = f"B5-MADE{char}UP-PW"
+    embedding = {
+        "type": "known",
+        "name": "openai",
+        "config": {
+            "model_name": "text-embedding-3-small",
+            "api_base": f"https://bob:{password}@proxy.example.com/v1",
+        },
+    }
+    fakes = FakeFactories(FakeSource(cli_records(10), embedding=embedding))
+    runs = [
+        invoke(fakes, "inspect", "chroma"),
+        invoke(fakes, "inspect", "chroma", "--force", "--json"),
+    ]
+    assert [r.exit_code for r in runs] == [0, 0], runs[0].output
+    directory = tmp_path / ".to-weaviate"
+    plan = load_plan(directory / "plan.yaml")
+    sent = repr(collection_kwargs(plan.collections))
+    texts = [(directory / name).read_text() for name in ("plan.yaml", "inspect.json")]
+    for text in [*texts, *(r.output for r in runs), sent]:
+        for value in ("@", "bob", password, *password.split(char)):
+            assert value not in text
+    entry = plan.collections[0]
+    assert entry.source.embedding == {
+        "type": "known",
+        "name": "openai",
+        "config": {"model_name": "text-embedding-3-small"},
+    }
+    assert [n for n in entry.notes if "api_base holds userinfo" in n]
+
+
+USERINFO_HINT = "Percent-encode the password in plan.yaml or remove the option."
+
+
+def plan_with_url_option(tmp_path, fakes, password):
+    """Inspect with a text2vec-openai base_url that holds `password`."""
+    embed = ["--vectors", "embed", "--vectorizer", "text2vec-openai"]
+    option = f"base_url=https://bob:{password}@proxy.example.com/v1"
+    args = [*embed, "--vectorizer-option", option]
+    assert invoke(fakes, "inspect", "chroma", *args).exit_code == 0
+
+
+@pytest.mark.parametrize("mode", [[], ["--json"]])
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+@pytest.mark.parametrize("char", "/?#")
+def test_check_and_copy_refuse_a_url_option_that_keeps_its_userinfo(
+    tmp_path, char, cmd, mode
+):
+    password = f"B5-MADE{char}UP-PW"
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    plan_with_url_option(tmp_path, fakes, password)
+    r = invoke(fakes, cmd, *mode, OPENAI_API_KEY="openai-key")
+    assert r.exit_code == 2, r.output
+    message = (
+        "vectorizer option base_url of text2vec-openai in Docs holds userinfo "
+        "that cannot be removed"
+    )
+    if mode:
+        d = json.loads(r.stdout)
+        assert (d["code"], d["hint"]) == ("invalid_plan", USERINFO_HINT)
+        assert d["errors"] == [
+            {"code": "invalid_vectorizer", "collection": "Docs", "message": message}
+        ]
+        assert d["warnings"] == []
+    else:
+        assert f"error invalid_vectorizer Docs: {message}" in r.stdout
+        assert f"Hint: {USERINFO_HINT}" in r.stderr
+    assert fakes.schema.ensured == [] and fakes.writer.calls == 0
+    assert fakes.source.read_calls == 0
+    if cmd == "copy":
+        assert fakes.schema_calls == 0
+    for value in ("bob", password, *password.split(char)):
+        assert value not in r.output
+
+
+def test_plan_errors_of_other_kinds_keep_the_plan_hint(tmp_path):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    plan_with_url_option(tmp_path, fakes, "B5-MADE/UP-PW")
+    path = tmp_path / ".to-weaviate" / "plan.yaml"
+    plan = load_plan(path)
+    first = plan.collections[0]
+    twin = first.model_copy(
+        update={"target": first.target.model_copy(update={"name": "Docs2"})}
+    )
+    save_plan(plan.model_copy(update={"collections": [first, twin]}), path)
+    r = invoke(fakes, "check", "--json", OPENAI_API_KEY="openai-key")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert {e["code"] for e in d["errors"]} == {
+        "duplicate_source",
+        "invalid_vectorizer",
+    }
+    assert d["hint"] == (
+        "Edit plan.yaml, or run to-weaviate inspect chroma --force to draft it again."
+    )
+
+
 def test_source_url_query_and_fragment_are_not_stored_or_printed(tmp_path):
     fakes = FakeFactories(FakeSource(cli_records(10)))
-    url = "https://user:SENTINEL-D@chroma.example.com/?token=SENTINEL-Q#SENTINEL-F"
+    url = "https://user:SENTINEL-D@chroma.example.com/?token=SENTINEL-Q"
     runs = [
         invoke(fakes, "inspect", "chroma", CHROMA_URL=url),
         invoke(fakes, "inspect", "chroma", "--force", "--json", CHROMA_URL=url),
@@ -349,9 +475,95 @@ def test_malformed_url_variable_does_not_break_the_error_report(debug):
         WEAVIATE_API_KEY="SENTINEL-B",
         TO_WEAVIATE_DEBUG=debug,
     )
-    assert r.exit_code == 5
-    assert json.loads(r.stdout)["code"] == "internal_error"
+    assert r.exit_code == 2
+    assert json.loads(r.stdout)["code"] == "usage"
     assert "SENTINEL" not in r.stdout and "SENTINEL" not in r.stderr
+
+
+URL_HINT = "Percent-encode #, ?, / and @ in a password."
+# (variable, value, sentinel): a password with an unencoded #, ? or /, and a
+# source URL with a fragment.
+REFUSED_URLS = [
+    *[
+        (var, f"http://admin:hunter2{char}x@localhost:{port}", "hunter2")
+        for var, port in (
+            ("WEAVIATE_URL", 8099),
+            ("WEAVIATE_GRPC_URL", 50099),
+            ("CHROMA_URL", 8001),
+        )
+        for char in "#?/"
+    ],
+    (
+        "CHROMA_URL",
+        "https://user:SENTINEL-D@chroma.example.com/?token=SENTINEL-Q#SENTINEL-F",
+        "SENTINEL",
+    ),
+]
+
+
+@pytest.mark.parametrize("debug", [None, "1"])
+@pytest.mark.parametrize(("var", "url", "sentinel"), REFUSED_URLS)
+def test_refused_url_variable_is_a_usage_error_without_its_value(
+    tmp_path, var, url, sentinel, debug
+):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    cmd = ["inspect", "chroma", "--force"] if var == "CHROMA_URL" else ["check"]
+    js = invoke(fakes, *cmd, "--json", TO_WEAVIATE_DEBUG=debug, **{var: url})
+    text = invoke(fakes, *cmd, TO_WEAVIATE_DEBUG=debug, **{var: url})
+    assert js.exit_code == text.exit_code == 2, js.output
+    d = json.loads(js.stdout)
+    assert (d["code"], d["message"], d["hint"]) == (
+        "usage",
+        f"{var} is not a valid URL.",
+        URL_HINT,
+    )
+    assert f"Error: {var} is not a valid URL." in text.stderr
+    for r in (js, text):
+        assert sentinel not in r.stdout and sentinel not in r.stderr
+    for f in tmp_path.rglob("*"):
+        if f.is_file():
+            assert sentinel.encode() not in f.read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("cmd", "var", "error"),
+    [
+        (
+            ["check"],
+            "WEAVIATE_URL",
+            WeaviateConnectionError(
+                "no answer from https://MADE-UP-TOKEN@weaviate.test"
+            ),
+        ),
+        (
+            ["inspect", "chroma", "--force"],
+            "CHROMA_URL",
+            ChromaError(None, "ConnectError: https://MADE-UP-TOKEN@chroma.example.com"),
+        ),
+    ],
+)
+def test_url_userinfo_without_a_colon_is_not_printed(cmd, var, error):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    fakes.source_error = fakes.target_error = error
+    host = "weaviate.test" if var == "WEAVIATE_URL" else "chroma.example.com"
+    r = invoke(fakes, *cmd, "--json", **{var: f"https://MADE-UP-TOKEN@{host}"})
+    assert r.exit_code == 4, r.output
+    assert "MADE-UP-TOKEN" not in r.output and "***" in r.output
+
+
+@pytest.mark.parametrize(
+    "url", ["https://api.trychroma.com.", "https://API.TryChroma.com."]
+)
+def test_chroma_cloud_url_with_a_trailing_dot_needs_the_key(url):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    r = invoke(
+        fakes, "inspect", "chroma", "--json", CHROMA_URL=url, CHROMA_API_KEY=None
+    )
+    assert r.exit_code == 3, r.output
+    d = json.loads(r.stdout)
+    assert d["code"] == "missing_credential" and "CHROMA_API_KEY" in d["hint"]
 
 
 def test_status_ignores_a_malformed_weaviate_url():

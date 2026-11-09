@@ -5,8 +5,9 @@ from urllib.parse import quote
 
 import httpx
 
+from to_weaviate.output import redact
 from to_weaviate.retry import with_retry
-from to_weaviate.settings import ChromaSettings
+from to_weaviate.settings import ChromaSettings, url_passwords, url_tokens
 
 CHROMA_MAX_PAGE = 300
 COLLECTIONS_PAGE = 1000
@@ -28,16 +29,22 @@ class ChromaError(Exception):
         self.retry_after = retry_after
 
 
-def _message(response: httpx.Response) -> str:
+def _message(response: httpx.Response, secrets: list[str]) -> str:
+    """The error text of `response`, redacted and then cut.
+
+    A cut before the redaction would leave a part of a secret that `redact`
+    no longer matches.
+    """
     try:
         body = response.json()
     except ValueError:
         body = None
+    text = response.text
     if isinstance(body, dict):
-        text = body.get("message") or body.get("error")
-        if isinstance(text, str) and text:
-            return text[:MAX_MESSAGE_CHARS]
-    return response.text[:MAX_MESSAGE_CHARS]
+        found = body.get("message") or body.get("error")
+        if isinstance(found, str) and found:
+            text = found
+    return redact(text, secrets)[:MAX_MESSAGE_CHARS]
 
 
 def _retry_after(response: httpx.Response) -> float | None:
@@ -79,6 +86,11 @@ class ChromaClient:
             transport=transport,
         )
         self._sleep = sleep
+        self._secrets = [
+            *([settings.api_key] if settings.api_key else []),
+            *url_passwords(settings.url),
+            *url_tokens(settings.url),
+        ]
 
     def close(self) -> None:
         self._http.close()
@@ -88,7 +100,9 @@ class ChromaClient:
             response = self._http.request(method, path, **kwargs)
             if response.status_code >= 400:
                 raise ChromaError(
-                    response.status_code, _message(response), _retry_after(response)
+                    response.status_code,
+                    _message(response, self._secrets),
+                    _retry_after(response),
                 )
             return response.json()
 

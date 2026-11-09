@@ -374,6 +374,38 @@ def test_stored_embedding_cleans_the_ollama_url():
     assert stored["config"] == {"url": "http://ollama:11434/api", "model_name": "n"}
 
 
+@pytest.mark.parametrize("char", "/?#")
+def test_stored_embedding_drops_a_url_that_keeps_its_userinfo(char):
+    password = f"made{char}up-pw"
+    for name, key in (("openai", "api_base"), ("ollama", "url")):
+        url = f"https://bob:{password}@proxy.example.com/v1"
+        stored, notes = stored_embedding(known(name, model_name="m", **{key: url}))
+        assert stored == known(name, model_name="m")
+        assert notes == [
+            f"The keys {key} of the embedding function {name!r} are not stored. "
+            f"The value of {key} holds userinfo that cannot be removed."
+        ]
+        v, _ = vectorizer_for(stored)
+        assert v is not None
+        for value in ("bob", "made", "up-pw", "@"):
+            assert value not in repr(stored) + notes[0] + repr(v)
+
+
+def test_stored_embedding_note_names_unread_and_unclean_keys():
+    embedding = known(
+        "openai",
+        model_name="m",
+        api_base="https://bob:made/up@proxy.example.com/v1",
+        organization_id="made-up-org",
+    )
+    _, notes = stored_embedding(embedding)
+    assert notes == [
+        "The keys api_base, organization_id of the embedding function 'openai' are "
+        "not stored; the mapping does not read organization_id. The value of "
+        "api_base holds userinfo that cannot be removed."
+    ]
+
+
 def test_stored_embedding_without_dropped_keys_has_no_note():
     embedding = known("cohere", model_name="c")
     assert stored_embedding(embedding) == (embedding, [])

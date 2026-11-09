@@ -9,7 +9,12 @@ from to_weaviate.plan import (
     VectorizerPlan,
 )
 from to_weaviate.sources.base import SourceCollection
-from to_weaviate.target.schema import PlanMismatch, collection_kwargs, module_names
+from to_weaviate.target.schema import (
+    USERINFO_TEXT,
+    PlanMismatch,
+    collection_kwargs,
+    module_names,
+)
 
 # Vectorizer module to the Weaviate header that carries its provider key and
 # the environment variable that `weaviate_settings` reads it from.
@@ -223,6 +228,14 @@ def vectorizer_findings(groups: Mapping[str, list[CollectionPlan]]) -> list[Find
         except PlanMismatch as exc:
             out.append(Finding("invalid_vectorizer", name, str(exc)))
     return out
+
+
+def userinfo_only(errors: list[Finding]) -> bool:
+    """Whether every one of `errors` is a URL option that keeps its userinfo."""
+    return bool(errors) and all(
+        e.code == "invalid_vectorizer" and e.message.endswith(USERINFO_TEXT)
+        for e in errors
+    )
 
 
 def plan_findings(

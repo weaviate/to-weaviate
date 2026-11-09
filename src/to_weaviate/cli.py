@@ -54,6 +54,7 @@ from to_weaviate.engine.check import (
     plan_findings,
     provider_keys,
     target_groups,
+    userinfo_only,
 )
 from to_weaviate.engine.copy import copy_collection
 from to_weaviate.engine.verify import (
@@ -92,12 +93,11 @@ from to_weaviate.plan import (
 )
 from to_weaviate.settings import (
     ChromaSettings,
+    InvalidSetting,
     MissingCredential,
     WeaviateSettings,
     chroma_settings,
     load_env,
-    normalized_host,
-    stored_url,
     weaviate_settings,
     without_userinfo,
 )
@@ -144,6 +144,7 @@ REINSPECT_HINT = "Run to-weaviate inspect chroma --force to inspect again."
 EDIT_PLAN_HINT = (
     "Edit plan.yaml, or run to-weaviate inspect chroma --force to draft it again."
 )
+USERINFO_HINT = "Percent-encode the password in plan.yaml or remove the option."
 CHROMA_HINT = "Check CHROMA_URL and that the Chroma server is running."
 NO_COLLECTION_HINT = "Check --database, CHROMA_DATABASE and CHROMA_TENANT."
 WEAVIATE_HINT = (
@@ -220,6 +221,8 @@ def _as_cli_error(exc: Exception) -> CliError:
             str(exc),
             f"Set {exc.var} in the environment or in .env.",
         )
+    if isinstance(exc, InvalidSetting):
+        return CliError("usage", str(exc), exc.hint)
     if isinstance(exc, ChromaError):
         if exc.status in (401, 403):
             return _refused("Chroma", "CHROMA_API_KEY", exc.status == 403)
@@ -524,7 +527,7 @@ def _inspect_chroma(
     if not databases and settings.database is not None:
         databases = [settings.database]
     source = factories.source(settings)
-    info(json_output, f"Inspecting Chroma at {stored_url(settings.url)}")
+    info(json_output, f"Inspecting Chroma at {settings.stored_url}")
     collections = source.inspect(databases or None, names or None, sample_pages)
     missing = sorted(set(names) - {c.name for c in collections})
     if missing:
@@ -539,11 +542,7 @@ def _inspect_chroma(
     collections, source_notes = _stored_collections(collections)
     try:
         plan = draft_plan(
-            SourcePlan(
-                type="chroma",
-                url=stored_url(settings.url),
-                tenant=settings.tenant,
-            ),
+            SourcePlan(type="chroma", url=settings.stored_url, tenant=settings.tenant),
             collections,
             vectors,
             vectorizer_plan,
@@ -631,7 +630,7 @@ def _plan_errors(errors: list[Finding], warnings: list[Finding]) -> CliError:
     return CliError(
         "invalid_plan",
         f"The plan has {_plural(len(errors), 'error')}.",
-        EDIT_PLAN_HINT,
+        USERINFO_HINT if userinfo_only(errors) else EDIT_PLAN_HINT,
         fields=_findings_document(errors, warnings),
         text="\n".join(_findings_text(errors, warnings)),
     )
@@ -714,8 +713,12 @@ def _progress_output(
 
 
 def _target_host(settings: WeaviateSettings) -> str:
-    """The normalized WEAVIATE_URL host, with the scheme that `connect` assumes."""
-    return normalized_host(settings.url, "http" if settings.grpc_url else "https")
+    """The normalized host and port of `settings.http`.
+
+    `connect` uses this host. Without WEAVIATE_GRPC_URL the client always uses
+    port 443, so an explicit port in WEAVIATE_URL is stored but not used.
+    """
+    return settings.http.normalized
 
 
 def _state_mismatch(directory: Path, copy: str, now: str) -> CliError:
