@@ -905,7 +905,6 @@ def test_copy_resumes_at_the_refused_page_and_writes_each_object_once():
     assert set(client.writes_per_uuid.values()) == {1}
 
 
-# (first target name, first tenant, second target name, second tenant)
 @pytest.mark.parametrize("value", [True, False])
 def test_copy_rejects_a_record_whose_embedding_holds_a_boolean(value):
     rows = [
@@ -932,6 +931,7 @@ def test_copy_rejects_a_record_whose_embedding_holds_a_boolean(value):
     )
 
 
+# (first target name, first tenant, second target name, second tenant)
 ONE_PLACE = [
     ("Docs", None, "Docs", None),
     ("Docs", "a", "Docs", "a"),
