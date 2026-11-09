@@ -45,39 +45,8 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  cloud:
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    environment: cloud-tests
-    # Every run creates and deletes To_weaviate_ci on the same cluster.
-    concurrency:
-      group: cloud-tests
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      # The suite runs the command of the wheel that publish uploads.
-      - run: pip install "$(ls dist/*.whl)[test]"
-      - run: pytest tests/cloud -v
-        env:
-          CHROMA_API_KEY: ${{ secrets.CHROMA_CLOUD_API_KEY }}
-          CHROMA_TENANT: ${{ secrets.CHROMA_CLOUD_TENANT }}
-          CHROMA_DATABASE: ${{ secrets.CHROMA_CLOUD_DATABASE }}
-          WEAVIATE_URL: ${{ secrets.WEAVIATE_CLOUD_URL }}
-          WEAVIATE_API_KEY: ${{ secrets.WEAVIATE_CLOUD_API_KEY }}
-          TO_WEAVIATE_REQUIRE_CLOUD: "1"
-
   publish:
-    needs: cloud
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: pypi

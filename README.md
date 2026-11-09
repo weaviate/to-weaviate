@@ -374,69 +374,123 @@ kubectl context is current, so select your previous context again with
 accepts the API key `admin-key`. The Weaviate version of CI is in
 `tests/acceptance/weaviate-version`.
 
-### Cloud suite and releases
+#### Run the suite locally with Docker
 
-`tests/cloud` runs the installed `to-weaviate` command against Chroma Cloud
-and Weaviate Cloud. It reads the Chroma collection `to-weaviate-ci` and
-writes nothing to Chroma. In Weaviate it deletes the collection
-`To_weaviate_ci` before and after its test, and no other collection.
+`make acceptance-up` stops when the machine already has a kind cluster
+named `weaviate-k8s`. On such a machine, or on one without kind, start
+the servers in Docker instead:
 
-The suite runs whenever `WEAVIATE_URL`, `WEAVIATE_API_KEY` and either
-`CHROMA_API_KEY` or `CHROMA_URL` are set. It does not check which servers
-they name, so a bare `pytest` in a shell with these variables runs it
-against those servers. The commands it starts get your environment
-unchanged. When a variable is missing, the suite skips and names it. With
-`TO_WEAVIATE_REQUIRE_CLOUD=1`, as in the release workflow, it fails
-instead.
+```bash
+make chroma-up       # Chroma on port 8001
+make weaviate-up     # Weaviate and text2vec-transformers on ports 8099 and 50099
+source .venv/bin/activate
+WEAVIATE_ASYNC_INDEXING=true make acceptance
+make weaviate-down   # removes the two containers and their network
+make chroma-down     # stops Chroma
+```
 
-To run it against the local test servers, seed the local Chroma with
-`CHROMA_URL=http://localhost:8001`, `CHROMA_TENANT=default_tenant` and
-`CHROMA_DATABASE=default_database`, then also set `WEAVIATE_URL`,
-`WEAVIATE_GRPC_URL` and `WEAVIATE_API_KEY` to the acceptance values.
+`make chroma-up` and `make chroma-down` run `docker compose` with
+`tests/acceptance/chroma/docker-compose.yml`. `make weaviate-up` and
+`make weaviate-down` run `tests/acceptance/weaviate-docker.sh`.
+
+`make weaviate-up` starts two containers on the network
+`to-weaviate-dev-net`. `to-weaviate-dev` runs the Weaviate version in
+`tests/acceptance/weaviate-version`. `to-weaviate-t2v` serves the
+`text2vec-transformers` model of CI. Weaviate listens on `127.0.0.1`
+only. It accepts the API key `admin-key` and has RBAC on with the root
+user `admin-user`. The script asks `/v1/.well-known/ready` up to 60
+times, 2 seconds apart. When Docker does not answer, it stops with a
+message. When one of the two containers or the network
+exists, it starts nothing and asks for `make weaviate-down` first.
+
+Weaviate runs with `ASYNC_INDEXING=true`, as every Weaviate Cloud
+instance does. `ASYNC=0 make weaviate-up` starts it without async
+indexing. Against that server, run the suite with
+`WEAVIATE_ASYNC_INDEXING=false make acceptance`.
+
+`make weaviate-down` removes the two containers and the network. It
+skips a name that does not exist.
+
+#### Run the API-level suite against a Weaviate Cloud cluster
+
+`make acceptance-cloud` runs the API-level tests against a Weaviate Cloud
+cluster. The source stays the local test Chroma, so start it first with
+`make chroma-up`. The target runs `pytest tests/acceptance -v -m "not infra"`
+with these variables:
+
+| Variable | Value |
+|---|---|
+| `ACCEPTANCE_TARGET` | `cloud` |
+| `CHROMA_URL` | `http://localhost:8001` |
+| `WEAVIATE_ASYNC_INDEXING` | `true` |
+| `ACCEPTANCE_VECTORIZER` | `text2vec-weaviate` |
+| `WEAVIATE_GRPC_URL` | empty, so the tool connects to port 443 of the cluster |
+| `TO_WEAVIATE_REQUIRE_ACCEPTANCE` | `1`, so a target that breaks a rule fails the run |
+
+It reads `WEAVIATE_URL` and `WEAVIATE_API_KEY` from the environment.
+`WEAVIATE_URL` is `https://` followed by the cluster host, which ends with
+`.weaviate.cloud` or `.weaviate.network`. `WEAVIATE_API_KEY` is an admin
+key of the cluster. Put the two `export` lines in a shell file outside the
+repository and `source` it:
+
+```bash
+make chroma-up
+source ~/weaviate-cloud-test.sh   # export WEAVIATE_URL=... and export WEAVIATE_API_KEY=...
+source .venv/bin/activate
+make acceptance-cloud
+```
+
+A value typed at the prompt, in an `export` or on the make command line,
+stays in the shell history. Never set them on the make command line:
+make also passes such a value to every child process in `MAKEFLAGS`. When
+either variable is empty or set on the make command line, the target
+prints `set WEAVIATE_URL and WEAVIATE_API_KEY in the environment (not on
+the make command line)` and exits 2. It prints no value.
+
+Use a dedicated serverless cluster. Before and after each test, the suite
+deletes the collections that `SUITE_COLLECTIONS` in
+`tests/acceptance/conftest.py` lists. It fails before its first test when
+the cluster holds a collection that `SUITE_COLLECTIONS` does not list. A
+sandbox cluster refuses `hnsw`, `flat`, `dynamic` and the quantizer
+settings, so those cases fail there with the server's message.
+`/v1/meta` of the cluster must list `text2vec-weaviate`. When it does not,
+the tests that embed documents and the module check of `test_check.py`
+fail.
+
+Every API-level test runs. The target deselects the `infra` tests,
+because docker and kubectl reach only the local servers. The
+compression of the tenants by a trained quantizer is an expected failure,
+as on every server with `ASYNC_INDEXING`. When `WEAVIATE_URL` does not use
+`https` or its host has another suffix, every test fails before it starts.
+The failure text names the broken rule, for example `WEAVIATE_URL does not
+use https (the cloud target needs TLS)`. The target then exits non-zero.
+
+### Releases
 
 `.github/workflows/release.yml` runs when a tag that matches
 `v[0-9]+.[0-9]+.[0-9]+*` is pushed. The `build` job stops unless the tag
 points at a commit on `main` and the built wheel has the tag's version
-without the `v`. The `cloud` job installs that wheel and runs
-`tests/cloud`. The `publish` job uploads the wheel and the sdist to PyPI
-through trusted publishing. It uses no token.
+without the `v`. The `publish` job uploads the wheel and the sdist to PyPI
+through trusted publishing. It uses no token. The workflow runs no tests,
+because no Chroma Cloud account exists for a test job.
 
-A person with access to the GitHub repository and to PyPI sets up three
+Before the tag, the owner checks two runs of the commit to tag. The
+release notes record the result of each: passed, skipped with the
+reasons, failed.
+
+- `make acceptance-cloud` against a dedicated serverless Weaviate Cloud
+  cluster, from a laptop.
+- The full suite in CI: the `CI` workflow of that commit on `main`.
+
+A person with access to the GitHub repository and to PyPI sets up two
 things once:
-
-- The GitHub environment `cloud-tests` holds five secrets. The `cloud` job
-  passes each one to the suite as the variable in the last column.
-
-  | Secret | Meaning | Variable |
-  |---|---|---|
-  | `CHROMA_CLOUD_API_KEY` | API key for the Chroma Cloud database that holds `to-weaviate-ci` | `CHROMA_API_KEY` |
-  | `CHROMA_CLOUD_TENANT` | Chroma Cloud tenant of that database | `CHROMA_TENANT` |
-  | `CHROMA_CLOUD_DATABASE` | Name of that database | `CHROMA_DATABASE` |
-  | `WEAVIATE_CLOUD_URL` | URL of the Weaviate Cloud cluster that the job copies into | `WEAVIATE_URL` |
-  | `WEAVIATE_CLOUD_API_KEY` | API key of that cluster | `WEAVIATE_API_KEY` |
 
 - PyPI has a pending trusted publisher for the project `to-weaviate`:
   repository `weaviate/to-weaviate`, workflow `release.yml`, environment
   `pypi`.
-- Both environments, `cloud-tests` and `pypi`, allow deployments from tags
-  that match `v*`. GitHub rejects the `cloud` or `publish` job of a tag
-  that its environment does not allow.
-
-The Chroma collection is created once, by hand, before 2026-12-07, when
-Chroma Cloud stops accepting writes. Export `CHROMA_API_KEY`,
-`CHROMA_TENANT` and `CHROMA_DATABASE` with the values of the three Chroma
-secrets, then run the seed from the development environment:
-
-```bash
-.venv/bin/python tests/cloud/chroma/seed.py
-```
-
-It creates `to-weaviate-ci` with 2,000 records and prints
-`Created to-weaviate-ci with 2000 records.` It reads the environment, not
-`.env`. When the collection exists, it stops and changes nothing. It
-deletes nothing. When it stops after it created the collection, for
-example because an `add` call failed, the collection is incomplete. Delete
-`to-weaviate-ci` by hand in Chroma Cloud, then run the seed again.
+- The GitHub environment `pypi` allows deployments from tags that match
+  `v*`. GitHub rejects the `publish` job of a tag that the environment
+  does not allow.
 
 A release is a tag on a commit of `main`. The `build` job fails for a tag
 on any other commit:
@@ -447,5 +501,5 @@ git tag v0.1.0 origin/main
 git push origin v0.1.0
 ```
 
-When the three jobs pass, `uvx to-weaviate --version` prints
+When the two jobs pass, `uvx to-weaviate --version` prints
 `to-weaviate 0.1.0`.

@@ -42,8 +42,9 @@ commands of later milestones, and Weaviate versions other than 1.40.4.
 ## 2. Coverage matrix
 
 Columns: U the unit tests (`tests/unit`, fakes), A the acceptance tests
-(`tests/acceptance`, both acceptance levels), C the cloud suite
-(`tests/cloud`). Cells: `cov` covered, `part`
+(`tests/acceptance`, both acceptance levels), C the Chroma Cloud suite
+(`tests/cloud`). That suite is deleted, because no Chroma Cloud source
+exists; column C shows what it covered. Cells: `cov` covered, `part`
 partly, `no` not covered, with the tests that cover it. Prefixes: `cmd` =
 `test_cli_commands.py`, `json` = `test_cli_json.py`, `acc/x` =
 `tests/acceptance/chroma/test_x.py`. A row marked `deferred Fn` is judged in
@@ -160,8 +161,9 @@ Ranked by what a person loses when the risk is real.
 ## 4. Test cases to add
 
 Order: by risk, then cheapest first. Ids: `U-` unit, `A-` acceptance,
-`C-` cloud suite. Each case names its level: `unit`, `API` (acceptance
-API), `infra` (acceptance infra) or `cloud suite` (`tests/cloud`).
+`L-` local cloud run. Each case names its level: `unit`, `API`
+(acceptance API), `infra` (acceptance infra) or `local cloud run`
+(`make acceptance-cloud`).
 Acceptance estimates are local seconds; CI runs about 1.9 times slower;
 the acceptance additions have about 8 CI minutes (about 250 local
 seconds). The cases marked "optional" come last; stop before them when
@@ -625,38 +627,44 @@ text and propose the new one; small, last.
 
 ### Cloud
 
-**C-02 A second run against the cloud.** Level cloud suite, risk R1. Test change to
-`test_cloud::test_chroma_cloud_to_weaviate_cloud`: after `verify`, run
-`copy` again, `status`, and `verify --quick --sample 50`. Expected: exit 0
-each, 2000 objects, `status` done with copied 2000. About 20 s more on
-the release job.
+**L-01 Local Chroma to Weaviate Cloud, API level, run by hand before a
+release.** Level local cloud run, risks R1 to R4. Preconditions: the
+local test Chroma (`make chroma-up`), a dedicated serverless Weaviate
+Cloud cluster whose `/v1/meta` lists `text2vec-weaviate`, and
+`WEAVIATE_URL` and `WEAVIATE_API_KEY` of that cluster in the environment.
+Steps: `make acceptance-cloud`. It runs every API-level test of
+`tests/acceptance` against the cluster, with `ACCEPTANCE_TARGET=cloud`,
+`WEAVIATE_ASYNC_INDEXING=true` and `ACCEPTANCE_VECTORIZER=text2vec-weaviate`.
+Expected: the results of the CI run with `ASYNC_INDEXING`, without the
+`infra` tests, which the cloud run deselects. The release
+notes record the passed, skipped and failed tests, with the reasons. L-01
+replaces the deleted Chroma Cloud suite `tests/cloud` and its cases C-02
+and C-03, because no Chroma Cloud source exists.
 
-*Implemented: change to `tests/cloud/chroma/test_cloud.py::test_chroma_cloud_to_weaviate_cloud`. Coverage; run against the local servers only.*
-
-**C-03 Inspect the whole cloud database.** Level cloud suite, risk R4. `inspect
-chroma` without `--collection` in a second directory (no copy). Expected:
-exit 0, an entry for `to-weaviate-ci` among the entries, `source.tenant`
-equal to `CHROMA_TENANT`. Covers the listing against Chroma Cloud; the
-release job sets `CHROMA_TENANT`, so the case sends no identity request.
-Skips with the suite when the variables are missing.
-
-*Implemented: `tests/cloud/chroma/test_cloud.py::test_inspect_of_the_whole_database`, with `--sample-pages 1`. Coverage; run against the local servers only.*
+*Implemented: the `acceptance-cloud` target of the `Makefile`.*
 
 ## 5. What cannot be tested here
 
-- Chroma Cloud itself: its page cap (whether a request above 300 records
-  is refused or cut, which decides whether U-01 is a loss in practice),
-  its rate limits and `Retry-After` values, the scope of a database-scoped
-  key, the `identity` answer, and a SPANN collection's
-  `configuration_json`. The cloud suite runs once per release against one
-  2000-record collection. Manual check before a release: `tests/cloud`
-  with the release secrets exported; `inspect chroma` without
-  `--collection`; a copy of a SPANN collection, then `plan.yaml`'s
-  `source.embedding` and `distance` read.
-- A Weaviate Cloud sandbox: the `SCHEMA_HINT` says a free cluster accepts
-  only hfresh; the release cluster is not free, so the claim is unverified.
-  Manual check: `inspect --index hfresh --quantizer rq --quantizer-bits 1`,
-  `check`, `copy` against a sandbox.
+- Chroma Cloud: no Chroma Cloud account exists, so no test reads from it.
+  The unit tests cover the tool's side with fakes, and L-01 covers the
+  Weaviate Cloud side. These stay unverified:
+  - The read order of `get` with `offset` and `limit` on the distributed
+    server. The partitions, the resume and the shift detection depend on
+    insertion order.
+  - Quotas and the 429 behavior: the page cap (whether a request above 300
+    records is refused or cut, which decides whether U-01 is a loss in
+    practice), the rate limits and the `Retry-After` values.
+  - Collections with sparse vectors.
+  - The shapes of the stored embedding-function configuration, and a
+    SPANN collection's `configuration_json`.
+  - Chroma Cloud authentication, live: the API key, the scope of a
+    database-scoped key and the `identity` answer.
+- A Weaviate Cloud sandbox: the cloud run (L-01) uses a serverless
+  cluster. A sandbox refuses `hnsw`, `flat`, `dynamic` and the quantizer
+  settings, so those cases fail there with the server's message. No test
+  runs a copy that a sandbox accepts. Manual check of the `SCHEMA_HINT`
+  advice (hfresh): `inspect --index hfresh --quantizer rq
+  --quantizer-bits 1`, `check`, `copy` against a sandbox.
 - Other Weaviate versions: the rules of B8 bugs 1 to 3 and 8, the reserved
   suffixes and the sidecar shape are 1.40.4 behavior (older servers accept
   more, so `check` refuses plans they would take). `tests/acceptance/

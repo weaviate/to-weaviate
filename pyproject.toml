@@ -33,7 +33,8 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# tests/e2e.py holds the code that tests/acceptance and tests/cloud share.
+# tests/e2e.py holds the helpers and target rules of tests/acceptance, which
+# tests/unit also imports.
 pythonpath = ["tests"]
 addopts = ["--strict-markers"]
 markers = ["infra: restarts or deletes a server through docker or kubectl; runs only where the suite owns the servers"]

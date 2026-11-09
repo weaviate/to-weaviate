@@ -1,9 +1,8 @@
-"""Code that the acceptance suite and the cloud suite share.
+"""Helpers and target rules of the acceptance suite.
 
-Both suites run the installed to-weaviate command and read the target through
-the Weaviate client. Each suite decides which servers it accepts and which
-environment the command gets. The target rules of the acceptance suite are
-here, so that the unit tests can import them.
+The suite runs the installed to-weaviate command and reads the target through
+the Weaviate client. The target rules are here, not in the acceptance
+conftest, so that the unit tests can import them.
 """
 
 import json
@@ -488,11 +487,6 @@ def weaviate_config(name: str) -> CollectionConfig:
 def create_target_collection(kwargs: dict[str, Any]) -> None:
     """Create a target collection with the arguments of `collections.create`."""
     _weaviate().collections.create(**kwargs)
-
-
-def delete_target_collection(name: str) -> None:
-    """Delete the target collection `name` and no other. A missing one is no error."""
-    _weaviate().collections.delete(name)
 
 
 def weaviate_collection_names() -> list[str]:
