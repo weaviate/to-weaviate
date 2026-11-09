@@ -1,5 +1,5 @@
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -7,20 +7,26 @@ from typing import Any
 import pytest
 from fakes import (
     FakeFactories,
+    FakeInsertClient,
     FakeSchema,
     FakeSource,
     FakeWriter,
+    all_failed,
     cli_records,
     invoke,
     old_state_file,
 )
 from typer.testing import Result
 
+from to_weaviate.ids import to_uuid
 from to_weaviate.lock import Locked, exclusive_lock
 from to_weaviate.plan import load_plan, save_plan
 from to_weaviate.sources.base import Page, Partition, Record, SourceCollection
 from to_weaviate.sources.chroma.client import ChromaError
+from to_weaviate.sources.chroma.source import ChromaSource
+from to_weaviate.state import State
 from to_weaviate.target.schema import SchemaRejected
+from to_weaviate.target.writer import WeaviateWriter
 
 DIR = Path(".to-weaviate")
 OPENAI_SMALL = {
@@ -374,6 +380,177 @@ def test_second_copy_reads_only_the_records_added_since():
     assert len(fakes.writer.objects) == 11
     assert set(fakes.writer.writes_per_uuid.values()) == {1}
     assert json.loads(r.stdout)["collections"][0]["copied"] == 11
+
+
+def test_every_copy_reads_the_records_added_since_the_last_run():
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    assert invoke(fakes, "copy").exit_code == 0
+    fakes.source.records.extend(cli_records(15)[10:])
+    assert invoke(fakes, "copy").exit_code == 0
+    fakes.source.records.extend(cli_records(20)[15:])
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    row = json.loads(r.stdout)["collections"][0]
+    assert (row["copied"], row["total"], len(fakes.writer.objects)) == (20, 20, 20)
+    assert set(fakes.writer.writes_per_uuid.values()) == {1}
+
+
+def copied_and_total(fakes: FakeFactories) -> tuple[int, int]:
+    r = invoke(fakes, "status", "--json")
+    assert r.exit_code == 0, r.output
+    row = json.loads(r.stdout)["collections"][0]
+    return row["copied"], row["total"]
+
+
+def test_status_after_a_tail_shows_the_highest_source_count():
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    assert invoke(fakes, "copy").exit_code == 0
+    fakes.source.records.extend(cli_records(15)[10:])
+    assert invoke(fakes, "copy").exit_code == 0
+    assert copied_and_total(fakes) == (15, 15)
+    # Each run gives init_collection the count of inspect.json, 10.
+    assert invoke(fakes, "copy").exit_code == 0
+    assert copied_and_total(fakes) == (15, 15)
+
+
+REFUSED = "vector lengths don't match"
+BATCH_HINT = "Fix the cause and run to-weaviate copy again. It resumes at this page."
+
+
+def refusing(
+    records: int, fail: Callable[[int], Exception | None]
+) -> tuple[FakeFactories, FakeInsertClient]:
+    """Inspected fakes with a WeaviateWriter over a FakeInsertClient."""
+    client = FakeInsertClient(fail)
+    writer = WeaviateWriter(client, sleep=lambda s: None)  # type: ignore[arg-type]
+    source = FakeSource(cli_records(records))
+    return inspected(FakeFactories(source, writer=writer, store=client)), client
+
+
+def test_copy_stops_when_weaviate_refuses_every_object_of_a_batch(tmp_path):
+    fakes, client = refusing(10, lambda n: all_failed(f"{REFUSED}; key SENTINEL-K"))
+    r = invoke(
+        fakes, "copy", "--parallelism", "1", "--json", WEAVIATE_API_KEY="SENTINEL-K"
+    )
+    assert r.exit_code == 4
+    d = json.loads(r.stdout)
+    assert d["code"] == "target_unreachable" and d["hint"] == BATCH_HINT
+    assert d["message"] == (
+        f"Weaviate refused every object of a batch of 10 in Docs: {REFUSED}; key ***"
+    )
+    assert "SENTINEL-K" not in r.output
+    assert client.calls == 6
+    state = State(tmp_path / DIR / "state.sqlite")
+    try:
+        assert state.pending(FakeSource.REF) == [(Partition("0-10", "0", "10"), None)]
+        assert state.progress()[0].rejects == 0
+    finally:
+        state.close()
+    assert not (tmp_path / DIR / "rejects.jsonl").exists()
+
+
+def test_copy_retries_a_batch_that_weaviate_refused_once():
+    fakes, client = refusing(10, lambda n: all_failed(REFUSED) if n == 1 else None)
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert len(client.writes_per_uuid) == 10
+    assert json.loads(r.stdout)["collections"][0]["copied"] == 10
+
+
+def test_copy_after_a_refused_batch_copies_the_page():
+    fakes, client = refusing(10, lambda n: all_failed(REFUSED))
+    invoke(fakes, "copy", "--parallelism", "1")
+    client.fail = lambda n: None
+    calls = client.calls
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json")
+    row = json.loads(r.stdout)["collections"][0]
+    assert (client.calls - calls, row["copied"], row["rejects"]) == (1, 10, 0)
+    assert r.exit_code == 0, r.output
+
+
+class ChromaRows:
+    """The ChromaClient calls of a ChromaSource, over rows of one collection."""
+
+    COLLECTION = {"id": "chroma-docs", "name": "docs", "dimension": 2}
+    COLUMNS = {
+        "embeddings": "embedding",
+        "documents": "document",
+        "uris": "uri",
+        "metadatas": "metadata",
+    }
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = rows
+
+    def databases(self, tenant: str) -> list[str]:
+        return ["db"]
+
+    def collections(self, tenant: str, database: str) -> list[dict[str, Any]]:
+        return [self.COLLECTION]
+
+    def count(self, tenant: str, database: str, ref: str) -> int:
+        return len(self.rows)
+
+    def get(
+        self,
+        tenant: str,
+        database: str,
+        ref: str,
+        *,
+        limit: int,
+        offset: int,
+        include: list[str],
+        where: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        rows = self.rows[offset : offset + limit]
+        response: dict[str, Any] = {"ids": [row["id"] for row in rows]}
+        for name, key in self.COLUMNS.items():
+            response[name] = [row[key] for row in rows] if name in include else None
+        return response
+
+
+def test_copy_rejects_a_record_whose_embedding_holds_a_null():
+    rows = [
+        {
+            "id": f"id-{i}",
+            "embedding": [float(i), 1.0],
+            "document": f"doc {i}",
+            "uri": None,
+            "metadata": {"year": 2000 + i},
+        }
+        for i in range(10)
+    ]
+    rows[4]["embedding"] = [None, 1.0]
+    fakes = inspected(FakeFactories(ChromaSource(ChromaRows(rows), "t")))  # type: ignore[arg-type]
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 1, r.output
+    row = json.loads(r.stdout)["collections"][0]
+    assert (row["copied"], row["rejects"]) == (9, 1)
+    assert len(fakes.writer.objects) == 9
+    assert to_uuid("id-4") not in fakes.writer.objects
+    reject = json.loads((DIR / "rejects.jsonl").read_text())
+    assert (reject["source_id"], reject["reason"]) == (
+        "id-4",
+        "embedding holds a value that is not a number",
+    )
+    r = invoke(fakes, "verify", "--json")
+    assert r.exit_code == 1 and json.loads(r.stdout)["code"] == "verification_failed"
+    records = next(c for c in json.loads(r.stdout)["checks"] if c["name"] == "records")
+    assert records["detail"] == (
+        'sampled 10, compared 10, rejects skipped 0, differing 1: "id-4": '
+        "missing in the target"
+    )
+
+
+def test_copy_resumes_at_the_refused_page_and_writes_each_object_once():
+    fakes, client = refusing(250, lambda n: all_failed(REFUSED) if n > 1 else None)
+    assert invoke(fakes, "copy", "--parallelism", "1").exit_code == 4
+    assert len(client.writes_per_uuid) == 100
+    client.fail = lambda n: None
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json")
+    assert r.exit_code == 0, r.output
+    assert len(client.writes_per_uuid) == 250
+    assert set(client.writes_per_uuid.values()) == {1}
 
 
 # (first target name, first tenant, second target name, second tenant)

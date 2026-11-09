@@ -19,12 +19,26 @@ from to_weaviate.types import coerce
 MAX_INSERT_BYTES = 4 * 1024 * 1024
 OBJECT_OVERHEAD_BYTES = 64
 BYTES_PER_FLOAT = 4
+# Client 4.24.1 puts this text before the server's errors.
+ALL_FAILED_PREFIX = (
+    "Every object failed during insertion. Here is the set of all errors: "
+)
 
 
 @dataclass(frozen=True)
 class Reject:
     source_id: str
     reason: str
+
+
+class BatchRefused(Exception):
+    """Weaviate refused every object of a chunk of more than one object."""
+
+    def __init__(self, size: int, collection: str, reason: str) -> None:
+        super().__init__(
+            f"Weaviate refused every object of a batch of {size} in "
+            f"{collection}: {reason}"
+        )
 
 
 @dataclass(frozen=True)
@@ -96,6 +110,13 @@ def chunks(
         yield chunk
 
 
+def _refused_or_transient(exc: Exception) -> float | None:
+    """`transient`, which also accepts a refusal of every object of a batch."""
+    if isinstance(exc, WeaviateInsertManyAllFailedError):
+        return 0.0
+    return transient(exc)
+
+
 class Writer(Protocol):
     def write(
         self, entry: CollectionPlan, objects: list[TargetObject]
@@ -114,6 +135,12 @@ class WeaviateWriter:
         self._sleep = sleep
 
     def write(self, entry: CollectionPlan, objects: list[TargetObject]) -> list[Reject]:
+        """Insert `objects` and return the objects that Weaviate refused.
+
+        A chunk of more than one object that Weaviate refuses as a whole is
+        retried like a transient error. When the retries are used up, this
+        raises BatchRefused. A refused chunk of one object becomes one reject.
+        """
         collection = self._client.collections.get(entry.target.name)
         if entry.target.tenant:
             collection = collection.with_tenant(entry.target.tenant)
@@ -132,10 +159,13 @@ class WeaviateWriter:
             try:
                 result = with_retry(
                     lambda b=batch: collection.data.insert_many(b),  # type: ignore[misc]
-                    transient,
+                    _refused_or_transient if len(chunk) > 1 else transient,
                     sleep=self._sleep,
                 )
             except WeaviateInsertManyAllFailedError as exc:
+                if len(chunk) > 1:
+                    reason = str(exc).removeprefix(ALL_FAILED_PREFIX)
+                    raise BatchRefused(len(chunk), entry.target.name, reason) from exc
                 rejects.extend(
                     Reject(str(o.properties.get("source_id", o.uuid)), str(exc))
                     for o in chunk

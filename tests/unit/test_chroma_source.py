@@ -1,4 +1,5 @@
 import json
+import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -221,6 +222,14 @@ def test_read_null_metadata_becomes_empty(source, fake_client, inspected):
     fake_client.records[3]["metadata"] = None
     page = source.read(inspected, Partition("0-5", "0", "5"), None, False)
     assert page.records[3].metadata == {}
+
+
+def test_read_decodes_a_null_in_an_embedding_as_nan(source, fake_client, inspected):
+    fake_client.records[1]["vector"] = [None, 1.0]
+    page = source.read(inspected, Partition("0-3", "0", "3"), None, True)
+    first, second = page.records[0].vector, page.records[1].vector
+    assert first == [0.0, 1.0]
+    assert second is not None and math.isnan(second[0]) and second[1] == 1.0
 
 
 def test_read_without_vectors_gives_none(source, inspected):

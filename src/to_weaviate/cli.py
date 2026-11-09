@@ -113,7 +113,7 @@ from to_weaviate.target.schema import (
     SchemaRejected,
     WeaviateSchema,
 )
-from to_weaviate.target.writer import WeaviateWriter, Writer
+from to_weaviate.target.writer import BatchRefused, WeaviateWriter, Writer
 
 SourceFactory = Callable[[ChromaSettings], Source]
 WriterFactory = Callable[[WeaviateSettings, str | None], Writer]
@@ -160,6 +160,7 @@ STATE_HINT = (
     "To resume, set WEAVIATE_URL and the target name back. To copy to the new "
     "target, use another --dir."
 )
+BATCH_HINT = "Fix the cause and run to-weaviate copy again. It resumes at this page."
 
 
 @dataclass(frozen=True)
@@ -257,6 +258,8 @@ def _as_cli_error(exc: Exception) -> CliError:
             f"Weaviate refused to create the collection: {exc}",
             SCHEMA_HINT,
         )
+    if isinstance(exc, BatchRefused):
+        return CliError("target_unreachable", str(exc), BATCH_HINT)
     if isinstance(exc, PlanMismatch):
         return CliError(
             "plan_mismatch",
