@@ -1,0 +1,151 @@
+import json
+import time
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from typing import Any, Protocol
+
+import weaviate
+from weaviate.classes.config import ConsistencyLevel
+from weaviate.classes.data import DataObject
+from weaviate.exceptions import WeaviateInsertManyAllFailedError
+
+from to_weaviate.ids import to_uuid
+from to_weaviate.plan import CollectionPlan
+from to_weaviate.retry import with_retry
+from to_weaviate.sources.base import Record
+from to_weaviate.target.schema import transient
+from to_weaviate.types import coerce
+
+MAX_INSERT_BYTES = 4 * 1024 * 1024
+OBJECT_OVERHEAD_BYTES = 64
+BYTES_PER_FLOAT = 4
+
+
+@dataclass(frozen=True)
+class Reject:
+    source_id: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class TargetObject:
+    uuid: str
+    properties: dict[str, Any]
+    vectors: dict[str, list[float]]  # kept vectors only, keyed by vector name
+
+
+def _source_value(record: Record, key: str) -> Any:
+    if key == "#document":
+        return record.document
+    if key == "#id":
+        return record.id
+    if key == "#uri":
+        return record.uri
+    return record.metadata.get(key)
+
+
+def to_object(record: Record, entry: CollectionPlan) -> TargetObject | Reject:
+    target = entry.target
+    known = {p.source_key for p in target.properties}
+    known.update(d.source_key for d in target.dropped)
+    for key in record.metadata:
+        if key not in known:
+            return Reject(record.id, f"unknown metadata key {key}; run inspect again")
+    properties: dict[str, Any] = {}
+    for prop in target.properties:
+        value = _source_value(record, prop.source_key)
+        if value is None:
+            continue
+        if not prop.source_key.startswith("#"):
+            try:
+                value = coerce(value, prop.type)
+            except ValueError as exc:
+                return Reject(record.id, f"{prop.source_key}: {exc}")
+        properties[prop.name] = value
+    vectors: dict[str, list[float]] = {}
+    for vector in target.vectors:
+        if vector.mode == "keep":
+            if record.vector is None:
+                return Reject(record.id, "no vector")
+            vectors[vector.name] = record.vector
+        elif not record.document:
+            return Reject(record.id, "no document to embed")
+    return TargetObject(to_uuid(record.id), properties, vectors)
+
+
+def _estimate(obj: TargetObject) -> int:
+    size = len(json.dumps(obj.properties, ensure_ascii=False).encode("utf-8"))
+    size += BYTES_PER_FLOAT * sum(len(v) for v in obj.vectors.values())
+    return size + OBJECT_OVERHEAD_BYTES
+
+
+def chunks(
+    objects: list[TargetObject], max_bytes: int | None = None
+) -> Iterator[list[TargetObject]]:
+    limit = MAX_INSERT_BYTES if max_bytes is None else max_bytes
+    chunk: list[TargetObject] = []
+    total = 0
+    for obj in objects:
+        size = _estimate(obj)
+        if chunk and total + size > limit:
+            yield chunk
+            chunk, total = [], 0
+        chunk.append(obj)
+        total += size
+    if chunk:
+        yield chunk
+
+
+class Writer(Protocol):
+    def write(
+        self, entry: CollectionPlan, objects: list[TargetObject]
+    ) -> list[Reject]: ...
+
+
+class WeaviateWriter:
+    def __init__(
+        self,
+        client: weaviate.WeaviateClient,
+        consistency: str | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._client = client
+        self._consistency = consistency
+        self._sleep = sleep
+
+    def write(self, entry: CollectionPlan, objects: list[TargetObject]) -> list[Reject]:
+        collection = self._client.collections.get(entry.target.name)
+        if entry.target.tenant:
+            collection = collection.with_tenant(entry.target.tenant)
+        if self._consistency:
+            collection = collection.with_consistency_level(
+                ConsistencyLevel(self._consistency)
+            )
+        rejects: list[Reject] = []
+        for chunk in chunks(objects):
+            batch = [
+                DataObject(
+                    properties=o.properties, vector=o.vectors or None, uuid=o.uuid
+                )
+                for o in chunk
+            ]
+            try:
+                result = with_retry(
+                    lambda b=batch: collection.data.insert_many(b),  # type: ignore[misc]
+                    transient,
+                    sleep=self._sleep,
+                )
+            except WeaviateInsertManyAllFailedError as exc:
+                rejects.extend(
+                    Reject(str(o.properties.get("source_id", o.uuid)), str(exc))
+                    for o in chunk
+                )
+                continue
+            for index, error in result.errors.items():
+                obj = chunk[index]
+                rejects.append(
+                    Reject(
+                        str(obj.properties.get("source_id", obj.uuid)), error.message
+                    )
+                )
+        return rejects

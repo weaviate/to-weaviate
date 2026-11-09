@@ -1,0 +1,14 @@
+{
+  "id": "0c4d9d0e-3a52-4f0b-8f43-8b1b3e1f7a22",
+  "name": "cloud-docs",
+  "tenant": "t",
+  "database": "db",
+  "dimension": 384,
+  "metadata": null,
+  "configuration_json": {
+    "hnsw": null,
+    "spann": {"space": "ip", "search_nprobe": 64, "write_nprobe": 32, "ef_construction": 200,
+              "ef_search": 200, "max_neighbors": 64},
+    "embedding_function": {"type": "known", "name": "default", "config": {}}
+  }
+}

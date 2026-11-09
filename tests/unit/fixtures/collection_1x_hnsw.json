@@ -1,0 +1,15 @@
+{
+  "id": "5b2f1c1e-0f0a-4f5e-9a39-2f6f6d5d0a11",
+  "name": "docs",
+  "tenant": "t",
+  "database": "db",
+  "dimension": 1536,
+  "metadata": null,
+  "configuration_json": {
+    "hnsw": {"space": "cosine", "ef_construction": 100, "ef_search": 100, "max_neighbors": 16,
+             "resize_factor": 1.2, "sync_threshold": 1000},
+    "spann": null,
+    "embedding_function": {"type": "known", "name": "openai",
+                           "config": {"model_name": "text-embedding-3-small", "dimensions": 1536}}
+  }
+}

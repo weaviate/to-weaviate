@@ -1,0 +1,156 @@
+import time
+from collections.abc import Callable
+from typing import Any
+from urllib.parse import quote
+
+import httpx
+
+from to_weaviate.retry import with_retry
+from to_weaviate.settings import ChromaSettings
+
+CHROMA_MAX_PAGE = 300
+COLLECTIONS_PAGE = 1000
+RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+MAX_MESSAGE_CHARS = 500
+
+
+class ChromaError(Exception):
+    def __init__(
+        self, status: int, message: str, retry_after: float | None = None
+    ) -> None:
+        super().__init__(f"Chroma returned HTTP {status}: {message}")
+        self.status = status
+        self.message = message
+        self.retry_after = retry_after
+
+
+def _message(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        text = body.get("message") or body.get("error")
+        if isinstance(text, str) and text:
+            return text[:MAX_MESSAGE_CHARS]
+    return response.text[:MAX_MESSAGE_CHARS]
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    try:
+        return max(0.0, float(response.headers["Retry-After"]))
+    except (KeyError, ValueError):
+        return None
+
+
+def _transient(exc: Exception) -> float | None:
+    if isinstance(exc, httpx.TransportError):
+        return 0.0
+    if isinstance(exc, ChromaError) and exc.status in RETRY_STATUSES:
+        return exc.retry_after or 0.0
+    return None
+
+
+def _seg(value: str) -> str:
+    return quote(value, safe="")
+
+
+class ChromaClient:
+    def __init__(
+        self,
+        settings: ChromaSettings,
+        transport: httpx.BaseTransport | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        headers: dict[str, str] = {}
+        if settings.api_key is not None:
+            value = settings.api_key
+            if settings.token_header.lower() == "authorization":
+                value = f"Bearer {value}"
+            headers[settings.token_header] = value
+        self._http = httpx.Client(
+            base_url=settings.url.rstrip("/"),
+            headers=headers,
+            timeout=60,
+            transport=transport,
+        )
+        self._sleep = sleep
+
+    def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        def call() -> Any:
+            response = self._http.request(method, path, **kwargs)
+            if response.status_code >= 400:
+                raise ChromaError(
+                    response.status_code, _message(response), _retry_after(response)
+                )
+            return response.json()
+
+        return with_retry(call, _transient, sleep=self._sleep)
+
+    def _collection_path(self, tenant: str, database: str, collection_id: str) -> str:
+        return (
+            f"/api/v2/tenants/{_seg(tenant)}/databases/{_seg(database)}"
+            f"/collections/{_seg(collection_id)}"
+        )
+
+    def identity(self) -> dict[str, Any]:
+        result: dict[str, Any] = self._request("GET", "/api/v2/auth/identity")
+        return result
+
+    def databases(self, tenant: str) -> list[str]:
+        rows = self._request("GET", f"/api/v2/tenants/{_seg(tenant)}/databases")
+        return [row["name"] for row in rows]
+
+    def collections(self, tenant: str, database: str) -> list[dict[str, Any]]:
+        path = f"/api/v2/tenants/{_seg(tenant)}/databases/{_seg(database)}/collections"
+        found: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            page = self._request(
+                "GET", path, params={"limit": COLLECTIONS_PAGE, "offset": offset}
+            )
+            found.extend(page)
+            if len(page) < COLLECTIONS_PAGE:
+                return found
+            offset += COLLECTIONS_PAGE
+
+    def count(self, tenant: str, database: str, collection_id: str) -> int:
+        path = self._collection_path(tenant, database, collection_id) + "/count"
+        return int(self._request("GET", path))
+
+    def get(
+        self,
+        tenant: str,
+        database: str,
+        collection_id: str,
+        *,
+        limit: int,
+        offset: int,
+        include: list[str],
+        where: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if limit > CHROMA_MAX_PAGE:
+            raise ValueError(
+                f"limit {limit} exceeds the Chroma page maximum of {CHROMA_MAX_PAGE}"
+            )
+        body: dict[str, Any] = {"limit": limit, "offset": offset, "include": include}
+        if where is not None:
+            body["where"] = where
+        path = self._collection_path(tenant, database, collection_id) + "/get"
+        result: dict[str, Any] = self._request("POST", path, json=body)
+        return result
+
+    def query(
+        self,
+        tenant: str,
+        database: str,
+        collection_id: str,
+        *,
+        embedding: list[float],
+        n_results: int,
+    ) -> list[str]:
+        body = {"query_embeddings": [embedding], "n_results": n_results, "include": []}
+        path = self._collection_path(tenant, database, collection_id) + "/query"
+        result = self._request("POST", path, json=body)
+        ids: list[str] = result["ids"][0]
+        return ids

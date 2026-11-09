@@ -31,6 +31,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = ["ignore::authlib.deprecate.AuthlibDeprecationWarning"]
 
 [tool.ruff]
 target-version = "py310"
