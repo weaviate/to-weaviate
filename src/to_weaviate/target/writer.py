@@ -11,7 +11,7 @@ from weaviate.exceptions import WeaviateBaseError, WeaviateInsertManyAllFailedEr
 
 from to_weaviate.ids import to_uuid
 from to_weaviate.plan import CollectionPlan
-from to_weaviate.retry import with_retry
+from to_weaviate.retry import ATTEMPTS, backoff_delay, with_retry
 from to_weaviate.sources.base import Record
 from to_weaviate.target.schema import refused_for_size, transient
 from to_weaviate.types import coerce
@@ -31,13 +31,45 @@ class Reject:
     reason: str
 
 
-class BatchRefused(Exception):
-    """Weaviate refused every object of a chunk of more than one object."""
+# Parts of the per-object errors that Weaviate 1.40.4 gives while a node or a
+# shard is unavailable, seen during a rolling restart of a 3-node cluster. The
+# coordinator could not reach the replica, or the shard was not loaded yet.
+OUTAGE_TEXTS = (
+    "connection refused",
+    "connection reset",
+    "broken pipe",
+    "deadline exceeded",
+    "context canceled",
+    "resolve node name",
+    "no route to host",
+    "i/o timeout",
+    "unavailable",
+    "not ready",
+)
 
-    def __init__(self, size: int, collection: str, reason: str) -> None:
+
+def node_outage(message: str) -> bool:
+    """Whether a per-object error says that a node or a shard was unavailable."""
+    return any(text in message for text in OUTAGE_TEXTS)
+
+
+class BatchRefused(Exception):
+    """Weaviate refused objects of a chunk on every attempt.
+
+    `refused` is the number of objects refused on the last attempt, or None
+    when Weaviate refused the chunk as a whole.
+    """
+
+    def __init__(
+        self, size: int, collection: str, reason: str, refused: int | None = None
+    ) -> None:
+        what = (
+            "every object"
+            if refused is None
+            else f"{refused} object{'' if refused == 1 else 's'}"
+        )
         super().__init__(
-            f"Weaviate refused every object of a batch of {size} in "
-            f"{collection}: {reason}"
+            f"Weaviate refused {what} of a batch of {size} in {collection}: {reason}"
         )
 
 
@@ -128,7 +160,12 @@ def _refused_or_transient(exc: Exception) -> float | None:
 
 
 def _transient_unless_too_large(exc: Exception) -> float | None:
-    """`transient`, except for a message that gRPC refuses for its size."""
+    """`transient`, except for a message that gRPC refuses for its size.
+
+    A refusal of the one object of a chunk is retried only for a node outage.
+    """
+    if isinstance(exc, WeaviateInsertManyAllFailedError):
+        return 0.0 if node_outage(str(exc)) else None
     return None if refused_for_size(exc) else transient(exc)
 
 
@@ -157,9 +194,11 @@ class WeaviateWriter:
         """Insert `objects` and return the objects that Weaviate refused.
 
         A chunk of more than one object that Weaviate refuses as a whole is
-        retried like a transient error. When the retries are used up, this
-        raises BatchRefused. A refused chunk of one object becomes one reject,
-        and so does a chunk of one object that gRPC refuses for its size.
+        retried like a transient error. An object that Weaviate refuses with
+        an error of a node outage is sent again, with the others of its chunk
+        that it refused so, after a delay. When the retries are used up, this
+        raises BatchRefused. An object refused for anything else is a reject,
+        and so is a chunk of one object that gRPC refuses for its size.
         """
         collection = self._client.collections.get(entry.target.name)
         if entry.target.tenant:
@@ -170,13 +209,22 @@ class WeaviateWriter:
             )
         rejects: list[Reject] = []
         for chunk in chunks(objects):
+            rejects.extend(self._write_chunk(collection, entry.target.name, chunk))
+        return rejects
+
+    def _write_chunk(
+        self, collection: Any, name: str, chunk: list[TargetObject]
+    ) -> list[Reject]:
+        rejects: list[Reject] = []
+        pending = chunk
+        for attempt in range(ATTEMPTS):
             batch = [
                 DataObject(
                     properties=o.properties, vector=o.vectors or None, uuid=o.uuid
                 )
-                for o in chunk
+                for o in pending
             ]
-            single = len(chunk) == 1
+            single = len(pending) == 1
             try:
                 result = with_retry(
                     lambda b=batch: collection.data.insert_many(b),  # type: ignore[misc]
@@ -184,16 +232,29 @@ class WeaviateWriter:
                     sleep=self._sleep,
                 )
             except WeaviateInsertManyAllFailedError as exc:
-                if not single:
-                    reason = str(exc).removeprefix(ALL_FAILED_PREFIX)
-                    raise BatchRefused(len(chunk), entry.target.name, reason) from exc
-                rejects.append(Reject(_source_id(chunk[0]), str(exc)))
-                continue
+                reason = str(exc).removeprefix(ALL_FAILED_PREFIX)
+                if single and not node_outage(reason):
+                    rejects.append(Reject(_source_id(pending[0]), str(exc)))
+                    return rejects
+                refused = None if len(pending) == len(chunk) else len(pending)
+                raise BatchRefused(len(chunk), name, reason, refused) from exc
             except WeaviateBaseError as exc:
                 if not (single and refused_for_size(exc)):
                     raise
-                rejects.append(Reject(_source_id(chunk[0]), exc.message))
-                continue
+                rejects.append(Reject(_source_id(pending[0]), exc.message))
+                return rejects
+            again: list[TargetObject] = []
+            reason = ""
             for index, error in result.errors.items():
-                rejects.append(Reject(_source_id(chunk[index]), error.message))
-        return rejects
+                if node_outage(error.message):
+                    again.append(pending[index])
+                    reason = reason or error.message
+                else:
+                    rejects.append(Reject(_source_id(pending[index]), error.message))
+            if not again:
+                return rejects
+            if attempt == ATTEMPTS - 1:
+                raise BatchRefused(len(chunk), name, reason, len(again))
+            self._sleep(backoff_delay(attempt))
+            pending = again
+        raise AssertionError("ATTEMPTS must be at least 1")
