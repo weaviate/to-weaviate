@@ -11,6 +11,7 @@ from conftest import (
     async_indexing,
     compression_wait,
     copy_and_verify,
+    nodes,
     read_plan,
     run,
     weaviate_compressed,
@@ -117,17 +118,26 @@ UNSUPPORTED = {
         "quantizer": {"type": "pq", "segments": 5, "training_limit": 100},
     },
 }
+# docs-rq has 300 records, and a collection has one shard per node, so a
+# shard of a 3-node cluster holds about 100 of them (88, 120 and 92 in one
+# run). 100 // nodes() is below the records of every shard.
+TRAINING_LIMIT = 100 // nodes()
 # Quantizers that the server trains on the copied vectors. copy enables them
-# again after the pages; a server with ASYNC_INDEXING trains them once the
-# shard holds training_limit vectors, which docs-rq reaches.
+# again after the pages; a server with ASYNC_INDEXING trains them on a shard
+# once the shard holds training_limit vectors.
 TRAINED = {
-    "sq": {"type": "sq", "training_limit": 100},
-    "pq": {"type": "pq", "segments": 8, "centroids": 16, "training_limit": 100},
+    "sq": {"type": "sq", "training_limit": TRAINING_LIMIT},
+    "pq": {
+        "type": "pq",
+        "segments": 8,
+        "centroids": 16,
+        "training_limit": TRAINING_LIMIT,
+    },
     "rq-centering": {
         "type": "rq",
         "bits": 4,
         "centering": True,
-        "training_limit": 100,
+        "training_limit": TRAINING_LIMIT,
     },
 }
 COMPRESSION_WAIT = compression_wait()
@@ -202,8 +212,10 @@ def test_quantizer_settings_reach_the_server(docs_rq_inspection, tmp_path, quant
     assert found.vector_index_type() == "hnsw"
     _assert_quantizer(found.quantizer, quantizer)
     if quantizer["type"] in COMPRESS_AT_ONCE:
-        expected = COMPRESS_AT_ONCE[quantizer["type"]]
-        assert weaviate_compressed("Docs_rq") == [expected]
+        # {True}: every shard is compressed. {False}: no shard is.
+        expected = {COMPRESS_AT_ONCE[quantizer["type"]]}
+        compressed = weaviate_compressed("Docs_rq")
+        assert set(compressed) == expected, compressed
 
 
 def _expect_dynamic_outcome(r: Result) -> None:
@@ -287,6 +299,8 @@ def test_trained_quantizer_compresses_the_vectors(
     _plan_with_index(docs_rq_inspection, tmp_path, index)
     copy_and_verify(tmp_path)
     deadline = time.monotonic() + COMPRESSION_WAIT
-    while weaviate_compressed("Docs_rq") != [True] and time.monotonic() < deadline:
+    # Every shard is compressed.
+    while set(weaviate_compressed("Docs_rq")) != {True} and time.monotonic() < deadline:
         time.sleep(0.5)
-    assert weaviate_compressed("Docs_rq") == [True]
+    compressed = weaviate_compressed("Docs_rq")
+    assert set(compressed) == {True}, compressed

@@ -625,6 +625,67 @@ text and propose the new one; small, last.
 
 *Implemented: `tests/unit/test_cli_chroma.py::test_a_403_on_the_database_list_names_the_database_settings`, `::test_a_source_collection_that_is_gone_names_inspect_force`. Found the bug; both hints now name the fix (ruling R57).*
 
+### Infra
+
+These cases carry the marker `infra`: they need servers that the suite
+owns. A-20 to A-22 need the `cluster` leg of CI: 3 Weaviate nodes,
+`REPLICATION_MINIMUM_FACTOR=3` and `ACCEPTANCE_NODES=3`. They skip when
+`ACCEPTANCE_NODES` is below 3, so they do not run locally. A-20 and A-22
+delete a pod. A-23 stops the compose Chroma. After each pod deletion the case waits until
+`weaviate-1` is replaced, then for `kubectl rollout status sts/weaviate -n
+weaviate --timeout=60s`, then until a client connects through the
+forwards, before the next command. Each fault case fails when the command
+ended before the fault.
+
+**A-20 A Weaviate pod deleted during `copy`.** Level infra, risk R1.
+Parametrized: `--consistency QUORUM` and `ALL`. Steps: `inspect chroma
+--collection resume --vectors both` with the suite's vectorizer, so the
+copy of 8,000 records still runs after 3 s; `copy --consistency <level>`;
+3 s in, `kubectl delete pod weaviate-1 -n weaviate --wait=false`; `copy
+--consistency <level>` again; `verify`. Expected: the first `copy` exits
+0 with `copied 8000, rejects 0, done`; `Resume` has replication factor 3;
+the second `copy` exits 0 and writes no page (a `collection_finished`
+event and no `progress` event in `events.jsonl`); 8,000 objects; the full
+`verify` exits 0 with the `count`, `ids` and `records` checks. With
+QUORUM, each object still gets two acks while one of the three replicas
+is gone, so the QUORUM case may see no refused object. With ALL, a write
+needs all three replicas. So the ALL case is the one that reaches the
+re-send of refused objects, which PR 25 extended to a batch refused in
+part. The tool writes no event for a re-send. The CI run shows that both
+cases pass, not which path ran.
+
+*Implemented: `tests/acceptance/chroma/test_cluster.py::test_a_pod_deleted_during_copy_leaves_no_reject`. Coverage.*
+
+**A-21 Each consistency level on 3 replicas.** Level infra, risks R1 and
+R3. Parametrized: `--consistency ONE`, `QUORUM` and `ALL`. Steps: `inspect
+chroma --collection resume`; `copy --consistency <level>` into a new
+`Resume`; `verify`. Expected: `copy` exits 0; `Resume` has replication
+factor 3; 8,000 objects; `verify` exits 0.
+
+*Implemented: `tests/acceptance/chroma/test_cluster.py::test_copy_with_a_consistency_level_on_three_replicas`. Coverage.*
+
+**A-22 A Weaviate pod deleted during `verify`.** Level infra, risk R1.
+Steps: `inspect chroma --collection bulk --sample-pages 5`; `copy
+--parallelism 8`; `verify`; 3 s in, `kubectl delete pod weaviate-1 -n
+weaviate --wait=false`. A full `verify` of 50,000 records took 4.96 s and
+4.15 s on one local node, so it still runs at 3 s there. Expected:
+`verify` exits 0 with the `count`, `ids` and `records` checks passed.
+
+*Implemented: `tests/acceptance/chroma/test_cluster.py::test_verify_passes_while_a_pod_is_deleted`. Coverage.*
+
+**A-23 Chroma stopped and started during `copy`.** Level infra, risk R1,
+30 s. Steps: `inspect chroma --collection resume --vectors both` with the
+suite's vectorizer; `copy`; 2 s in, `docker compose -f
+tests/acceptance/chroma/docker-compose.yml stop`, 3 s of wait, then
+`docker compose ... start`; the case waits until Chroma answers with the
+8,000 records of `resume`; `verify`. Expected: `copy` exits 0 with
+`copied 8000, rejects 0, done`; 8,000 objects; `verify` exits 0. Runs on
+both CI legs and locally. Locally Chroma answered no request for about
+3.7 s. The tool writes no event for a source retry, so the case cannot
+show that one ran.
+
+*Implemented: `tests/acceptance/chroma/test_chroma_restart.py::test_a_chroma_restart_during_copy_leaves_no_reject`. Coverage.*
+
 ### Cloud
 
 **L-01 Local Chroma to Weaviate Cloud, API level, run by hand before a
@@ -669,18 +730,22 @@ and C-03, because no Chroma Cloud source exists.
   suffixes and the sidecar shape are 1.40.4 behavior (older servers accept
   more, so `check` refuses plans they would take). `tests/acceptance/
   weaviate-version` pins the CI version; a version bump reruns the suite.
-- `ASYNC_INDEXING=true`: the dynamic index (strict xfail) and the quantizer
-  update being a no-op. Manual check on such a server: `acc/vector_settings`
-  with the xfail removed.
+- A server without `ASYNC_INDEXING`: both CI legs run with it, as every
+  Weaviate Cloud instance does. Without it, the update of a trained
+  quantizer after the pages (R50) compresses the vectors at once, and
+  Weaviate refuses a `dynamic` index. Unit tests cover the tool's side:
+  `cmd::test_copy_enables_a_quantizer_that_needs_training_after_the_pages`,
+  `cmd::test_a_refused_quantizer_update_stops_copy_and_resumes_without_pages`
+  and `cmd::test_check_warns_that_a_dynamic_index_needs_async_indexing`.
+  The acceptance suite runs against such a server locally:
+  `ASYNC=0 make weaviate-up`, then
+  `WEAVIATE_ASYNC_INDEXING=false make acceptance`.
 - RBAC with a key that reads but cannot write: the CI action creates
   `admin-key` only. U-04 covers the error path with fakes. A live check
   needs `auth-config` in `ci.yml` (the local-k8s `rbac.yaml` example adds
   `viewer-key`) and the local container recreated, which this batch does
   not do. Manual check before a release: assign the `viewer` role to a
   second key, run `check` (exit 0) and `copy` (exit 3, nothing created).
-- Multi-node consistency: `--consistency` on one node proves only that the
-  option reaches the client. Manual check: a 3-node cluster with
-  replication factor 3 and `--consistency ALL`.
 - Faults that need a proxy: a connection reset in the middle of a response
   body, a slow server that trips the 60 s Chroma timeout or the client's
   timeouts, a server that answers after a partial write. Unit cases U-02

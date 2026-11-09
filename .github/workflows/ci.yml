@@ -37,21 +37,27 @@ jobs:
       - run: pytest tests/unit
 
   acceptance:
-    name: acceptance (ASYNC_INDEXING=${{ matrix.async_indexing }})
+    name: acceptance (${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        async_indexing: ["false", "true"]
+        # replication is the REPLICATION_MINIMUM_FACTOR of the leg.
+        include:
+          - {name: single, replicas: 1, workers: 1, replication: "1"}
+          - {name: cluster, replicas: 3, workers: 3, replication: "3"}
     env:
       WEAVIATE_URL: http://localhost:8099
       WEAVIATE_GRPC_URL: http://localhost:50099
       WEAVIATE_API_KEY: admin-key
       CHROMA_URL: http://localhost:8001
       TO_WEAVIATE_REQUIRE_ACCEPTANCE: "1"
-      # Read by the tests whose outcome depends on the server's ASYNC_INDEXING.
-      WEAVIATE_ASYNC_INDEXING: ${{ matrix.async_indexing }}
+      # Every Weaviate Cloud instance runs with ASYNC_INDEXING, so both legs
+      # do. Read by the tests whose outcome depends on it.
+      WEAVIATE_ASYNC_INDEXING: "true"
+      # The cases of test_cluster.py run when it is at least 3.
+      ACCEPTANCE_NODES: ${{ matrix.replicas }}
     steps:
       - uses: actions/checkout@v4
       - run: echo "WEAVIATE_VERSION=$(cat tests/acceptance/weaviate-version)" >> "$GITHUB_ENV"
@@ -60,17 +66,26 @@ jobs:
       - uses: weaviate/weaviate-local-k8s@v2
         with:
           weaviate-version: ${{ env.WEAVIATE_VERSION }}
-          workers: 1
-          replicas: 1
+          workers: ${{ matrix.workers }}
+          replicas: ${{ matrix.replicas }}
           weaviate-port: 8099
           weaviate-grpc-port: 50099
           rbac: true
           modules: text2vec-transformers
           expose-pods: false
+          # The chart passes each env entry to the Weaviate pods.
           values-override: |
             env:
-              ASYNC_INDEXING: "${{ matrix.async_indexing }}"
+              ASYNC_INDEXING: "true"
+              REPLICATION_MINIMUM_FACTOR: "${{ matrix.replication }}"
+      # The kubectl-relay forwards of the action can stop forwarding gRPC
+      # after the SIGKILL resume test; the script replaces them.
+      - run: sh tests/acceptance/port-forward.sh
       - run: docker compose -f tests/acceptance/chroma/docker-compose.yml up -d --wait
       - uses: actions/setup-python@v5
         with: {python-version: "3.13"}
       - run: pip install -e ".[test]" && pytest tests/acceptance -v
+      # The logs have a line for each start and exit of a forward, for a
+      # test that failed with exit 4.
+      - if: failure()
+        run: tail -n 200 /tmp/port-forward-http.log /tmp/port-forward-grpc.log
