@@ -579,7 +579,7 @@ def compaction_properties(
     state_after: dict[str, Any],
     times: dict[str, float],
 ) -> list[tuple[str, object]]:
-    """The test properties that A-25 records about a copy during compaction.
+    """The test properties that test_copy_during_compaction records.
 
     `pages_before` and `pages_after` hold the ids of the source pages read
     right before and right after the copy, by offset; offset 0 is one of

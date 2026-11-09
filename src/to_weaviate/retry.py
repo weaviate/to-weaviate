@@ -23,7 +23,8 @@ def with_retry(
 
     There are 7 attempts and 6 delays. Without a `minimum`, a full retry waits
     between 15.75 s and 31.5 s, so a restart of a source or a target that
-    lasts a few seconds does not use up the attempts (acceptance case A-23).
+    lasts a few seconds does not use up the attempts (see
+    test_chroma_restart.py).
     A `minimum` from a Retry-After header can raise each delay up to 30 s.
     """
     for attempt in range(attempts):
@@ -43,7 +44,8 @@ def backoff_delay(attempt: int, minimum: float = 0.0) -> float:
     Random between half of `backoff` and `backoff`, where `backoff` is
     0.5 * 2**attempt seconds capped at MAX_DELAY_SECONDS; at least `minimum`
     and at most MAX_DELAY_SECONDS. The floor of half the backoff keeps a run of
-    short delays from giving up inside an outage of a few seconds (A-23).
+    short delays from giving up inside an outage of a few seconds (see
+    test_chroma_restart.py).
     """
     backoff: float = min(MAX_DELAY_SECONDS, 0.5 * 2**attempt)
     return min(
