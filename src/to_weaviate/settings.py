@@ -84,6 +84,28 @@ def without_userinfo(url: str) -> str:
     return urlunsplit(parts._replace(netloc=netloc))[len(prefix) :]
 
 
+def normalized_host(url: str, default_scheme: str = "http") -> str:
+    """The `host:port` of `url`, equal for two ways to write one server.
+
+    The host is in lower case, without userinfo and without a trailing dot. An
+    IPv6 host is in brackets. The path, query and fragment are dropped. A URL
+    without a port gets 443 for https and 80 for any other scheme, as
+    `target.connect` does. A URL without a scheme gets `default_scheme`. For
+    WEAVIATE_URL that is http when WEAVIATE_GRPC_URL is set, because `connect`
+    adds http://, and https when it is not, because `connect` then connects
+    to Weaviate Cloud over https on port 443.
+
+    Raises ValueError when `url` cannot be split or its port is not a number.
+    """
+    parts, _ = _split(url)
+    scheme = parts.scheme or default_scheme
+    host = (parts.hostname or "").removesuffix(".")
+    if ":" in host:
+        host = f"[{host}]"
+    port = parts.port or (443 if scheme == "https" else 80)
+    return f"{host}:{port}"
+
+
 def url_passwords(url: str) -> list[str]:
     """The password of `url`, as written and percent-decoded. Never raises."""
     password: str | None

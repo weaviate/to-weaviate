@@ -36,6 +36,12 @@ CREATE TABLE IF NOT EXISTS hashes (
     hash BLOB NOT NULL,
     PRIMARY KEY (ref, source_id)
 );
+CREATE TABLE IF NOT EXISTS targets (
+    ref TEXT PRIMARY KEY,
+    host TEXT NOT NULL,
+    name TEXT NOT NULL,
+    tenant TEXT
+);
 """
 
 
@@ -48,10 +54,25 @@ class CollectionProgress:
     done: bool
 
 
+@dataclass(frozen=True)
+class Target:
+    """The place a copy writes to.
+
+    `host` comes from `settings.normalized_host`. `name` is the collection
+    name that Weaviate stores.
+    """
+
+    host: str
+    name: str
+    tenant: str | None
+
+
 class State:
     """Copy progress in sqlite. Every method commits before it returns.
 
-    Collections and partitions are listed in insertion (rowid) order.
+    Collections and partitions are listed in insertion (rowid) order. A file
+    written before the `targets` table existed gets the table when it is
+    opened, with no target for any ref.
     """
 
     def __init__(self, path: Path) -> None:
@@ -155,6 +176,33 @@ class State:
             CollectionProgress(ref, total, copied, rejects, unfinished == 0)
             for ref, total, copied, rejects, unfinished in rows
         ]
+
+    def has_progress(self, ref: str) -> bool:
+        """True when a record of `ref` was copied or a partition of it finished."""
+        with self._lock:
+            (found,) = self._db.execute(
+                "SELECT EXISTS (SELECT 1 FROM partitions WHERE ref = ? AND "
+                "(finished = 1 OR copied > 0))",
+                (ref,),
+            ).fetchone()
+        return bool(found)
+
+    def targets(self) -> dict[str, Target]:
+        """The stored target of each ref that has one."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT ref, host, name, tenant FROM targets ORDER BY rowid"
+            ).fetchall()
+        return {ref: Target(host, name, tenant) for ref, host, name, tenant in rows}
+
+    def set_target(self, ref: str, target: Target) -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT INTO targets (ref, host, name, tenant) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(ref) DO UPDATE SET host = excluded.host, "
+                "name = excluded.name, tenant = excluded.tenant",
+                (ref, target.host, target.name, target.tenant),
+            )
 
     def reset(self, ref: str) -> None:
         with self._lock, self._db:
