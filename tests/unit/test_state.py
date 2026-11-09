@@ -111,6 +111,20 @@ def test_add_partition_existing_key_changes_nothing(tmp_path):
     assert state.progress()[0].copied == 4
 
 
+def test_partitions_lists_finished_and_pending_in_insertion_order(tmp_path):
+    state = make_state(tmp_path)
+    state.init_collection(REF, [Partition("b", "5", "9"), Partition("a", "0", "5")], 9)
+    state.init_collection("other", [Partition("x", "0", "1")], 1)
+    state.advance(REF, "b", None, 4)
+    state.add_partition(REF, Partition("0-", "9", None))
+    assert state.partitions(REF) == [
+        Partition("b", "5", "9"),
+        Partition("a", "0", "5"),
+        Partition("0-", "9", None),
+    ]
+    assert state.partitions("missing") == []
+
+
 def test_add_rejects_twice_counts_once(tmp_path):
     state = make_state(tmp_path)
     state.init_collection(REF, parts("a"), 10)
