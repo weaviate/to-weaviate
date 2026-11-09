@@ -5,6 +5,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -32,3 +35,32 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[test]"
       - run: pytest tests/unit
+
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      WEAVIATE_URL: http://localhost:8099
+      WEAVIATE_GRPC_URL: http://localhost:50099
+      WEAVIATE_API_KEY: admin-key
+      CHROMA_URL: http://localhost:8001
+      TO_WEAVIATE_REQUIRE_ACCEPTANCE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "WEAVIATE_VERSION=$(cat tests/acceptance/weaviate-version)" >> "$GITHUB_ENV"
+      # The action runs its own checkout, so it comes before any step that
+      # writes to the workspace.
+      - uses: weaviate/weaviate-local-k8s@v2
+        with:
+          weaviate-version: ${{ env.WEAVIATE_VERSION }}
+          workers: 1
+          replicas: 1
+          weaviate-port: 8099
+          weaviate-grpc-port: 50099
+          rbac: true
+          modules: text2vec-transformers
+          expose-pods: false
+      - run: docker compose -f tests/acceptance/chroma/docker-compose.yml up -d --wait
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13"}
+      - run: pip install -e ".[test]" && pytest tests/acceptance -v
