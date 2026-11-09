@@ -283,6 +283,22 @@ def test_secret_in_a_progress_line_is_redacted(mode):
         assert line in progress, progress
 
 
+def test_secret_in_the_source_changed_warning_is_redacted():
+    fakes = key_named_fakes()
+    source = fakes.source
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    assert invoke(fakes, "copy", "--parallelism", "1").exit_code == 0
+    # id-2, the last record read, is deleted; id-3 and id-4 are added.
+    source.records = source.records[:2] + cli_records(5)[3:]
+    r = invoke(fakes, "copy", "--json", WEAVIATE_API_KEY=KEY_AS_NAME)
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["collections"][0]["reread_from"] == 0
+    assert KEY_AS_NAME not in r.stdout and KEY_AS_NAME not in r.stderr
+    assert (
+        "Warning: ***: the source changed since the last run; re-reading from the start"
+    ) in r.stderr.splitlines()
+
+
 def test_secret_in_a_progress_line_of_verify_is_redacted():
     fakes = key_named_fakes()
     assert invoke(fakes, "inspect", "chroma").exit_code == 0

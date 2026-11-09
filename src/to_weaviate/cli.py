@@ -438,7 +438,7 @@ _FALLBACK_REPORT = _Report(
     "",
 )
 
-# The secret values of the running command, read by its first `_info` line.
+# The secret values of the running command; see `_command_secrets`.
 _COMMAND_SECRETS: ContextVar[list[str] | None] = ContextVar(
     "command_secrets", default=None
 )
@@ -489,26 +489,31 @@ def _handled(json_output: bool) -> Iterator[None]:
         _COMMAND_SECRETS.reset(token)
 
 
-def _emit_success(json_output: bool, document: dict[str, Any], text: str) -> None:
-    """`emit`, redacting the secret values that `_report` redacts from an error."""
-    secrets = secret_values(_handler_env())
-    emit(json_output, redact_strings(document, secrets), redact(text, secrets))
+def _command_secrets() -> list[str]:
+    """The secret values that `_report` redacts from an error, for this command.
 
-
-def _info(json_output: bool, line: str) -> None:
-    """`info`, redacting the secret values that `_report` redacts from an error.
-
-    The secret set is read on the first line of a command and kept until the
-    command ends: `_handled` clears it when a command starts. That is safe
-    because the environment and .env do not change while a command runs. A
-    cache per process would not be: one process can run several commands
-    with other secrets, as the tests do through CliRunner.
+    The set is read on first use and kept until the command ends: `_handled`
+    clears it when a command starts. That is safe because the environment and
+    .env do not change while a command runs. A cache per process would not
+    be: one process can run several commands with other secrets, as the tests
+    do through CliRunner.
     """
     secrets = _COMMAND_SECRETS.get()
     if secrets is None:
         secrets = secret_values(_handler_env())
         _COMMAND_SECRETS.set(secrets)
-    info(json_output, redact(line, secrets))
+    return secrets
+
+
+def _emit_success(json_output: bool, document: dict[str, Any], text: str) -> None:
+    """`emit`, redacting the `_command_secrets`."""
+    secrets = _command_secrets()
+    emit(json_output, redact_strings(document, secrets), redact(text, secrets))
+
+
+def _info(json_output: bool, line: str) -> None:
+    """`info`, redacting the `_command_secrets`."""
+    info(json_output, redact(line, _command_secrets()))
 
 
 def _yaml_error_text(exc: yaml.YAMLError) -> str:
@@ -1030,10 +1035,14 @@ def _copy_lock(directory: Path) -> Iterator[None]:
 
 
 def _warning(name: str) -> Callable[[str], None]:
-    """A function that prints a warning about the collection `name` on stderr."""
+    """A function that prints a warning about the collection `name` on stderr.
+
+    The printed line is redacted of the `_command_secrets`.
+    """
 
     def warn(line: str) -> None:
-        print(f"Warning: {name}: {line}", file=sys.stderr, flush=True)
+        text = redact(f"Warning: {name}: {line}", _command_secrets())
+        print(text, file=sys.stderr, flush=True)
 
     return warn
 
