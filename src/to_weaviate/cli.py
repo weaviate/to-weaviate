@@ -1159,6 +1159,8 @@ def _copy(
             fields=document,
             text=text,
         )
+    document["warnings"] = _findings_document([], warnings)["warnings"]
+    text = "\n".join([*_findings_text([], warnings), text])
     _emit_success(json_output, {"status": "success", **document}, text)
 
 

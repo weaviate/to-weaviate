@@ -1207,6 +1207,22 @@ def test_an_entry_is_done_again_when_its_plan_stops_needing_the_update(tmp_path)
     assert status["done"] is True
 
 
+@pytest.mark.parametrize("cmd", ["check", "copy"])
+def test_check_and_copy_show_the_quantizer_training_warning(cmd):
+    source = FakeSource(cli_records(10))
+    fakes = inspected(FakeFactories(source), "--index", "hnsw", "--quantizer", "sq")
+    js = invoke(fakes, cmd, "--json")
+    assert js.exit_code == 0, js.output
+    warnings = json.loads(js.stdout)["warnings"]
+    assert [(w["code"], w["collection"]) for w in warnings] == [
+        ("quantizer_training", "Docs")
+    ]
+    assert "the source has 10 records" in warnings[0]["message"]
+    text = invoke(fakes, cmd)
+    assert text.exit_code == 0, text.output
+    assert "warning quantizer_training Docs: vector default:" in text.stdout
+
+
 def test_copy_requires_provider_key():
     fakes = inspected(
         FakeFactories(FakeSource(cli_records(10))),
