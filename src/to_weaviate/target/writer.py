@@ -280,7 +280,9 @@ class WeaviateWriter:
                 reason = str(exc).removeprefix(ALL_FAILED_PREFIX)
                 refused_key = provider_refusal(reason)
                 if refused_key is not None:
-                    raise refused_key from exc
+                    # Not chained: the debug traceback would print the
+                    # provider's text, which can echo the key.
+                    raise refused_key from None
                 if single and not node_outage(reason):
                     rejects.append(Reject(_source_id(pending[0]), str(exc)))
                     return rejects

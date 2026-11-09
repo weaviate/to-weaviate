@@ -2262,6 +2262,14 @@ def test_a_provider_that_refuses_the_key_is_auth_failed_naming_its_variables():
     assert len(client.writes_per_uuid) == 0
 
 
+def test_the_debug_traceback_of_a_provider_refusal_holds_no_provider_text():
+    fakes, client = refusing(10, lambda n: all_failed(PROVIDER_401))
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json", TO_WEAVIATE_DEBUG="1")
+    assert r.exit_code == 3, r.output
+    assert "Traceback" in r.stderr and "ProviderRefused" in r.stderr
+    assert "Incorrect API key" not in r.output and "sk-made" not in r.output
+
+
 def test_a_provider_that_refuses_the_key_of_one_object_is_auth_failed(tmp_path):
     client = FakeInsertClient(
         reject=lambda obj: PROVIDER_401 if obj.uuid == to_uuid("id-3") else None
