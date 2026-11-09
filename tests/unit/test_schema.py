@@ -1260,6 +1260,69 @@ def test_differences_compare_the_hnsw_part_of_a_dynamic_index():
     ]  # type: ignore[arg-type]
 
 
+def _hfresh() -> _VectorIndexConfigHFresh:
+    return _VectorIndexConfigHFresh(
+        multi_vector=None,
+        quantizer=_rq(bits=1, centering=None),
+        distance_metric=VectorDistances.COSINE,
+        max_posting_size_kb=48,
+        replicas=4,
+        search_probe=256,
+    )
+
+
+def _dynamic() -> _VectorIndexConfigDynamic:
+    return _VectorIndexConfigDynamic(
+        distance_metric=VectorDistances.COSINE,
+        hnsw=hnsw(),
+        flat=_flat_with(None),
+        threshold=10000,
+    )
+
+
+# (planned index, index the server reports, expected difference)
+INDEX_OPTION_MISMATCHES = {
+    "hnsw-ef-construction": (
+        p.IndexPlan(type="hnsw", options={"ef_construction": 256}),
+        hnsw(),
+        "vector default: ef_construction is 0, plan has 256",
+    ),
+    "flat-vector-cache": (
+        p.IndexPlan(type="flat", options={"vector_cache_max_objects": 5}),
+        _flat_with(None),
+        "vector default: vector_cache_max_objects is 0, plan has 5",
+    ),
+    "dynamic-threshold": (
+        p.IndexPlan(type="dynamic", options={"threshold": 500}),
+        _dynamic(),
+        "vector default: threshold is 10000, plan has 500",
+    ),
+    "hfresh-search-probe": (
+        p.IndexPlan(type="hfresh", options={"search_probe": 64}),
+        _hfresh(),
+        "vector default: search_probe is 256, plan has 64",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("planned", "stored", "expected"),
+    INDEX_OPTION_MISMATCHES.values(),
+    ids=INDEX_OPTION_MISMATCHES,
+)
+def test_differences_compare_each_planned_index_option(planned, stored, expected):
+    cfg = config(index=stored)
+    found = differences(FakeClient(FakeCollection(cfg)), [entry(index=planned)])  # type: ignore[arg-type]
+    assert found == [expected]
+
+
+def test_differences_accept_equal_index_options_and_skip_unset_ones():
+    # hnsw() stores 0 for every option; the plan sets two of them.
+    index = p.IndexPlan(type="hnsw", options={"ef": 0, "max_connections": 0})
+    cfg = config(index=hnsw())
+    assert differences(FakeClient(FakeCollection(cfg)), [entry(index=index)]) == []  # type: ignore[arg-type]
+
+
 def test_ensure_refuses_added_centering_before_any_page():
     # rq 4 bits copied without centering, then centering added to plan.yaml:
     # the server refuses to change centering, so copy must stop before pages.

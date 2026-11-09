@@ -442,6 +442,8 @@ def _vector_differences(plan: VectorPlan, found: Any) -> list[str]:
                 f"vector {name}: index type is {actual_type}, "
                 f"plan has {plan.index.type}"
             )
+        else:
+            out.extend(_index_option_differences(name, plan.index.options, index))
     q = plan.index.quantizer
     if q.type != "default":
         types = _index_quantizers(index)
@@ -452,6 +454,21 @@ def _vector_differences(plan: VectorPlan, found: Any) -> list[str]:
         else:
             parts = [index.hnsw, index.flat] if len(types) == 2 else [index]
             out.extend(_quantizer_field_differences(name, q, parts))
+    return out
+
+
+def _index_option_differences(
+    name: str, options: dict[str, int], index: Any
+) -> list[str]:
+    """Planned index options that the index holds otherwise.
+
+    An option that the index does not report is not compared.
+    """
+    out: list[str] = []
+    for option, value in options.items():
+        found = getattr(index, option, None)
+        if found is not None and found != value:
+            out.append(f"vector {name}: {option} is {found}, plan has {value}")
     return out
 
 
