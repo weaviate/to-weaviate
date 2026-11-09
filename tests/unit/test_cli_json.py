@@ -263,6 +263,43 @@ def test_secret_in_a_success_text_is_redacted():
     assert KEY_AS_NAME not in r.stdout and "*** -> ***" in r.stdout
 
 
+@pytest.mark.parametrize("mode", [["--json"], []], ids=["json", "text"])
+def test_secret_in_a_progress_line_is_redacted(mode):
+    fakes = key_named_fakes()
+    sq = ["--index", "hnsw", "--quantizer", "sq"]
+    assert invoke(fakes, "inspect", "chroma", *sq).exit_code == 0
+    # copy adds each planned property that the collection lacks.
+    fakes.schema.properties[KEY_AS_NAME] = set()
+    r = invoke(fakes, "copy", *mode, WEAVIATE_API_KEY=KEY_AS_NAME)
+    assert r.exit_code == 0, r.output
+    assert KEY_AS_NAME not in r.stdout and KEY_AS_NAME not in r.stderr
+    progress = (r.stderr if mode else r.stdout).splitlines()
+    for line in (
+        "Added the property document to ***",
+        "Copying *** to ***",
+        "Enabling the trained quantizers of ***",
+        "Copied ***: 3 records, 0 rejects",
+    ):
+        assert line in progress, progress
+
+
+def test_secret_in_a_progress_line_of_verify_is_redacted():
+    fakes = key_named_fakes()
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    assert invoke(fakes, "copy").exit_code == 0
+    fakes.source.waits = [(5, 10)]
+    fakes.source.compaction = [{"version": 2, "log_position": 10}]
+    r = invoke(fakes, "verify", "--json", WEAVIATE_API_KEY=KEY_AS_NAME)
+    assert r.exit_code == 0, r.output
+    assert KEY_AS_NAME not in r.stdout and KEY_AS_NAME not in r.stderr
+    progress = r.stderr.splitlines()
+    assert "Verifying *** in ***" in progress, progress
+    assert (
+        "Waiting for Chroma to compact ***: 5 of 10 operations not compacted"
+        in progress
+    ), progress
+
+
 LONG_KEY = (
     "".join(chr(ord("a") + i * 7 % 26) for i in range(230))
     + "é"

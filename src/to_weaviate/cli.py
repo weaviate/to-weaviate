@@ -27,6 +27,7 @@ import sys
 import traceback
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -437,6 +438,11 @@ _FALLBACK_REPORT = _Report(
     "",
 )
 
+# The secret values of the running command, read by its first `_info` line.
+_COMMAND_SECRETS: ContextVar[list[str] | None] = ContextVar(
+    "command_secrets", default=None
+)
+
 
 def _report(exc: Exception) -> _Report:
     """The redacted output for `exc`. Builds strings only; prints nothing."""
@@ -461,6 +467,7 @@ def _handled(json_output: bool) -> Iterator[None]:
     Typer and Click exits keep their own behavior. Secret values are redacted
     from everything printed here.
     """
+    token = _COMMAND_SECRETS.set(None)
     try:
         yield
     except (typer.Exit, typer.Abort, typer.TyperException):
@@ -478,12 +485,30 @@ def _handled(json_output: bool) -> Iterator[None]:
             print(f"Error: {report.document['message']}", file=sys.stderr)
             print(f"Hint: {report.document['hint']}", file=sys.stderr)
         raise typer.Exit(report.exit_code) from None
+    finally:
+        _COMMAND_SECRETS.reset(token)
 
 
 def _emit_success(json_output: bool, document: dict[str, Any], text: str) -> None:
     """`emit`, redacting the secret values that `_report` redacts from an error."""
     secrets = secret_values(_handler_env())
     emit(json_output, redact_strings(document, secrets), redact(text, secrets))
+
+
+def _info(json_output: bool, line: str) -> None:
+    """`info`, redacting the secret values that `_report` redacts from an error.
+
+    The secret set is read on the first line of a command and kept until the
+    command ends: `_handled` clears it when a command starts. That is safe
+    because the environment and .env do not change while a command runs. A
+    cache per process would not be: one process can run several commands
+    with other secrets, as the tests do through CliRunner.
+    """
+    secrets = _COMMAND_SECRETS.get()
+    if secrets is None:
+        secrets = secret_values(_handler_env())
+        _COMMAND_SECRETS.set(secrets)
+    info(json_output, redact(line, secrets))
 
 
 def _yaml_error_text(exc: yaml.YAMLError) -> str:
@@ -721,7 +746,7 @@ def _inspect_chroma(
     if not databases and settings.database is not None:
         databases = [settings.database]
     source = factories.source(settings)
-    info(json_output, f"Inspecting Chroma at {settings.stored_url}")
+    _info(json_output, f"Inspecting Chroma at {settings.stored_url}")
     collections = source.inspect(databases or None, names or None, sample_pages)
     missing = sorted(set(names) - {c.name for c in collections})
     if missing:
@@ -845,7 +870,7 @@ def _check(factories: _Factories, directory: Path, json_output: bool) -> None:
     errors[:0] = load_findings(plan)
     settings = weaviate_settings(load_env(Path.cwd()))
     _require_provider_keys(plan, settings)
-    info(json_output, f"Checking the target at {without_userinfo(settings.url)}")
+    _info(json_output, f"Checking the target at {without_userinfo(settings.url)}")
     schema = factories.schema(settings)
     errors.extend(module_findings(plan, schema.modules()))
     for name, group in target_groups(plan.collections).items():
@@ -1017,7 +1042,7 @@ def _waiting(json_output: bool, name: str) -> Callable[[int, int], None]:
     """A function that prints the wait for Chroma's compaction of `name`."""
 
     def waiting(unindexed: int, total: int) -> None:
-        info(
+        _info(
             json_output,
             f"Waiting for Chroma to compact {name}: {unindexed} of {total} "
             "operations not compacted",
@@ -1100,7 +1125,7 @@ def _copy(
                 missing = schema.missing_properties(group)
                 schema.ensure(group)
                 for prop in missing:
-                    info(json_output, f"Added the property {prop} to {name}")
+                    _info(json_output, f"Added the property {prop} to {name}")
                     added.append({"collection": name, "property": prop})
             events = Events(directory / EVENTS_FILE)
             rereads: dict[str, int] = {}
@@ -1114,7 +1139,9 @@ def _copy(
                     # A row from a run with an earlier plan would keep the
                     # entry not done.
                     state.quantizers_updated(ref)
-                info(json_output, f"Copying {entry.source.name} to {entry.target.name}")
+                _info(
+                    json_output, f"Copying {entry.source.name} to {entry.target.name}"
+                )
                 result = copy_collection(
                     source,
                     writer,
@@ -1129,13 +1156,13 @@ def _copy(
                 if result.reread_from is not None:
                     rereads[ref] = result.reread_from
                 if trained:
-                    info(
+                    _info(
                         json_output,
                         f"Enabling the trained quantizers of {entry.target.name}",
                     )
                     schema.enable_trained_quantizers(entry)
                     state.quantizers_updated(ref)
-                info(
+                _info(
                     json_output,
                     f"Copied {entry.source.name}: {_plural(result.copied, 'record')}, "
                     f"{_plural(result.rejects, 'reject')}",
@@ -1202,7 +1229,7 @@ def _verify(
     for entry in plan.collections:
         collection = inspected[entry.source.ref]
         place = target_label(entry.target.name, entry.target.tenant)
-        info(json_output, f"Verifying {entry.source.name} in {place}")
+        _info(json_output, f"Verifying {entry.source.name} in {place}")
         missing = missing_target(reader, entry)
         if missing is not None:
             checks.append(missing)
