@@ -246,3 +246,79 @@ kubectl context is current, so select your previous context again with
 `tests/acceptance/chroma/docker-compose.yml`, and a Weaviate server that
 accepts the API key `admin-key`. The Weaviate version of CI is in
 `tests/acceptance/weaviate-version`.
+
+### Cloud suite and releases
+
+`tests/cloud` runs the installed `to-weaviate` command against Chroma Cloud
+and Weaviate Cloud. It reads the Chroma collection `to-weaviate-ci` and
+writes nothing to Chroma. In Weaviate it deletes the collection
+`To_weaviate_ci` before and after its test, and no other collection.
+
+The suite runs whenever `WEAVIATE_URL`, `WEAVIATE_API_KEY` and either
+`CHROMA_API_KEY` or `CHROMA_URL` are set. It does not check which servers
+they name, so a bare `pytest` in a shell with these variables runs it
+against those servers. The commands it starts get your environment
+unchanged. When a variable is missing, the suite skips and names it. With
+`TO_WEAVIATE_REQUIRE_CLOUD=1`, as in the release workflow, it fails
+instead.
+
+To run it against the local test servers, seed the local Chroma with
+`CHROMA_URL=http://localhost:8001`, `CHROMA_TENANT=default_tenant` and
+`CHROMA_DATABASE=default_database`, then also set `WEAVIATE_URL`,
+`WEAVIATE_GRPC_URL` and `WEAVIATE_API_KEY` to the acceptance values.
+
+`.github/workflows/release.yml` runs when a tag that matches
+`v[0-9]+.[0-9]+.[0-9]+*` is pushed. The `build` job stops unless the tag
+points at a commit on `main` and the built wheel has the tag's version
+without the `v`. The `cloud` job installs that wheel and runs
+`tests/cloud`. The `publish` job uploads the wheel and the sdist to PyPI
+through trusted publishing. It uses no token.
+
+A person with access to the GitHub repository and to PyPI sets up three
+things once:
+
+- The GitHub environment `cloud-tests` holds five secrets. The `cloud` job
+  passes each one to the suite as the variable in the last column.
+
+  | Secret | Meaning | Variable |
+  |---|---|---|
+  | `CHROMA_CLOUD_API_KEY` | API key for the Chroma Cloud database that holds `to-weaviate-ci` | `CHROMA_API_KEY` |
+  | `CHROMA_CLOUD_TENANT` | Chroma Cloud tenant of that database | `CHROMA_TENANT` |
+  | `CHROMA_CLOUD_DATABASE` | Name of that database | `CHROMA_DATABASE` |
+  | `WEAVIATE_CLOUD_URL` | URL of the Weaviate Cloud cluster that the job copies into | `WEAVIATE_URL` |
+  | `WEAVIATE_CLOUD_API_KEY` | API key of that cluster | `WEAVIATE_API_KEY` |
+
+- PyPI has a pending trusted publisher for the project `to-weaviate`:
+  repository `weaviate/to-weaviate`, workflow `release.yml`, environment
+  `pypi`.
+- Both environments, `cloud-tests` and `pypi`, allow deployments from tags
+  that match `v*`. GitHub rejects the `cloud` or `publish` job of a tag
+  that its environment does not allow.
+
+The Chroma collection is created once, by hand, before 2026-12-07, when
+Chroma Cloud stops accepting writes. Export `CHROMA_API_KEY`,
+`CHROMA_TENANT` and `CHROMA_DATABASE` with the values of the three Chroma
+secrets, then run the seed from the development environment:
+
+```bash
+.venv/bin/python tests/cloud/chroma/seed.py
+```
+
+It creates `to-weaviate-ci` with 2,000 records and prints
+`Created to-weaviate-ci with 2000 records.` It reads the environment, not
+`.env`. When the collection exists, it stops and changes nothing. It
+deletes nothing. When it stops after it created the collection, for
+example because an `add` call failed, the collection is incomplete. Delete
+`to-weaviate-ci` by hand in Chroma Cloud, then run the seed again.
+
+A release is a tag on a commit of `main`. The `build` job fails for a tag
+on any other commit:
+
+```bash
+git fetch origin
+git tag v0.1.0 origin/main
+git push origin v0.1.0
+```
+
+When the three jobs pass, `uvx to-weaviate --version` prints
+`to-weaviate 0.1.0`.
