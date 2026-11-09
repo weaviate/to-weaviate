@@ -50,26 +50,27 @@ it to Weaviate as a request header and never prints it.
 
 | Provider | Variables |
 |---|---|
-| OpenAI | `OPENAI_API_KEY`, `OPENAI_APIKEY` |
-| Azure OpenAI | `AZURE_API_KEY`, `AZURE_APIKEY` |
-| Cohere | `COHERE_API_KEY`, `COHERE_APIKEY` |
-| Google (Vertex AI, AI Studio) | `VERTEX_API_KEY`, `VERTEX_APIKEY`, `STUDIO_API_KEY`, `STUDIO_APIKEY` |
-| Hugging Face | `HUGGINGFACE_API_KEY`, `HUGGINGFACE_APIKEY` |
-| Jina AI | `JINAAI_API_KEY`, `JINAAI_APIKEY` |
-| Mistral | `MISTRAL_API_KEY`, `MISTRAL_APIKEY` |
-| Voyage AI | `VOYAGE_API_KEY`, `VOYAGE_APIKEY` |
+| OpenAI | `OPENAI_APIKEY`, `OPENAI_API_KEY` |
+| Azure OpenAI | `AZURE_APIKEY`, `AZURE_API_KEY` |
+| Cohere | `COHERE_APIKEY`, `COHERE_API_KEY` |
+| Google (Vertex AI, AI Studio) | `VERTEX_APIKEY`, `VERTEX_API_KEY`, `STUDIO_APIKEY`, `STUDIO_API_KEY` |
+| Hugging Face | `HUGGINGFACE_APIKEY`, `HUGGINGFACE_API_KEY` |
+| Jina AI | `JINAAI_APIKEY`, `JINAAI_API_KEY` |
+| Mistral | `MISTRAL_APIKEY`, `MISTRAL_API_KEY` |
+| Voyage AI | `VOYAGE_APIKEY`, `VOYAGE_API_KEY` |
 | Others | `API_KEY_MAP` in [`settings.py`](../src/to_weaviate/settings.py) lists every variable. |
 
 When two variables name the same header, the first one in `API_KEY_MAP` that
-is set wins. `check` stops with `missing_credential`, exit 3, when the key of
-a planned vectorizer is missing. A provider that refuses the key during
-`copy` stops it with `auth_failed`, exit 3, and the message names the
-provider and its variables.
+is set wins. The table lists them in that order. `check` stops with
+`missing_credential`, exit 3, when the key of a planned vectorizer is
+missing. A provider that refuses the key during
+`copy` stops it with `auth_failed`, exit 3. The message names the provider,
+and the hint names its variables.
 
 ## Async indexing
 
-Weaviate Cloud runs with `ASYNC_INDEXING=true`. It changes two things for a
-migration:
+Weaviate Cloud runs with `ASYNC_INDEXING=true`. `ASYNC_INDEXING` changes two
+things for a migration:
 
 - A `dynamic` index needs it. `check` warns when the plan has a `dynamic`
   index (`needs_async_indexing`).

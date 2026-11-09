@@ -71,15 +71,15 @@ collections:
   notes: []
 ```
 
-The quantizer block has more fields, all `null` in a draft; the entry has
-more properties. They are left out here.
+The excerpt leaves out the other quantizer fields, all `null` in a draft,
+and the properties `source_id`, `uri` and the other metadata keys.
 
 ## Fields
 
 | Field | Written by | Meaning |
 |---|---|---|
 | `version` | `inspect` | The plan format. Always `1`. |
-| `source` | `inspect` | The source type, its URL without user information, and its tenant. `copy` and `verify` stop with `invalid_plan` when the source settings name another source. |
+| `source` | `inspect` | The source type, its URL without user information, and its tenant. See [the source check](commands.md#existing-collections-and-the-recorded-target). |
 | `collections[].source` | `inspect` | The source collection: its id, namespace, name, count, dimension, distance and embedding configuration. Do not edit it. |
 | `collections[].target.name` | you may edit | The Weaviate collection. |
 | `collections[].target.tenant` | you may edit | A tenant of the collection, or `null` for a collection without multi-tenancy. |
@@ -134,6 +134,8 @@ Every other `source_key` is a metadata key. A property has these fields:
 - A key with `int` and `number` values becomes `number`.
 - A key with any other mix becomes `text`, and `coerced_from` lists the other
   types. `check` and `copy` show the warning `coerced_keys`.
+- A key with both single values and lists becomes an array of the merged
+  type, for example `text[]` for `text` and `text[]` values.
 - A list with mixed element types becomes `text[]`.
 
 `copy` converts each value to the property type:
@@ -196,9 +198,10 @@ The quantizer fields:
 Some combinations have extra rules:
 
 - `rq` `centering` needs `hnsw` and 4 bits.
-- The plan refuses a field that the index type ignores: `cache` of `rq` and
-  `bq`, and `rescore_limit` of `bq`, with `hnsw`; `training_limit` of `rq`
-  with `flat`; `cache` and `training_limit` of `rq` with `hfresh`.
+- `inspect`, `check` and `copy` refuse a field that the index type ignores:
+  `cache` of `rq` and `bq`, and `rescore_limit` of `bq`, with `hnsw`;
+  `training_limit` of `rq` with `flat`; `cache` and `training_limit` of `rq`
+  with `hfresh`.
 - `pq` `segments` must divide the dimension of the source vectors.
 
 ### Trained quantizers

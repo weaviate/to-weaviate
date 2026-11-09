@@ -30,7 +30,8 @@ the unit tests and the acceptance tests. [Testing](docs/development/testing.md)
 explains how to run the acceptance tests on your machine.
 
 - Open the pull request against `main`.
-- A behavior change comes with a test that fails without it.
+- A behavior change comes with a unit test that fails without it. See
+  [Writing tests](docs/development/testing.md#writing-tests).
 - A change to what a user sees updates the docs: the
   [README](README.md), [the commands](docs/commands.md), or the guide of the
   source it affects.

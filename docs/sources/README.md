@@ -13,8 +13,8 @@ To add one, follow [Adding a source](../development/adding-a-source.md).
 
 ## What each guide covers
 
-Every source guide has the same sections, from
-[`_template.md`](_template.md):
+Every source guide starts from [`_template.md`](_template.md) and has at
+least these sections:
 
 1. **Deployments**: which servers and services of the source the tool reads.
 2. **Connection settings**: the environment variables of the source.

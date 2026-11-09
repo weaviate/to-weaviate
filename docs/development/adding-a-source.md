@@ -2,13 +2,13 @@
 
 A new source is a package under `src/to_weaviate/sources/<name>/` that
 implements the [`Source` protocol](architecture.md#the-source-protocol), plus
-edits in `cli.py` and `settings.py`. The copy engine and the Weaviate side
+edits in `cli.py`, `settings.py` and `output.py`. The copy engine and the Weaviate side
 need no change for a source that reads by offset in insertion order. Read
 [what the copy engine expects of a source](architecture.md#what-the-copy-engine-expects-of-a-source)
 first.
 
-Today only Chroma exists, so a few shared places name Chroma. The last
-section lists them.
+Chroma is the only source, so a few shared places name it. See
+[Where the code names Chroma](#where-the-code-names-chroma).
 
 ## Steps
 
@@ -23,8 +23,8 @@ section lists them.
    `inspect.json`.
 3. **Settings.** Add a settings dataclass and a reader next to
    `ChromaSettings` and `chroma_settings` in `settings.py`, with the
-   `<NAME>_*` variables. Add URL variables to `URL_VARIABLES` and key
-   variables to `SECRET_VARIABLES` in `output.py`. Values of variables in
+   `<NAME>_*` variables. Add URL variables to `URL_VARIABLES` (`settings.py`)
+   and key variables to `SECRET_VARIABLES` (`output.py`). Values of variables in
    neither list are not redacted.
 4. **Inspect command.** Add `to-weaviate inspect <name>` next to
    `inspect chroma` in `build_app` (`cli.py`). It takes the source's own
@@ -60,12 +60,12 @@ section lists them.
 
 ## Where the code names Chroma
 
-These places assume the only source is Chroma. A second source changes them
-instead of only adding code.
+These places assume the only source is Chroma. A second source needs
+changes in these places, not only new modules.
 
-| Place | Today | What a second source needs |
+| Place | Current code | What a second source needs |
 |---|---|---|
-| Source selection in `cli.py` | `copy` and `verify` call `chroma_settings` and build a `ChromaSource`. `SourceFactory` takes `ChromaSettings`. | A dispatch on the plan's `source.type`, which `inspect` writes and nothing reads yet. |
+| Source selection in `cli.py` | `copy` and `verify` call `chroma_settings` and build a `ChromaSource`. `SourceFactory` takes `ChromaSettings`. | A dispatch on the plan's `source.type`, which `inspect` writes and no command reads. |
 | The embedding mapper | `cli.py` passes the Chroma `vectorizer_for` to `draft_plan` and to the plan findings of `check` and `copy`. | The mapper of the plan's source. |
 | Error mapping | `_as_cli_error` knows `ChromaError`; a raw `httpx.TransportError` becomes `target_unreachable`. | The new exception class. |
 | Names in shared models and messages | `SourceRef.namespace` and `SourcePlan.tenant` use Chroma's database and tenant. Hints name `inspect chroma` and `CHROMA_*`. | Neutral wording, or the source's own words. |

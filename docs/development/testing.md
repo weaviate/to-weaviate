@@ -164,7 +164,7 @@ properties.
 
 ## Writing tests
 
-- A behavior change comes with a unit test that fails without the change.
+- A behavior change comes with a unit test that fails without it.
 - An acceptance test reaches the servers only through the command and the
   server APIs, unless it needs to restart or delete a server. Then it
   carries the `infra` marker.

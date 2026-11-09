@@ -21,8 +21,8 @@ flowchart TB
 
 - `cli.py` parses a command, reads the settings, builds the source and the
   Weaviate clients, and maps every exception to an error code.
-- `engine/` decides and drives. It knows the `Source` protocol, not a
-  particular source.
+- `engine/` runs check, copy and verify through the `Source` protocol and
+  imports no source package.
 - `sources/` reads a source database. `sources/base.py` defines the protocol;
   `sources/chroma/` implements it.
 - `target/` talks to Weaviate through the
@@ -63,13 +63,15 @@ embedding configuration to vectorizer. `cli.py` writes `inspect.json` and
 `plan.yaml`.
 
 **`check`**: `cli.py` loads the plan. `engine/check.py` returns findings from
-the plan alone and from the target: enabled modules, provider keys, existing
-collections. `check` writes nothing.
+the plan alone and from the modules the target has enabled. `cli.py` adds the
+provider keys from the environment and the differences that
+`target/schema.py` finds in existing collections. `check` writes nothing.
 
 **`copy`**:
 
-1. `cli.py` takes `copy.lock`, checks the recorded targets in `state.sqlite`,
-   and runs `check`'s findings.
+1. `cli.py` runs the plan findings of `check`, the source check and the
+   provider-key check. It then takes `copy.lock` and checks the enabled
+   modules and the recorded targets in `state.sqlite`.
 2. `target/schema.ensure_collection` creates each target collection, or
    compares the existing one with the plan and adds missing properties.
 3. For each plan entry, `engine/copy.copy_collection`:
@@ -90,7 +92,7 @@ count, diffs `Source.ids` against the target ids in a scratch sqlite file,
 and compares `Source.sample` records with the objects that `target/reader`
 reads. It writes `report.md` and `report.json`.
 
-**`status`**: reads `state.sqlite` only.
+**`status`**: reads `plan.yaml` and `state.sqlite`.
 
 ## The `Source` protocol
 
@@ -107,7 +109,8 @@ source conforms; nothing checks it at run time.
 | `ids(collection)` | `verify`, the `ids` check. |
 | `sample(collection, size, rng, with_vectors)` | `verify`, the `records` check. |
 | `wait_compacted(collection, waiting)`, `compaction_state(collection)` | `copy` and `verify`, before the first page and after the last read. |
-| `tenant`, `namespaces()` | `inspect`, for the message when it finds no collection. |
+| `tenant`, `searched_namespaces` | `inspect`, for the message when it finds no collection. |
+| `namespaces()` | The source's own `inspect`, when no namespace is given. |
 | `name`, `capabilities`, `vector_search`, `filter_equal` | Declared by the protocol; no command calls them. |
 
 ### What the copy engine expects of a source

@@ -69,9 +69,10 @@ exit 2, `invalid_plan`. A warning does not stop `copy`.
 - A missing provider key for a vectorizer: exit 3, `missing_credential`.
 - An existing collection whose settings differ from the plan
   (`plan_mismatch`).
-- Plan entries that write into one collection, each into its own tenant,
-  but differ in their vectors, in the settings of a shared property, or in
-  two property names that differ only in case.
+- Plan entries that share a collection, one tenant each, with different
+  vectors, different settings for a shared property, or property names that
+  differ only in case. See
+  [Edits you can make](plan-file.md#edits-you-can-make).
 - Warnings: `missing_property` (an existing collection lacks a planned
   property; `copy` adds it), `coerced_keys` (a metadata key with mixed types
   whose values `copy` converts), and `quantizer_training` (a trained
@@ -107,9 +108,10 @@ finds its place from the last two records the previous run read:
 
 - When deletions in the source moved those records, the run finds them at
   their new position and reads what follows.
-- When one of them is gone, the run reads again from an earlier record or
-  from the start, with the warning "the source changed since the last run;
-  re-reading from the start". Records read again are written again unchanged.
+- When one of them is gone, the run reads again from an earlier record.
+  When it finds no earlier record either, it reads from the start and warns
+  "the source changed since the last run; re-reading from the start".
+  Records read again are written again unchanged.
   The JSON document of such a run gives the position it read from as
   `reread_from`.
 - When the two records were deleted and added back with the same ids, the run
@@ -126,11 +128,11 @@ Weaviate are written again unchanged.
 
 ### Retries
 
-`copy` retries a transient error: a network error, a timeout, HTTP 429 or
-5xx, and the matching gRPC statuses. It tries up to 7 times, for 15.75 s to
-31.5 s in total. It also retries:
+`copy` retries a transient error: a network error, a timeout, HTTP 429,
+500, 502, 503 or 504, and the matching gRPC statuses. It tries up to 7 times
+and waits 15.75 s to 31.5 s in total between the attempts. It also retries:
 
-- a batch whose every object Weaviate refused;
+- a batch in which Weaviate refused every object;
 - an object that Weaviate refused with an error about a node, a shard or a
   deadline, as it does while a node restarts.
 
@@ -153,8 +155,9 @@ or the plan names another target, or when the target collection is gone. To
 copy to another target, use another `--dir`.
 
 `copy` and `verify` also stop with `invalid_plan` before they connect when
-the source settings name another source than the one `inspect` recorded in
-`plan.yaml`.
+the source settings name another source than the one in `plan.yaml`. Each
+source guide names the settings it compares, for example
+[Chroma](sources/chroma.md#connection-settings).
 
 ## `verify`
 
@@ -164,10 +167,11 @@ the source settings name another source than the one `inspect` recorded in
 | Check | What it compares |
 |---|---|
 | `count` | The record count of the source and the object count of Weaviate. |
-| `ids` | The full list of ids on both sides. It names the missing and the extra ones. |
-| `records` | A random sample of records: every property, and the vectors within 1e-5. |
+| `ids` | The full list of ids on both sides. It counts the missing and the extra ids and names up to 20 of each. |
+| `records` | A random sample of records: every property, and each kept source vector, rounded to float32, within 1e-5. |
 
-A failed check exits 1, `verification_failed`, and its detail names the fix.
+A failed check exits 1, `verification_failed`. Its detail names the cause,
+and the fix where there is one.
 
 | Option | Effect |
 |---|---|
@@ -182,12 +186,13 @@ then finds the missing record only if the sample holds it.
 ## `status`
 
 `status` shows, for each collection, the copied count, the total, the
-rejects, whether the copy is done, and the recorded target. It reads only
-`state.sqlite` and needs no credentials, so you can run it during a copy.
+rejects, whether the copy is done, and the recorded target. It reads
+`plan.yaml` and `state.sqlite` and needs no credentials, so you can run it
+during a copy.
 
-The total is the highest source count that a `copy` read. The copied count
-includes records deleted from the source since, so after deletions it can be
-above the total.
+The total is the highest of the inspected count and the counts that `copy`
+read. The copied count includes records that were deleted from the source
+after `copy` wrote them, so after deletions it can be above the total.
 
 ## Migration directory
 
@@ -260,5 +265,5 @@ The exit code is the same with and without `--json`.
 | 1 | Rejected records or a failed verification | `rejects`, `verification_failed` |
 | 2 | Usage error, invalid plan, a state of another target, a state file that cannot be read, or a directory that cannot be written | `usage`, `invalid_plan`, `plan_mismatch`, `target_rejected_schema`, `state_mismatch`, `invalid_state`, `directory_unwritable` |
 | 3 | Missing credential or authentication failure | `missing_credential`, `auth_failed` |
-| 4 | Source or target unreachable, or a source collection that changed during the read | `source_unreachable`, `target_unreachable`, `source_compacting` |
+| 4 | Source or target unreachable, or a source collection that the source compacted during the read or did not finish compacting | `source_unreachable`, `target_unreachable`, `source_compacting` |
 | 5 | Internal error | `internal_error` |

@@ -64,8 +64,8 @@ flowchart LR
 5. `to-weaviate verify` compares Weaviate with the source and writes `report.md`.
 
 `to-weaviate status` shows the copy progress at any time and needs no
-credentials. Every command reads and writes one migration directory,
-`./.to-weaviate` unless you pass `--dir`.
+credentials. Every command uses one migration directory, `./.to-weaviate`
+unless you pass `--dir`.
 
 ## Quickstart
 
@@ -158,8 +158,8 @@ PASS Docs_cosine records: sampled 300, compared 300, rejects skipped 0, differin
 Every command takes `--dir` and `--json`. With `--json`, stdout holds one
 JSON document. The exit code names the class of failure, with and without
 `--json`: 1 for rejects or a failed verification, 2 for a usage or plan
-error, 3 for credentials, 4 for an unreachable server, 5 for an internal
-error. [Commands](docs/commands.md#exit-codes) lists every error code.
+error, 3 for credentials, 4 for an unreachable server or a source that is
+compacting, 5 for an internal error. [Commands](docs/commands.md#exit-codes) lists every error code.
 
 ## Documentation
 

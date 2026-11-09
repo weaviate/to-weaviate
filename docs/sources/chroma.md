@@ -1,8 +1,8 @@
 # Chroma
 
 `to-weaviate inspect chroma` reads collections from Chroma. For each record
-the tool copies its id, embedding, document, URI and metadata. It never
-writes to Chroma.
+the tool copies its id, document, URI and metadata, and its embedding unless
+the plan embeds the documents again. It never writes to Chroma.
 
 > [!IMPORTANT]
 > Chroma Cloud stops accepting writes on 2026-12-07 and stops serving reads
@@ -47,9 +47,10 @@ The target settings are on [Weaviate target](../weaviate.md).
 `--vectors`, `--vectorizer`, `--vectorizer-option`, `--index`, `--quantizer`,
 `--quantizer-bits` and `--force`. See [Commands](../commands.md#inspect-source).
 
-On a large collection, `--sample-pages` makes `inspect` faster. A metadata
-key that appears only after the sampled pages is missing from the plan, and
-`copy` rejects each record that has it.
+On a large collection, `--sample-pages` makes `inspect` faster. `inspect`
+spreads the sampled pages over the whole collection. A metadata key that
+appears only in pages it did not sample is missing from the plan, and `copy`
+rejects each record that has it.
 
 ## Examples
 
@@ -101,7 +102,7 @@ to-weaviate inspect chroma
 |---|---|
 | Collection | A collection. `inspect` turns the name into one Weaviate accepts: `docs-cosine` becomes `Docs_cosine`, and a name that starts with a digit gets the prefix `C_`. |
 | Record id | The object UUID. A canonical lowercase UUID stays as it is; any other id becomes a UUIDv5 of the id. The `source_id` property holds the original id. |
-| Embedding | The vector `default`, or `source` with `--vectors both`. |
+| Embedding | The vector `default`, or `source` with `--vectors both`. Not copied with `--vectors embed`. |
 | Document | The `document` property, `text` with `word` tokenization. |
 | URI | The `uri` property. |
 | Metadata key | A property. See [types and conversion](../plan-file.md#types-and-conversion). |
@@ -122,7 +123,7 @@ Without one, Chroma uses `l2`.
 ### Embedding functions
 
 When a collection stores its embedding function, and Weaviate has a module
-for that model, the plan sets the module as the vectorizer of the kept
+for that model, `inspect` sets the module as the vectorizer of the kept
 vector. Weaviate can then embed query text with the same model.
 
 | Chroma embedding function | Weaviate module |
@@ -173,7 +174,8 @@ A collection that receives writes all the time does not reach zero within
 600 s, so `copy` stops with `source_compacting` before its first page. Stop
 the writes to the source before you copy, and run `verify` after the copy.
 
-Single-node Chroma has no compaction. The tool asks once and does not wait.
+Single-node Chroma has no compaction. The tool sends one `indexing_status`
+request and does not wait.
 A Chroma server older than 1.4.1 has no `indexing_status` route, and the
 tool reads it without the wait, as a single-node server.
 
@@ -181,12 +183,12 @@ tool reads it without the wait, as a single-node server.
 
 - Records come in pages of 300, the most that Chroma Cloud returns per
   request.
-- A network error or HTTP 429, 500, 502, 503 or 504 from Chroma is retried
-  for 15.75 s to 31.5 s in total. A `Retry-After` header raises each delay to
-  its value, up to 30 s per delay, so these retries can take longer.
+- The tool retries a network error or HTTP 429, 500, 502, 503 or 504 from
+  Chroma up to 7 times, and waits 15.75 s to 31.5 s in total between the
+  attempts. A `Retry-After` header raises each wait to its value, up to 30 s
+  per wait, so these retries can take longer.
 - A record deleted from Chroma during a copy can make `copy` skip another
-  record. Run the full `verify` after the writes stop; its `ids` check names
-  the missing records.
+  record. See [`verify`](../commands.md#verify).
 - Sparse vectors are not migrated.
 
 ## Implementation
