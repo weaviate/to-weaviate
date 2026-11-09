@@ -480,6 +480,12 @@ def _handled(json_output: bool) -> Iterator[None]:
         raise typer.Exit(report.exit_code) from None
 
 
+def _emit_success(json_output: bool, document: dict[str, Any], text: str) -> None:
+    """`emit`, redacting the secret values that `_report` redacts from an error."""
+    secrets = secret_values(_handler_env())
+    emit(json_output, redact_strings(document, secrets), redact(text, secrets))
+
+
 def _yaml_error_text(exc: yaml.YAMLError) -> str:
     """The position and the problem of `exc`, without any text of the file.
 
@@ -751,7 +757,7 @@ def _inspect_chroma(
 
     found = decisions(plan, {c.ref: c for c in collections})
     document, text = _inspect_output(plan, found, plan_path)
-    emit(json_output, document, text)
+    _emit_success(json_output, document, text)
 
 
 def _inspect_output(
@@ -854,7 +860,7 @@ def _check(factories: _Factories, directory: Path, json_output: bool) -> None:
     lines = _findings_text(errors, warnings)
     lines.append(f"No errors, {_plural(len(warnings), 'warning')}.")
     document = {"status": "success", **_findings_document(errors, warnings)}
-    emit(json_output, document, "\n".join(lines))
+    _emit_success(json_output, document, "\n".join(lines))
 
 
 def _rows(
@@ -1153,7 +1159,7 @@ def _copy(
             fields=document,
             text=text,
         )
-    emit(json_output, {"status": "success", **document}, text)
+    _emit_success(json_output, {"status": "success", **document}, text)
 
 
 def _status(directory: Path, json_output: bool) -> None:
@@ -1170,7 +1176,7 @@ def _status(directory: Path, json_output: bool) -> None:
             state.close()
     rows = _rows(plan.collections, progress)
     document, text = _progress_output(plan.collections, rows, targets)
-    emit(json_output, {"status": "success", **document}, text)
+    _emit_success(json_output, {"status": "success", **document}, text)
 
 
 def _verify(
@@ -1224,7 +1230,7 @@ def _verify(
             fields=document,
             text=text,
         )
-    emit(json_output, {"status": "success", **document}, text)
+    _emit_success(json_output, {"status": "success", **document}, text)
 
 
 def _version_callback(value: bool) -> None:
