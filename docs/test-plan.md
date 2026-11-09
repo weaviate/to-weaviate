@@ -680,11 +680,69 @@ tests/acceptance/chroma/docker-compose.yml stop`, 3 s of wait, then
 `docker compose ... start`; the case waits until Chroma answers with the
 8,000 records of `resume`; `verify`. Expected: `copy` exits 0 with
 `copied 8000, rejects 0, done`; 8,000 objects; `verify` exits 0. Runs on
-both CI legs and locally. Locally Chroma answered no request for about
-3.7 s. The tool writes no event for a source retry, so the case cannot
-show that one ran.
+the `single` leg and locally. It skips with `ACCEPTANCE_CHROMA=distributed`,
+because the `cluster` leg runs no compose Chroma. Locally Chroma answered
+no request for about 3.7 s. The tool writes no event for a source retry,
+so the case cannot show that one ran.
 
 *Implemented: `tests/acceptance/chroma/test_chroma_restart.py::test_a_chroma_restart_during_copy_leaves_no_reject`. Coverage.*
+
+### Distributed Chroma
+
+`copy` reads by offset: the partitions, the resume and the shift detection
+(rulings R61 and R65) need `get` with `offset` and `limit` to return the
+records in insertion order. A-24 pins that order. A-25 measures a copy
+across a renumbering; it lands with the compaction guard. The `cluster`
+leg of CI runs the suite against the open-source distributed Chroma, which
+`tests/acceptance/chroma-k8s.sh` starts in its kind cluster, with
+`ACCEPTANCE_CHROMA=distributed`. On that leg the seed waits until
+`indexing_status` reports `num_unindexed_ops` 0 for each seeded
+collection, so the other cases read compacted collections. Distributed
+Chroma compacts every 10 s and takes at most 10,000 records of a
+collection per run. A run of more than 5,000 records gives them new
+offsets, in another order. Its frontend keeps a collection for 60 s, and
+`get` and `indexing_status` read the collection from that cache.
+Distributed Chroma makes a SPANN index where single-node Chroma makes
+HNSW, so on that leg every case, the distances case too, reads SPANN
+collections.
+
+**A-24 `get` pages follow the insertion order.** Level API, risk R1, 1 s
+locally. Steps: make `order` with 1,000 records of 4 dimensions in adds of
+300; their UUID ids do not sort in insertion order. Read every page of 300
+from offset 0. Delete the records at positions 400, 450, 500, 550 and 600,
+and read again. Add 10 records, and read again. On distributed Chroma the
+case waits for `num_unindexed_ops` 0 after each write; each wait can take
+more than 60 s because of the frontend's cache. Expected: the ids in
+insertion order. After the deletion, the 5 ids are gone, and each later
+record is one offset earlier per deleted record before it. After the
+addition, the 10 ids come last. Runs on both Chroma kinds.
+
+*Implemented: `tests/acceptance/chroma/test_source_order.py::test_get_pages_follow_the_insertion_order`. Coverage.*
+
+**A-25 `copy` while distributed Chroma compacts.** Level API, risk R1,
+distributed Chroma only. The case lands with the compaction guard, in the
+next PR (ruling R92). Steps: make `burst` with 40,000 records of 16
+dimensions in adds of 300; `inspect chroma --collection burst
+--sample-pages 1`; read the pages at offsets 0, 5,000, ... 35,000 and the
+collection's `version` and `log_position`; `copy --parallelism 8` right
+after, without the wait for compaction; read the same pages and values
+again; the full `verify`. Expected: `copy` exits 0, and `verify` gives
+`source count 40000, target count 40000` and `missing 0, extra 0`. The
+frontend serves `get` from a collection cache whose entries live 60 s, so
+a renumbering becomes visible at a cache expiry, not when the compaction
+run ends. The case records `crossed` (page 0 changed during the copy),
+`changed_offsets` (the read pages that changed), both states and the
+durations as test properties in the JUnit XML. On PR #34 CI run 2, with
+the compactor at 200m CPU, the copy had `crossed` true and
+`changed_offsets` [0, 5000]. `version` went from 0 to 1 and `log_position`
+from 0 to 10000 during the copy. `verify` found `source count 40000,
+target count 38631` and `missing 1369, extra 0`. So a copy across a
+renumbering skips records, the tool bug of ruling R70. Its fix: `copy`
+waits for `num_unindexed_ops` 0 before the first page, and stops with a
+new error code when the collection's `version` or `log_position` changed
+before the last page.
+
+*Not in this branch: `tests/acceptance/chroma/test_source_order.py::test_copy_during_compaction` comes back with the fix. `tests/e2e.py::compaction_properties` and the seed helpers `burst_records` and `collection_state` stay for it.*
 
 ### Cloud
 
@@ -708,16 +766,22 @@ and C-03, because no Chroma Cloud source exists.
 
 - Chroma Cloud: no Chroma Cloud account exists, so no test reads from it.
   The unit tests cover the tool's side with fakes, and L-01 covers the
-  Weaviate Cloud side. These stay unverified:
-  - The read order of `get` with `offset` and `limit` on the distributed
-    server. The partitions, the resume and the shift detection depend on
-    insertion order.
-  - Quotas and the 429 behavior: the page cap (whether a request above 300
-    records is refused or cut, which decides whether U-01 is a loss in
-    practice), the rate limits and the `Retry-After` values.
+  Weaviate Cloud side. A-24 covers the read order of the open-source
+  distributed Chroma. These stay unverified:
+  - The read order of a sharded collection. Distributed Chroma reads it
+    shard by shard, which is not insertion order. Sharding is off by
+    default and turned on per tenant pattern (`compaction_manager.rs`), so
+    it can be on in Chroma Cloud. The CI cluster has no sharded collection.
+  - The `max_partition_size` of Chroma Cloud. The open-source worker config
+    sets 5,000, the run size above which compaction gives records new
+    offsets.
+  - Quotas and the 429 behavior: the page cap of 300 results per request
+    (whether a request above 300 records is refused or cut, which decides
+    whether U-01 is a loss in practice), the limit of 10 concurrent reads
+    per collection (`copy --parallelism` above 10), the rate limits and the
+    `Retry-After` values. The open-source frontend enforces no quota.
   - Collections with sparse vectors.
-  - The shapes of the stored embedding-function configuration, and a
-    SPANN collection's `configuration_json`.
+  - The shapes of the stored embedding-function configuration.
   - Chroma Cloud authentication, live: the API key, the scope of a
     database-scoped key and the `identity` answer.
 - A Weaviate Cloud sandbox: the cloud run (L-01) uses a serverless
@@ -759,6 +823,11 @@ and C-03, because no Chroma Cloud source exists.
   records read, deleted and added back in their old order with records
   added in between, hide those records from the next `copy`; only the full
   `verify` ids check finds them, and `sync` (Milestone 2) fixes it.
+  On distributed Chroma, a record that is deleted and added again before
+  the next compaction run keeps its old offset, so such a re-ingest hides
+  no record there. A record added again after the run that compacted its
+  deletion goes last, as on single-node Chroma. Both facts come from
+  Chroma's code; no case tests them.
 - Windows (`copy` without the lock), Ctrl-C (deferred F39), a full disk,
   a read-only migration directory, a source of millions of records
   (`inspect` without `--sample-pages` reads every page; manual check: a

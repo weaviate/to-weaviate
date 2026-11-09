@@ -16,10 +16,12 @@ from typing import Any
 import e2e
 import pytest
 import yaml
-from chroma.seed import seed
+from chroma.seed import SEEDED, seed, wait_indexed
 from e2e import (
     Result,
+    chroma_kind,
     close_weaviate,
+    compaction_properties,
     create_target_collection,
     delete_target_collections,
     embedded_dimension,
@@ -53,6 +55,8 @@ __all__ = [
     "Result",
     "SUITE_COLLECTIONS",
     "async_indexing",
+    "chroma_kind",
+    "compaction_properties",
     "compression_wait",
     "copy_and_verify",
     "create_target_collection",
@@ -121,6 +125,7 @@ SUITE_COLLECTIONS = [
     "C_1_leading_digit",
     "Class",
     "Bulk",
+    "Burst",
 ]
 
 
@@ -237,6 +242,8 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
 @pytest.fixture(scope="session")
 def seeded(_test_endpoints: None) -> None:
     seed()
+    if chroma_kind() == "distributed":
+        wait_indexed(SEEDED)
 
 
 @pytest.fixture(autouse=True)

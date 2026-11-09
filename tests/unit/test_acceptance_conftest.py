@@ -24,6 +24,7 @@ VARIABLES = (
     "ACCEPTANCE_TARGET",
     "ACCEPTANCE_VECTORIZER",
     "ACCEPTANCE_NODES",
+    "ACCEPTANCE_CHROMA",
     "CHROMA_URL",
     "WEAVIATE_URL",
     "WEAVIATE_GRPC_URL",
@@ -83,6 +84,32 @@ def test_nodes_refuses_a_value_that_is_not_a_count(env, value):
     with pytest.raises(ValueError) as error:
         e2e.nodes()
     assert str(error.value) == "ACCEPTANCE_NODES is not a whole number of at least 1"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, "single"),
+        ("", "single"),
+        ("single", "single"),
+        ("distributed", "distributed"),
+        (" Distributed ", "distributed"),
+    ],
+)
+def test_chroma_kind_is_single_unless_the_variable_names_distributed(
+    env, value, expected
+):
+    if value is not None:
+        env({"ACCEPTANCE_CHROMA": value})
+    assert e2e.chroma_kind() == expected
+
+
+@pytest.mark.parametrize("value", ["cloud", "local", "multi"])
+def test_chroma_kind_refuses_another_value(env, value):
+    env({"ACCEPTANCE_CHROMA": value})
+    with pytest.raises(ValueError) as error:
+        e2e.chroma_kind()
+    assert str(error.value) == "ACCEPTANCE_CHROMA is neither single nor distributed"
 
 
 @pytest.mark.parametrize("target", [{}, {"ACCEPTANCE_TARGET": "local"}])
@@ -265,3 +292,45 @@ def test_the_infra_guard_runs_before_the_fixtures_of_an_infra_test(
             ["*infra tests run only against the local servers*"]
         )
     assert (pytester.path / "fixture-ran").exists() == ran
+
+
+PAGE = ["c", "a", "b"]
+STATE_BEFORE = {"version": 0, "log_position": 0}
+STATE_AFTER = {"version": 2, "log_position": 10000}
+TIMES = {
+    "created": 100.0,
+    "written": 112.5,
+    "copy_started": 114.0,
+    "copy_finished": 171.25,
+}
+
+
+def test_compaction_properties_of_a_copy_that_crossed_a_renumbering():
+    before = {0: PAGE, 5000: ["d", "e"], 10000: ["f"]}
+    after = {0: ["a", "c", "b"], 5000: ["d", "e"], 10000: ["g"]}
+    properties = e2e.compaction_properties(
+        before, after, STATE_BEFORE, STATE_AFTER, TIMES
+    )
+    assert properties == [
+        ("crossed", True),
+        ("changed_offsets", [0, 10000]),
+        ("state_before", STATE_BEFORE),
+        ("state_after", STATE_AFTER),
+        ("write_seconds", 12.5),
+        ("copy_started_after_create_seconds", 14.0),
+        ("copy_finished_after_create_seconds", 71.25),
+        ("copy_seconds", 57.25),
+    ]
+
+
+def test_compaction_properties_of_a_copy_whose_page_0_kept_its_order():
+    # A later page can change while page 0 does not: then the first
+    # compaction run held page 0 and 5,000 records or fewer.
+    before = {0: PAGE, 5000: ["d", "e"]}
+    after = {0: list(PAGE), 5000: ["e", "d"]}
+    properties = dict(
+        e2e.compaction_properties(before, after, STATE_BEFORE, STATE_BEFORE, TIMES)
+    )
+    assert properties["crossed"] is False
+    assert properties["changed_offsets"] == [5000]
+    assert properties["state_after"] == STATE_BEFORE

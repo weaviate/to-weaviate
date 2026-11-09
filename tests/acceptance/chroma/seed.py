@@ -1,18 +1,22 @@
 """Seed the local Chroma test server with the collections of the acceptance suite.
 
 Run it as a script, or call `seed()`. Each run deletes and recreates the
-collections, so every run sends the same data. `add_to_tiny_l2` and
-`delete_from_tiny_l2` add records to tiny.l2 and delete them again;
-`restore_tiny_l2` makes tiny.l2 again from records read before. Every
-function here that sends a request reads CHROMA_URL and runs only when it is
-TEST_URL.
+collections, so every run sends the same data. On a distributed Chroma the
+suite then calls `wait_indexed`. `add_to_tiny_l2` and `delete_from_tiny_l2`
+add records to tiny.l2 and delete them again; `restore_tiny_l2` makes tiny.l2
+again from records read before. `make_collection`, `add_records`,
+`delete_records` and `delete_collection` serve the cases that make their own
+collections. Every function here that sends a request reads CHROMA_URL and
+runs only when it is TEST_URL.
 """
 
 import math
 import os
 import random
 import sys
+import time
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -56,6 +60,24 @@ EDGE = "edge"
 # test that copies every collection does not copy it.
 BULK = "bulk"
 BULK_COUNT = 50_000
+# Every collection that `seed` makes.
+SEEDED = (*COLLECTIONS, EDGE, BULK)
+# The collections that a case makes: order for test_source_order.py, burst
+# for the compaction case A-25 of docs/test-plan.md.
+ORDER = "order"
+ORDER_COUNT = 1000
+BURST = "burst"
+BURST_COUNT = 40_000
+# A distributed Chroma compacts every 10 s, at most 10,000 records of a
+# collection per run (compaction_interval_sec and max_compaction_size of
+# rust/worker/chroma_config.yaml in the Chroma repository), so bulk needs five
+# runs. Its frontend keeps a collection, with the log position that
+# indexing_status reads, for 60 s (cache_ttl_secs of
+# rust/frontend/sample_configs/distributed.yaml), so the status moves in steps
+# of 60 s. On PR #34 CI run 2, with the compactor at 200m CPU, bulk read
+# 40000, 30000 and 20000 uncompacted at 119 s, 180 s and 301 s.
+INDEXING_TIMEOUT = 600.0
+INDEXING_POLL = 2.0
 CATEGORIES = ("guide", "reference", "tutorial")
 TAGS = ("red", "green", "blue", "small", "large")
 
@@ -307,6 +329,40 @@ def renamed(rng: random.Random, name: str) -> list[Record]:
     ]
 
 
+def order_records(start: int, count: int) -> list[Record]:
+    """`count` records of 4 dimensions for ORDER, numbered from `start`.
+
+    Their ids are UUIDs, so the order of the ids differs from the order of
+    the records.
+    """
+    rng = random.Random(start)
+    return [
+        Record(
+            id=str(uuid.UUID(int=rng.getrandbits(128), version=4)),
+            embedding=_vector(rng, 4),
+            document=f"Record {i} of the order collection.",
+            metadata={"position": i},
+            uri=None,
+        )
+        for i in range(start, start + count)
+    ]
+
+
+def burst_records() -> list[Record]:
+    """BURST_COUNT records of 16 dimensions for BURST."""
+    rng = random.Random(BURST_COUNT)
+    return [
+        Record(
+            id=f"burst-{i:05d}",
+            embedding=_vector(rng, 16),
+            document=f"Record {i} of the burst collection.",
+            metadata={"position": i},
+            uri=None,
+        )
+        for i in range(BURST_COUNT)
+    ]
+
+
 # Made-up secrets of the embedding function of openai-proxy. The tool must
 # neither store nor print them.
 PROXY_USER = "b8-proxy-user"
@@ -357,13 +413,12 @@ def _recreate(
     space: str | None,
     records: list[Record],
     embedding_function: dict[str, Any] | None = None,
+    batch_size: int = LARGE_ADD_BATCH,
 ) -> None:
     # Chroma 1.5.9 keeps the array metadata rows of a deleted collection. A
     # record created later on the same server can then show an array key that
     # was never sent for it. A fresh container has no such rows.
-    deleted = http.delete(f"/collections/{name}")
-    if deleted.status_code != 404:
-        deleted.raise_for_status()
+    _delete_collection(http, name)
     body: dict[str, Any] = {"name": name}
     if space is not None:
         body["configuration"] = {"hnsw": {"space": space}}
@@ -371,7 +426,13 @@ def _recreate(
         body.setdefault("configuration", {})["embedding_function"] = embedding_function
     created = http.post("/collections", json=body)
     created.raise_for_status()
-    _add(http, created.json()["id"], records, LARGE_ADD_BATCH)
+    _add(http, created.json()["id"], records, batch_size)
+
+
+def _delete_collection(http: httpx.Client, name: str) -> None:
+    deleted = http.delete(f"/collections/{name}")
+    if deleted.status_code != 404:
+        deleted.raise_for_status()
 
 
 def _add(
@@ -412,7 +473,7 @@ def _collection_id(http: httpx.Client, name: str) -> str:
 
 
 def seed() -> None:
-    """Delete and recreate the COLLECTIONS, EDGE and BULK on the test server."""
+    """Delete and recreate the SEEDED collections on the test server."""
     rng = random.Random(0)
     with _test_server() as http:
         _recreate(http, "docs-cosine", "cosine", docs_cosine(rng))
@@ -431,6 +492,66 @@ def seed() -> None:
         for name in RENAMED_COLLECTIONS:
             _recreate(http, name, "cosine", renamed(rng, name))
         _recreate(http, BULK, "cosine", bulk(rng))
+
+
+def wait_indexed(names: Iterable[str], timeout: float = INDEXING_TIMEOUT) -> None:
+    """Wait until distributed Chroma has compacted every write to collections `names`.
+
+    Distributed Chroma reads a write from its log until a compaction run
+    moves it into the segments of the collection. A run of more than 5,000
+    records numbers them again in another order (max_partition_size of the
+    worker config), so pages read before and after such a run can skip or
+    repeat records. indexing_status counts the writes that no run has
+    compacted. It reads the collection from the frontend's cache, as `get`
+    does, so at 0 `get` reads the compacted collection, in one order until
+    the next write. A single-node Chroma answers indexing_status with HTTP
+    500, so the suite calls this on distributed Chroma only. After `timeout`
+    s, raises TimeoutError with the collections that still have such writes.
+
+    It prints a line each time the uncompacted count of a collection
+    changes, and the last status of every collection before the
+    TimeoutError. pytest shows them with the error of the fixture that
+    called it.
+    """
+    with _test_server() as http:
+        ids = {name: _collection_id(http, name) for name in names}
+        started = time.monotonic()
+        last: dict[str, dict[str, Any]] = {}
+        while True:
+            elapsed = time.monotonic() - started
+            pending = {}
+            for name, collection_id in ids.items():
+                found = http.get(f"/collections/{collection_id}/indexing_status")
+                found.raise_for_status()
+                status = found.json()
+                if name not in last or (
+                    status["num_unindexed_ops"] != last[name]["num_unindexed_ops"]
+                ):
+                    print(f"wait_indexed: {_progress(name, status)} at {elapsed:.0f}s")
+                last[name] = status
+                if status["num_unindexed_ops"] > 0:
+                    pending[name] = status
+            if not pending:
+                return
+            if elapsed > timeout:
+                for name, status in last.items():
+                    print(f"wait_indexed: final {_progress(name, status)}")
+                raise TimeoutError(
+                    "distributed Chroma has not compacted every write after "
+                    f"{timeout:.0f} s: "
+                    + ", ".join(
+                        f"{name} has {s['num_unindexed_ops']} of {s['total_ops']} "
+                        "operations not compacted"
+                        for name, s in pending.items()
+                    )
+                )
+            # A compacted collection stays compacted while nothing writes.
+            ids = {name: ids[name] for name in pending}
+            time.sleep(INDEXING_POLL)
+
+
+def _progress(name: str, status: dict[str, Any]) -> str:
+    return f"{name} {status['num_unindexed_ops']}/{status['total_ops']}"
 
 
 def _extra_tiny_l2(start: int, count: int) -> list[Record]:
@@ -453,22 +574,12 @@ def add_to_tiny_l2(
         replace(r, metadata={**r.metadata, **(metadata or {})})
         for r in _extra_tiny_l2(start, count)
     ]
-    with _test_server() as http:
-        _add(http, _collection_id(http, "tiny.l2"), added)
+    add_records("tiny.l2", added)
 
 
 def delete_from_tiny_l2(ids: list[str]) -> None:
-    """Delete the records with `ids` from tiny.l2. An id that is missing is no error.
-
-    Chroma answers 200 for ids that do not exist and 400 for an empty list,
-    so an empty list sends no request.
-    """
-    if not ids:
-        return
-    with _test_server() as http:
-        collection_id = _collection_id(http, "tiny.l2")
-        deleted = http.post(f"/collections/{collection_id}/delete", json={"ids": ids})
-        deleted.raise_for_status()
+    """Delete the records with `ids` from tiny.l2. An id that is missing is no error."""
+    delete_records("tiny.l2", ids)
 
 
 def restore_tiny_l2(records: list[Record]) -> None:
@@ -479,6 +590,67 @@ def restore_tiny_l2(records: list[Record]) -> None:
     """
     with _test_server() as http:
         _recreate(http, "tiny.l2", None, records)
+
+
+def make_collection(name: str, records: list[Record], batch_size: int) -> None:
+    """Delete the collection `name` and make it again with `records`, in their order.
+
+    The records go in adds of `batch_size`. The collection has Chroma's
+    default distance.
+    """
+    with _test_server() as http:
+        _recreate(http, name, None, records, batch_size=batch_size)
+
+
+def add_records(name: str, records: list[Record]) -> None:
+    """Add `records` to the collection `name`, in adds of ADD_BATCH."""
+    with _test_server() as http:
+        _add(http, _collection_id(http, name), records)
+
+
+def delete_records(name: str, ids: list[str]) -> None:
+    """Delete the records with `ids` from the collection `name`.
+
+    An id that is missing is no error: Chroma answers 200 for ids that do not
+    exist and 400 for an empty list, so an empty list sends no request.
+    """
+    if not ids:
+        return
+    with _test_server() as http:
+        collection_id = _collection_id(http, name)
+        deleted = http.post(f"/collections/{collection_id}/delete", json={"ids": ids})
+        deleted.raise_for_status()
+
+
+def delete_collection(name: str) -> None:
+    """Delete the collection `name`. A collection that does not exist is no error."""
+    with _test_server() as http:
+        _delete_collection(http, name)
+
+
+def page_ids(name: str, offset: int, limit: int) -> list[str]:
+    """The ids that `get` with `offset` and `limit` returns for collection `name`."""
+    with _test_server() as http:
+        found = http.post(
+            f"/collections/{_collection_id(http, name)}/get",
+            json={"offset": offset, "limit": limit, "include": []},
+        )
+        found.raise_for_status()
+        ids: list[str] = found.json()["ids"]
+        return ids
+
+
+def collection_state(name: str) -> dict[str, Any]:
+    """The `version` and the `log_position` of the collection `name`.
+
+    A distributed Chroma raises both with each compaction run. A single-node
+    Chroma answers 0 for both.
+    """
+    with _test_server() as http:
+        found = http.get(f"/collections/{name}")
+        found.raise_for_status()
+        document = found.json()
+    return {key: document[key] for key in ("version", "log_position")}
 
 
 def records(name: str, limit: int = 10) -> list[Record]:
@@ -524,4 +696,4 @@ if __name__ == "__main__":
         seed()
     except (ValueError, httpx.HTTPError) as exc:
         sys.exit(f"seed.py: {exc}")
-    print(f"Seeded {', '.join([*COLLECTIONS, EDGE, BULK])}.")
+    print(f"Seeded {', '.join(SEEDED)}.")

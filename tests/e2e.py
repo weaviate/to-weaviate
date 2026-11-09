@@ -41,6 +41,11 @@ VECTORIZER_VARIABLE = "ACCEPTANCE_VECTORIZER"
 DEFAULT_VECTORIZER = "text2vec-transformers"
 # The number of Weaviate nodes of the target.
 NODES_VARIABLE = "ACCEPTANCE_NODES"
+# The Chroma of the suite: "single", one server process as in
+# tests/acceptance/chroma/docker-compose.yml, or "distributed", the
+# open-source distributed Chroma that tests/acceptance/chroma-k8s.sh starts.
+CHROMA_VARIABLE = "ACCEPTANCE_CHROMA"
+CHROMA_KINDS = ("single", "distributed")
 LOCAL_ENDPOINTS = {
     "CHROMA_URL": "http://localhost:8001",
     "WEAVIATE_URL": "http://localhost:8099",
@@ -211,6 +216,17 @@ def nodes() -> int:
     if not value.isdecimal() or int(value) < 1:
         raise ValueError(f"{NODES_VARIABLE} is not a whole number of at least 1")
     return int(value)
+
+
+def chroma_kind() -> str:
+    """The value of CHROMA_VARIABLE in lower case; unset or empty is "single".
+
+    A value outside CHROMA_KINDS raises ValueError.
+    """
+    kind = _variable(CHROMA_VARIABLE).lower() or "single"
+    if kind not in CHROMA_KINDS:
+        raise ValueError(f"{CHROMA_VARIABLE} is neither single nor distributed")
+    return kind
 
 
 def endpoint_problems() -> list[str]:
@@ -509,3 +525,41 @@ def delete_target_collections(names: list[str]) -> None:
     for name in names:
         if name in existing:
             _weaviate().collections.delete(name)
+
+
+def compaction_properties(
+    pages_before: dict[int, list[str]],
+    pages_after: dict[int, list[str]],
+    state_before: dict[str, Any],
+    state_after: dict[str, Any],
+    times: dict[str, float],
+) -> list[tuple[str, object]]:
+    """The test properties that A-25 records about a copy during compaction.
+
+    `pages_before` and `pages_after` hold the ids of the source pages read
+    right before and right after the copy, by offset; offset 0 is one of
+    them. `crossed` is whether page 0 changed, and `changed_offsets` lists
+    each offset whose page changed. The states are the collection's
+    `version` and `log_position` at the same two moments. `times` holds the
+    monotonic clock at "created", "written", "copy_started" and
+    "copy_finished"; the properties give the durations in seconds.
+    """
+    return [
+        ("crossed", pages_before[0] != pages_after[0]),
+        (
+            "changed_offsets",
+            sorted(o for o in pages_before if pages_before[o] != pages_after.get(o)),
+        ),
+        ("state_before", state_before),
+        ("state_after", state_after),
+        ("write_seconds", round(times["written"] - times["created"], 2)),
+        (
+            "copy_started_after_create_seconds",
+            round(times["copy_started"] - times["created"], 2),
+        ),
+        (
+            "copy_finished_after_create_seconds",
+            round(times["copy_finished"] - times["created"], 2),
+        ),
+        ("copy_seconds", round(times["copy_finished"] - times["copy_started"], 2)),
+    ]
