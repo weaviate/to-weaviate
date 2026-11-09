@@ -18,6 +18,8 @@ from to_weaviate.target import connect as connect_module
 from to_weaviate.target import schema
 from to_weaviate.target.schema import (
     PlanMismatch,
+    SchemaRejected,
+    WeaviateSchema,
     collection_kwargs,
     differences,
     ensure_collection,
@@ -455,6 +457,84 @@ def test_kwargs_google_without_project_id_uses_studio():
     k = collection_kwargs([entry(mode="embed", vectorizer=v)])
     assert vec(k).vectorizer.projectId is None
     assert vec(k).vectorizer.apiEndpoint == "generativelanguage.googleapis.com"
+
+
+@pytest.mark.parametrize("server_module", ["text2vec-google", "text2vec-palm"])
+def test_differences_accepts_both_google_names(server_module):
+    v = p.VectorizerPlan(module="text2vec-google")
+    cfg = config(module=server_module)
+    found = differences(
+        FakeClient(FakeCollection(cfg)),  # type: ignore[arg-type]
+        [entry(mode="embed", vectorizer=v)],
+    )
+    assert found == []
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "colour",
+        "name",
+        "source_properties",
+        "vectorize_collection_name",
+        "quantizer",
+        "vector_index_config",
+    ],
+)
+def test_kwargs_refuses_a_vectorizer_option_key(key):
+    v = p.VectorizerPlan(module="text2vec-openai", options={key: "x"})
+    message = f"vectorizer option {key} is not accepted by text2vec-openai"
+    with pytest.raises(PlanMismatch, match=message):
+        collection_kwargs([entry(mode="embed", vectorizer=v)])
+
+
+def test_kwargs_refuses_a_vectorizer_option_value():
+    v = p.VectorizerPlan(module="text2vec-openai", options={"dimensions": "many"})
+    with pytest.raises(PlanMismatch, match="dimensions"):
+        collection_kwargs([entry(mode="embed", vectorizer=v)])
+
+
+class MetaClient(FakeClient):
+    def get_meta(self) -> dict[str, Any]:
+        return {
+            "version": "1.40.4",
+            "modules": {"text2vec-openai": {}, "backup-s3": {}},
+        }
+
+
+def test_weaviate_schema_modules():
+    schema_ = WeaviateSchema(MetaClient(None))  # type: ignore[arg-type]
+    assert schema_.modules() == {"text2vec-openai", "backup-s3"}
+
+
+def test_weaviate_schema_differences_and_ensure_use_the_client():
+    client = FakeClient(None)
+    schema_ = WeaviateSchema(client)  # type: ignore[arg-type]
+    assert schema_.differences([entry()]) is None
+    assert schema_.ensure([entry()]) == "created"
+    assert client.collections.created[0]["name"] == "My_docs"
+
+
+@pytest.mark.parametrize("status", [400, 422])
+def test_weaviate_schema_turns_a_refused_creation_into_schema_rejected(status):
+    client = FakeClient(None)
+    body = {"error": [{"message": "vector index dynamic needs async indexing"}]}
+    client.collections.fail = [
+        UnexpectedStatusCodeError(
+            "Collection may not have been created properly.",
+            httpx.Response(status, json=body),
+        )
+    ]
+    with pytest.raises(SchemaRejected) as info:
+        WeaviateSchema(client).ensure([entry()])  # type: ignore[arg-type]
+    assert str(info.value) == "vector index dynamic needs async indexing"
+
+
+def test_weaviate_schema_keeps_other_status_errors():
+    client = FakeClient(None)
+    client.collections.fail = [_status_error(401)]
+    with pytest.raises(UnexpectedStatusCodeError):
+        WeaviateSchema(client).ensure([entry()])  # type: ignore[arg-type]
 
 
 def test_connect_cloud_without_api_key(monkeypatch):

@@ -5,9 +5,14 @@ import time
 from collections import Counter
 from collections.abc import Iterable, Iterator
 from dataclasses import replace
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
+import typer
+from typer.testing import CliRunner, Result
+
+from to_weaviate.cli import build_app
 from to_weaviate.plan import CollectionPlan
+from to_weaviate.settings import API_KEY_MAP, ChromaSettings, WeaviateSettings
 from to_weaviate.sources.base import (
     FieldStats,
     Page,
@@ -15,6 +20,7 @@ from to_weaviate.sources.base import (
     Record,
     SourceCollection,
 )
+from to_weaviate.target.schema import PlanMismatch
 from to_weaviate.target.writer import Reject, TargetObject
 from to_weaviate.types import SPARSE_VECTOR, value_type
 
@@ -46,11 +52,16 @@ class FakeSource:
     COLLECTION = "docs"
 
     def __init__(
-        self, records: list[Record], page_size: int = 100, read_delay: float = 0.0
+        self,
+        records: list[Record],
+        page_size: int = 100,
+        read_delay: float = 0.0,
+        embedding: dict[str, Any] | None = None,
     ) -> None:
         self.records = list(records)
         self.page_size = page_size
         self.read_delay = read_delay
+        self.embedding = embedding
         self.read_calls = 0
         self.peak_concurrent_reads = 0
         self._active_reads = 0
@@ -86,7 +97,7 @@ class FakeSource:
                 count=len(self.records),
                 dimension=len(vectors[0]) if vectors else None,
                 distance="cosine",
-                embedding=None,
+                embedding=self.embedding,
                 fields=[
                     FieldStats(key, dict(seen))
                     for key, seen in sorted(types.items())
@@ -218,3 +229,131 @@ class FakeWriter:
             if self.calls == self.fail_on_call:
                 raise RuntimeError(f"fake write failure on call {self.calls}")
             return rejects
+
+
+class FakeSchema:
+    """Schema over a dict of existing target collections.
+
+    `existing` maps a target name to the differences its collection has from
+    the plan. `ensure` raises `ensure_error` when it is set.
+    """
+
+    def __init__(
+        self,
+        modules: Iterable[str] = ("text2vec-openai", "text2vec-weaviate"),
+        existing: dict[str, list[str]] | None = None,
+        ensure_error: Exception | None = None,
+    ) -> None:
+        self.enabled = set(modules)
+        self.existing = dict(existing or {})
+        self.ensure_error = ensure_error
+        self.ensured: list[str] = []
+
+    def modules(self) -> set[str]:
+        return set(self.enabled)
+
+    def differences(self, group: list[CollectionPlan]) -> list[str] | None:
+        return self.existing.get(group[0].target.name)
+
+    def ensure(self, group: list[CollectionPlan]) -> Literal["created", "exists"]:
+        if self.ensure_error is not None:
+            raise self.ensure_error
+        name = group[0].target.name
+        found = self.existing.get(name)
+        if found:
+            raise PlanMismatch("; ".join(found))
+        self.ensured.append(name)
+        if found is None:
+            self.existing[name] = []
+            return "created"
+        return "exists"
+
+
+class FakeFactories:
+    """The four `build_app` factories over fakes. Counts the factory calls.
+
+    `source_error` is raised by the source factory, `target_error` by the
+    writer and schema factories, like a failed connection.
+    """
+
+    def __init__(
+        self,
+        source: FakeSource,
+        writer: FakeWriter | None = None,
+        schema: FakeSchema | None = None,
+        source_error: Exception | None = None,
+        target_error: Exception | None = None,
+    ) -> None:
+        self.source = source
+        self.writer = writer or FakeWriter()
+        self.schema = schema or FakeSchema()
+        self.source_error = source_error
+        self.target_error = target_error
+        self.source_calls = 0
+        self.schema_calls = 0
+        self.consistency: list[str | None] = []
+
+    def app(self) -> typer.Typer:
+        return build_app(self._source, self._writer, self._reader, self._schema)
+
+    def _source(self, settings: ChromaSettings) -> FakeSource:
+        self.source_calls += 1
+        if self.source_error is not None:
+            raise self.source_error
+        return self.source
+
+    def _writer(
+        self, settings: WeaviateSettings, consistency: str | None
+    ) -> FakeWriter:
+        if self.target_error is not None:
+            raise self.target_error
+        self.consistency.append(consistency)
+        return self.writer
+
+    def _reader(self, settings: WeaviateSettings) -> None:
+        return None
+
+    def _schema(self, settings: WeaviateSettings) -> FakeSchema:
+        self.schema_calls += 1
+        if self.target_error is not None:
+            raise self.target_error
+        return self.schema
+
+
+def cli_env(**overrides: str | None) -> dict[str, str | None]:
+    """Runner environment with the keys the commands need; None unsets a variable."""
+    env: dict[str, str | None] = {var: None for var in API_KEY_MAP}
+    env.update(
+        {
+            "CHROMA_URL": None,
+            "CHROMA_TENANT": None,
+            "CHROMA_DATABASE": None,
+            "CHROMA_TOKEN_HEADER": None,
+            "CHROMA_API_KEY": "chroma-key",
+            "WEAVIATE_URL": "http://localhost:8099",
+            "WEAVIATE_GRPC_URL": None,
+            "WEAVIATE_API_KEY": "weaviate-key",
+            "TO_WEAVIATE_DEBUG": None,
+        }
+    )
+    env.update(overrides)
+    return env
+
+
+def cli_records(n: int, year_text_at: int | None = None) -> list[Record]:
+    """Records with an int `year`; the record at `year_text_at` has a text year."""
+    return [
+        Record(
+            f"id-{i}",
+            [float(i), 1.0],
+            f"doc {i}",
+            None,
+            {"year": "unknown" if i == year_text_at else 2000 + i},
+        )
+        for i in range(n)
+    ]
+
+
+def invoke(fakes: FakeFactories, *args: str, **env: str | None) -> Result:
+    """Run the app of `fakes` in `cli_env` with `env` applied over it."""
+    return CliRunner().invoke(fakes.app(), list(args), env=cli_env(**env))

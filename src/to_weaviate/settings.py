@@ -2,7 +2,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import SplitResult, unquote, urlparse, urlsplit, urlunsplit
 
 from dotenv import dotenv_values
 
@@ -45,6 +45,56 @@ API_KEY_MAP = {
     "XAI_APIKEY": "X-Xai-Api-Key",
     "XAI_API_KEY": "X-Xai-Api-Key",
 }
+
+
+URL_VARIABLES = ("CHROMA_URL", "WEAVIATE_URL", "WEAVIATE_GRPC_URL")
+
+
+def _split(url: str) -> tuple[SplitResult, str]:
+    """`url` split, with `//` put in front of a URL without a scheme."""
+    prefix = "" if "://" in url else "//"
+    return urlsplit(prefix + url), prefix
+
+
+def _plain_userinfo(url: str) -> tuple[str | None, str]:
+    """The userinfo of `url` and `url` without it, by plain string search.
+
+    For URLs that `urlsplit` refuses. The authority runs from after `://`, or
+    from the start, to the first `/`. The userinfo is the part of the
+    authority before its last `@`.
+    """
+    scheme_end = url.find("://")
+    start = 0 if scheme_end < 0 else scheme_end + 3
+    end = url.find("/", start)
+    at = url.rfind("@", start, len(url) if end < 0 else end)
+    if at < 0:
+        return None, url
+    return url[start:at], url[:start] + url[at + 1 :]
+
+
+def without_userinfo(url: str) -> str:
+    """`url` without its `user:password@` part. Never raises."""
+    try:
+        parts, prefix = _split(url)
+    except ValueError:
+        return _plain_userinfo(url)[1]
+    if "@" not in parts.netloc:
+        return url
+    netloc = parts.netloc.rsplit("@", 1)[1]
+    return urlunsplit(parts._replace(netloc=netloc))[len(prefix) :]
+
+
+def url_passwords(url: str) -> list[str]:
+    """The password of `url`, as written and percent-decoded. Never raises."""
+    password: str | None
+    try:
+        password = _split(url)[0].password
+    except ValueError:
+        userinfo = _plain_userinfo(url)[0] or ""
+        password = userinfo.partition(":")[2] if ":" in userinfo else None
+    if not password:
+        return []
+    return list(dict.fromkeys([password, unquote(password)]))
 
 
 class MissingCredential(Exception):
