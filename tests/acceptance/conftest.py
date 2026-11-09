@@ -2,8 +2,9 @@
 
 The suite runs the installed to-weaviate command against a real Chroma server
 and a real Weaviate server. It starts neither of them. It runs only when the
-environment names the test endpoints, because it deletes and recreates
-collections on both servers.
+environment names the endpoints of its target, because it deletes and
+recreates collections on both servers. `endpoint_problems` in tests/e2e.py
+holds the rules of each target.
 """
 
 import os
@@ -21,6 +22,12 @@ from e2e import (
     close_weaviate,
     create_target_collection,
     delete_target_collections,
+    embedded_dimension,
+    enabled_vectorizer,
+    endpoint_problems,
+    nodes,
+    target,
+    vectorizer,
     weaviate_by_source_id,
     weaviate_compressed,
     weaviate_config,
@@ -49,10 +56,16 @@ __all__ = [
     "compression_wait",
     "copy_and_verify",
     "create_target_collection",
+    "embedded_dimension",
+    "enabled_vectorizer",
+    "endpoint_problems",
+    "nodes",
     "read_plan",
     "run",
     "run_text",
     "start",
+    "target",
+    "vectorizer",
     "weaviate_by_source_id",
     "weaviate_compressed",
     "weaviate_config",
@@ -72,12 +85,6 @@ __all__ = [
     "write_plan",
 ]
 
-TEST_ENDPOINTS = {
-    "CHROMA_URL": "http://localhost:8001",
-    "WEAVIATE_URL": "http://localhost:8099",
-    "WEAVIATE_GRPC_URL": "http://localhost:50099",
-    "WEAVIATE_API_KEY": "admin-key",
-}
 REQUIRE_VARIABLE = "TO_WEAVIATE_REQUIRE_ACCEPTANCE"
 # Whether the Weaviate server runs with ASYNC_INDEXING: "true" or "false",
 # as the CI matrix sets it. Unset, a test decides from what the server does.
@@ -141,22 +148,6 @@ def compression_wait() -> float:
     indexes the queue first, which took up to 85 s on a 3-node cluster.
     """
     return 3.0 if async_indexing() is False else 180.0
-
-
-def endpoint_problems() -> list[str]:
-    """Each suite variable that is missing or differs from the test endpoint.
-
-    No value from the environment appears in the text.
-    """
-    problems = []
-    for name, expected in TEST_ENDPOINTS.items():
-        value = os.environ.get(name)
-        if not value:
-            problems.append(f"{name} is not set")
-        elif value != expected:
-            shown = "the test key" if name == "WEAVIATE_API_KEY" else expected
-            problems.append(f"{name} is not {shown}")
-    return problems
 
 
 def read_plan(workdir: Path) -> dict[str, Any]:
@@ -226,8 +217,21 @@ def _test_endpoints() -> Iterator[None]:
         if os.environ.get(REQUIRE_VARIABLE) == "1":
             pytest.fail(reason)
         pytest.skip(reason)
+    if target() == "cloud":
+        listed = e2e.weaviate_collection_names()
+        problem = e2e.dedicated_cluster_problem(listed, SUITE_COLLECTIONS)
+        if problem:
+            close_weaviate()
+            pytest.fail(problem)
     yield
     close_weaviate()
+
+
+# tryfirst: the guard runs before the hook that sets up the fixtures of the
+# item, so a fixture of an infra test never runs on the cloud target.
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    e2e.fail_infra_on_cloud(item)
 
 
 @pytest.fixture(scope="session")

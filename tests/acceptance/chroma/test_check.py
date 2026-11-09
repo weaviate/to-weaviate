@@ -1,4 +1,4 @@
-from conftest import run, weaviate_modules
+from conftest import enabled_vectorizer, run, weaviate_modules
 
 # Neither variable reaches the command from the shell.
 NO_OPENAI_KEY = {"OPENAI_APIKEY": "", "OPENAI_API_KEY": ""}
@@ -33,4 +33,4 @@ def test_check_needs_the_provider_key_and_an_enabled_module(seeded, tmp_path):
     assert [e["code"] for e in r.data["errors"]] == ["module_not_enabled"], r
     message = r.data["errors"][0]["message"]
     assert message.startswith(f"module {DISABLED_MODULE} is not enabled on the target")
-    assert "text2vec-transformers" in message.partition("enabled modules: ")[2]
+    assert enabled_vectorizer() in message.partition("enabled modules: ")[2]

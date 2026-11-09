@@ -2,7 +2,8 @@
 
 Both suites run the installed to-weaviate command and read the target through
 the Weaviate client. Each suite decides which servers it accepts and which
-environment the command gets.
+environment the command gets. The target rules of the acceptance suite are
+here, so that the unit tests can import them.
 """
 
 import json
@@ -10,9 +11,11 @@ import os
 import subprocess
 import sysconfig
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 import weaviate
@@ -25,11 +28,27 @@ from weaviate.collections.classes.internal import Object
 from to_weaviate.output import ERROR_EXIT, secret_values
 from to_weaviate.settings import weaviate_settings
 from to_weaviate.target.connect import connect
+from to_weaviate.target.schema import module_names
 
 COMMAND = Path(sysconfig.get_path("scripts")) / "to-weaviate"
 COMMAND_TIMEOUT = 600
 MAX_MESSAGE_CHARS = 500
 ERROR_KEYS = {"status", "code", "message", "hint"}
+
+# "local" or "cloud": the servers that the acceptance suite runs against.
+TARGET_VARIABLE = "ACCEPTANCE_TARGET"
+# The module that the tests of the embed and both modes plan.
+VECTORIZER_VARIABLE = "ACCEPTANCE_VECTORIZER"
+DEFAULT_VECTORIZER = "text2vec-transformers"
+# The number of Weaviate nodes of the target.
+NODES_VARIABLE = "ACCEPTANCE_NODES"
+LOCAL_ENDPOINTS = {
+    "CHROMA_URL": "http://localhost:8001",
+    "WEAVIATE_URL": "http://localhost:8099",
+    "WEAVIATE_GRPC_URL": "http://localhost:50099",
+    "WEAVIATE_API_KEY": "admin-key",
+}
+CLOUD_HOST_SUFFIXES = (".weaviate.cloud", ".weaviate.network")
 
 _client: weaviate.WeaviateClient | None = None
 # The secret values of the environments that `run` and `start` gave a command.
@@ -162,6 +181,136 @@ def start(
         )
 
 
+def _variable(name: str) -> str:
+    return os.environ.get(name, "").strip()
+
+
+def target() -> str:
+    """The value of TARGET_VARIABLE in lower case; unset or empty is "local".
+
+    endpoint_problems reports a value other than "local" and "cloud".
+    """
+    return _variable(TARGET_VARIABLE).lower() or "local"
+
+
+def vectorizer() -> str:
+    """The module that VECTORIZER_VARIABLE names.
+
+    Unset or empty is DEFAULT_VECTORIZER, the module of the local target.
+    """
+    return _variable(VECTORIZER_VARIABLE) or DEFAULT_VECTORIZER
+
+
+def nodes() -> int:
+    """The node count that NODES_VARIABLE names; unset or empty is 1.
+
+    A value that is not a whole number of at least 1 raises ValueError.
+    """
+    value = _variable(NODES_VARIABLE)
+    if not value:
+        return 1
+    if not value.isdecimal() or int(value) < 1:
+        raise ValueError(f"{NODES_VARIABLE} is not a whole number of at least 1")
+    return int(value)
+
+
+def endpoint_problems() -> list[str]:
+    """Each suite variable that breaks a rule of the target that target() names.
+
+    The local target needs the four LOCAL_ENDPOINTS. The cloud target needs a
+    Weaviate Cloud URL, a key, no WEAVIATE_GRPC_URL and the local Chroma. No
+    value from the environment appears in the text.
+    """
+    if target() == "local":
+        return _local_problems()
+    if target() == "cloud":
+        return _cloud_problems()
+    return [f"{TARGET_VARIABLE} is neither local nor cloud"]
+
+
+def _local_problems() -> list[str]:
+    problems = []
+    for name, expected in LOCAL_ENDPOINTS.items():
+        value = os.environ.get(name)
+        if not value:
+            problems.append(f"{name} is not set")
+        elif value != expected:
+            shown = "the test key" if name == "WEAVIATE_API_KEY" else expected
+            problems.append(f"{name} is not {shown}")
+    return problems
+
+
+def _cloud_problems() -> list[str]:
+    problems = []
+    url = _variable("WEAVIATE_URL")
+    if not url:
+        problems.append("WEAVIATE_URL is not set")
+    else:
+        problems.extend(_cloud_url_problems(url))
+    if not _variable("WEAVIATE_API_KEY"):
+        problems.append("WEAVIATE_API_KEY is not set")
+    # The tool reads an empty value as unset.
+    if _variable("WEAVIATE_GRPC_URL"):
+        problems.append(
+            "WEAVIATE_GRPC_URL is set (the cloud target connects without it)"
+        )
+    chroma = os.environ.get("CHROMA_URL")
+    local_chroma = LOCAL_ENDPOINTS["CHROMA_URL"]
+    if not chroma:
+        problems.append("CHROMA_URL is not set")
+    elif chroma != local_chroma:
+        problems.append(
+            f"CHROMA_URL is not {local_chroma} (the source stays the local test Chroma)"
+        )
+    return problems
+
+
+def _cloud_url_problems(url: str) -> list[str]:
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+    except ValueError:
+        return ["WEAVIATE_URL is not a URL"]
+    problems = []
+    if parts.scheme != "https":
+        problems.append("WEAVIATE_URL does not use https (the cloud target needs TLS)")
+    if not host.endswith(CLOUD_HOST_SUFFIXES):
+        problems.append(
+            "the host of WEAVIATE_URL does not end with "
+            + " or ".join(CLOUD_HOST_SUFFIXES)
+        )
+    return problems
+
+
+def fail_infra_on_cloud(item: pytest.Item) -> None:
+    """Fail `item` when it is marked infra and target() is "cloud".
+
+    An infra test runs docker or kubectl, which reach only the local servers.
+    The acceptance conftest calls it from pytest_runtest_setup, so it runs
+    before any fixture of the item is set up.
+    """
+    if item.get_closest_marker("infra") is not None and target() == "cloud":
+        pytest.fail("infra tests run only against the local servers")
+
+
+def dedicated_cluster_problem(
+    listed: Iterable[str], owned: Iterable[str]
+) -> str | None:
+    """The failure text when `listed` holds a collection outside `owned`, else None.
+
+    The suite deletes every collection that `owned` names. A target with other
+    collections is shared, and a collection of such a name on it can hold the
+    data of someone else.
+    """
+    foreign = sorted(set(listed) - set(owned))
+    if not foreign:
+        return None
+    return (
+        "the target holds collections the suite does not own: "
+        f"{', '.join(foreign)}; use a dedicated cluster"
+    )
+
+
 def _weaviate() -> weaviate.WeaviateClient:
     global _client
     if _client is None:
@@ -280,6 +429,24 @@ def weaviate_modules() -> set[str]:
     return set(_weaviate().get_meta().get("modules") or {})
 
 
+def enabled_vectorizer() -> str:
+    """vectorizer(), after the test fails when the target does not enable it."""
+    module = vectorizer()
+    if not module_names(module) & weaviate_modules():
+        pytest.fail(
+            f"/v1/meta of the target does not list {module}; set "
+            f"{VECTORIZER_VARIABLE} to a module that the target enables"
+        )
+    return module
+
+
+def embedded_dimension(name: str, vector: str = "default") -> int:
+    """The length of the vector `vector` of the first object of `name`."""
+    response = _collection(name).query.fetch_objects(limit=1, include_vector=True)
+    assert response.objects, f"{name} has no objects"
+    return len(response.objects[0].vector[vector])
+
+
 def weaviate_wait_indexed(name: str, timeout: float = 120.0) -> None:
     """Wait until every shard of `name` has indexed its vector queue.
 
@@ -328,13 +495,18 @@ def delete_target_collection(name: str) -> None:
     _weaviate().collections.delete(name)
 
 
+def weaviate_collection_names() -> list[str]:
+    """The names of every collection of the target."""
+    return list(_weaviate().collections.list_all(simple=True))
+
+
 def delete_target_collections(names: list[str]) -> None:
     """Delete each of the target collections `names` that exists, and no other.
 
     The server takes about 0.2 seconds to delete a collection that does not
     exist, so the existing ones are listed first.
     """
-    existing = set(_weaviate().collections.list_all(simple=True))
+    existing = set(weaviate_collection_names())
     for name in names:
         if name in existing:
             _weaviate().collections.delete(name)
