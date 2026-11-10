@@ -2,15 +2,23 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from to_weaviate.engine.copy import copy_collection, plan_hash, raise_if_compacted
+from to_weaviate.engine.copy import (
+    compaction_reporter,
+    copy_collection,
+    plan_hash,
+    raise_if_compacted,
+    write_records,
+)
 from to_weaviate.engine.verify import (
     id_tables,
     missing_source_ids,
+    owned_total,
     source_listed,
-    stale_objects,
-    target_total,
+    stale_batches,
+    stale_count,
 )
 from to_weaviate.events import Events
+from to_weaviate.ids import to_uuid
 from to_weaviate.plan import CollectionPlan
 from to_weaviate.sources.base import Source, SourceCollection
 from to_weaviate.state import State
@@ -22,14 +30,17 @@ PRUNE_LIMIT_PERCENT = 10
 PLAN_CHANGED = (
     "the plan entry changed since the last copy; every record is written again"
 )
+SCRATCH_PREFIX = "sync-"
 
 
 @dataclass(frozen=True)
 class SyncResult:
-    copied: int  # records written in this pass: new or changed
+    copied: int  # records written in this run: new, changed or missing
     unchanged: int
     rejects: int
-    stale: int  # target objects with a source_id and no source record
+    # Target objects with a source_id and no source record. After a prune,
+    # the objects whose record `Source.get` did not find.
+    stale: int
     deleted: int
     plan_changed: bool
     # --prune without --force, and the stale objects are over the limit.
@@ -74,17 +85,24 @@ def sync_collection(
     """Read the whole source again and write the new and changed records.
 
     `copy_collection` starts fresh: it reads every record and skips those
-    whose stored hash matches. A plan entry that differs from the one the
-    hashes were written under drops them first, so every record is written
-    again. Then the source ids are listed against the target objects. The
-    hashes of the records without a target object go, so the next sync writes
-    them. With `prune`, the stale objects are deleted, after their hashes,
-    unless they are over the limit and `force` is not set; the pass must have
-    read a source that no one wrote to, so a count that changed around the
-    listing raises SourceWriting before anything is deleted.
+    whose stored hash matches. Each stored hash holds the plan hash of the
+    entry it was written under, so after an edit of the entry none matches
+    and every record is written again; this run warns about the edit.
+
+    Then the source ids are listed against the target objects. A record
+    without a target object, other than a reject of this run, is read with
+    `Source.get` and written. With `prune`, a count that changed around the
+    listing raises SourceWriting before anything is deleted. The stale
+    objects are deleted unless they are more than PRUNE_LIMIT_PERCENT of the
+    objects with a source_id and `force` is not set. Before a batch is
+    deleted, `Source.get` reads its source ids again: a record the source
+    holds was missed by the listing, and its object stays. The hashes of the
+    deleted objects go before the objects, so a record that comes back after
+    a failed deletion is written again.
     """
     ref = collection.ref
-    plan_changed = state.set_plan_hash(ref, plan_hash(entry))
+    plan = plan_hash(entry)
+    plan_changed = state.set_plan_hash(ref, plan)
     if plan_changed:
         events.emit("warning", "plan_changed", ref=ref, message=PLAN_CHANGED)
         if warn is not None:
@@ -102,52 +120,63 @@ def sync_collection(
         waiting=waiting,
         fresh=True,
     )
-
-    def on_wait(unindexed: int, total: int) -> None:
-        events.emit(
-            "info", "compaction_wait", ref=ref, unindexed=unindexed, total=total
-        )
-        if waiting is not None:
-            waiting(unindexed, total)
-
+    with_vectors = any(v.mode == "keep" for v in entry.target.vectors)
     before = source.count(collection)
-    compaction = source.wait_compacted(collection, on_wait)
-    with id_tables(source, reader, entry, collection, workdir) as db:
+    compaction = source.wait_compacted(
+        collection, compaction_reporter(events, ref, waiting)
+    )
+    forgotten = restored = restore_rejects = deleted = 0
+    refused = False
+    with id_tables(source, reader, entry, collection, workdir, SCRATCH_PREFIX) as db:
         listed = source_listed(db)
-        total = target_total(db)
-        stale = stale_objects(db)
+        owned = owned_total(db)
+        stale = stale_count(db)
         after = source.count(collection)
         raise_if_compacted(source, collection, compaction)
-        for missing in missing_source_ids(db):
-            state.delete_hashes(ref, missing)
-    if prune and not before == listed == after:
-        raise SourceWriting(collection.name, before, listed, after)
-    deleted = 0
-    refused = False
-    if prune and stale:
-        refused = over_prune_limit(len(stale), total) and not force
-        if not refused:
-            # The hashes go first: after a deletion that fails, a record that
-            # comes back must be written again.
-            state.delete_hashes(ref, [source_id for _, source_id in stale])
-            deleted = deleter.delete(entry, [uuid for uuid, _ in stale])
-    copied = result.written
+        if prune and not before == listed == after:
+            raise SourceWriting(collection.name, before, listed, after)
+        rejected = state.rejected_ids(ref)
+        for batch in missing_source_ids(db):
+            ids = [i for i in batch if i not in rejected and to_uuid(i) not in rejected]
+            if not ids:
+                continue
+            # The pass counted a record with a stored hash as unchanged.
+            forgotten += state.delete_hashes(ref, ids)
+            records = source.get(collection, ids, with_vectors)
+            written, _ = write_records(writer, state, entry, ref, plan, records)
+            restored += written
+            restore_rejects += len(records) - written
+        if prune and stale:
+            refused = over_prune_limit(stale, owned) and not force
+            if not refused:
+                stale = 0
+                for pairs in stale_batches(db):
+                    live = source.get(collection, [i for _, i in pairs], False)
+                    held = {record.id for record in live}
+                    gone = [(uuid, i) for uuid, i in pairs if i not in held]
+                    if gone:
+                        stale += len(gone)
+                        state.delete_hashes(ref, [i for _, i in gone])
+                        deleted += deleter.delete(entry, [uuid for uuid, _ in gone])
+    copied = result.written + restored
+    unchanged = max(result.copied - result.written - forgotten, 0)
+    rejects = result.rejects + restore_rejects
     events.emit(
         "info",
         "sync_finished",
         ref=ref,
         copied=copied,
-        unchanged=result.unchanged,
-        rejects=result.rejects,
-        stale=len(stale),
+        unchanged=unchanged,
+        rejects=rejects,
+        stale=stale,
         deleted=deleted,
     )
     return SyncResult(
-        copied,
-        result.unchanged,
-        result.rejects,
-        len(stale),
-        deleted,
-        plan_changed,
-        refused,
+        copied=copied,
+        unchanged=unchanged,
+        rejects=rejects,
+        stale=stale,
+        deleted=deleted,
+        plan_changed=plan_changed,
+        prune_refused=refused,
     )

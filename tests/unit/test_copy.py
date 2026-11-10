@@ -12,6 +12,7 @@ from to_weaviate.engine.copy import (
     content_hash,
     copy_collection,
     plan_hash,
+    record_hash,
 )
 from to_weaviate.events import Events
 from to_weaviate.ids import to_uuid
@@ -53,6 +54,17 @@ ENTRY = p.CollectionPlan(
         ],
     ),
 )
+# ENTRY without the property n.
+DROPPED = ENTRY.model_copy(
+    update={
+        "target": ENTRY.target.model_copy(
+            update={
+                "properties": ENTRY.target.properties[:-1],
+                "dropped": [p.DroppedKey(source_key="n", reason="test")],
+            }
+        )
+    }
+)
 BASE = Record("a", [0.1, 0.2], "dóc", "file://x", {"k": 1, "j": "v"})
 
 
@@ -76,7 +88,13 @@ def events(tmp_path):
 
 
 def hashes(records: list[Record]) -> list[tuple[str, bytes]]:
-    return [(r.id, content_hash(r)) for r in records]
+    return [(r.id, record_hash(plan_hash(ENTRY), r)) for r in records]
+
+
+def test_record_hash_is_blake2b_of_the_plan_hash_and_the_content_hash():
+    plan = plan_hash(ENTRY)
+    expected = hashlib.blake2b(plan + content_hash(BASE), digest_size=16).digest()
+    assert record_hash(plan, BASE) == expected
 
 
 def test_content_hash_is_blake2b_of_the_json_parts():
@@ -478,21 +496,51 @@ def test_skip_unchanged_writes_only_changed_records(src, state, events):
     assert writer.objects[to_uuid("id-5")].properties["document"] == "changed"
 
 
-def test_skip_unchanged_counts_the_unchanged_records(src, state, events):
+def test_skip_unchanged_counts_the_skipped_records_as_copied(src, state, events):
     copy_collection(src, FakeWriter(), state, events, ENTRY, C, 2)
     src.records[5] = replace(src.records[5], document="changed")
-    state.reset(C.ref)
     result = copy_collection(
-        src, FakeWriter(), state, events, ENTRY, C, 2, skip_unchanged=True
+        src, FakeWriter(), state, events, ENTRY, C, 2, skip_unchanged=True, fresh=True
     )
-    assert (result.copied, result.unchanged) == (1000, 999)
+    assert (result.copied, result.written) == (1000, 1)
     # status reads this count, so a sync leaves every record counted.
     assert state.progress()[0].copied == 1000
 
 
 def test_a_copy_skips_no_record(src, state, events):
     result = copy_collection(src, FakeWriter(), state, events, ENTRY, C, 2)
-    assert result.unchanged == 0
+    assert result.written == 1000
+
+
+def test_record_hashes_follow_the_plan_entry(src, state, events):
+    copy_collection(src, FakeWriter(), state, events, ENTRY, C, 2)
+    assert state.unchanged(C.ref, hashes(src.records[:2])) == {"id-0", "id-1"}
+    other = [(r.id, record_hash(plan_hash(DROPPED), r)) for r in src.records[:2]]
+    assert state.unchanged(C.ref, other) == set()
+
+
+def test_a_copy_keeps_the_plan_hash_that_is_stored(src, state, events):
+    copy_collection(src, FakeWriter(), state, events, ENTRY, C, 2)
+    copy_collection(src, FakeWriter(), state, events, DROPPED, C, 2)
+    assert state.set_plan_hash(C.ref, plan_hash(ENTRY)) is False
+
+
+def test_plan_hash_ignores_the_reason_of_a_dropped_key():
+    def dropping(reason: str) -> p.CollectionPlan:
+        return DROPPED.model_copy(
+            update={
+                "target": DROPPED.target.model_copy(
+                    update={"dropped": [p.DroppedKey(source_key="n", reason=reason)]}
+                )
+            }
+        )
+
+    assert plan_hash(dropping("one reason")) == plan_hash(dropping("another"))
+
+
+def test_plan_hash_ignores_a_field_set_to_its_default():
+    explicit = ENTRY.target.model_copy(update={"tenant": None, "dropped": []})
+    assert plan_hash(ENTRY.model_copy(update={"target": explicit})) == plan_hash(ENTRY)
 
 
 def test_plan_hash_follows_the_target_and_not_the_source():

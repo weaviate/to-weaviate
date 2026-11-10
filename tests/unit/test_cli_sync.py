@@ -1,25 +1,35 @@
 import json
+import re
 from dataclasses import replace
-from pathlib import Path
 
 import pytest
-from fakes import FakeFactories, FakeSource, FakeWriter, cli_records, invoke
+from fakes import (
+    FakeFactories,
+    FakeSource,
+    FakeWriter,
+    all_failed,
+    cli_records,
+    invoke,
+)
 from test_cli_commands import (
     DIR,
     LOCK_HINT,
     LOCK_MESSAGE,
+    REFUSED,
     _set_index,
     edit_target,
     error_of,
     held_lock,
+    inspected,
+    refusing,
     two_entries,
 )
 from typer.testing import Result
 
-from to_weaviate.cli import PRUNE_HINT, SOURCE_WRITING_HINT
+from to_weaviate.cli import PRUNE_HINT
 from to_weaviate.engine.copy import REJECTS_HINT, plan_hash
 from to_weaviate.engine.sync import PLAN_CHANGED
-from to_weaviate.engine.verify import TARGET_ABOVE_SOURCE
+from to_weaviate.engine.verify import COUNT_ABOVE_SOURCE, TARGET_ABOVE_SOURCE
 from to_weaviate.ids import to_uuid
 from to_weaviate.plan import DroppedKey, load_plan
 from to_weaviate.state import State
@@ -70,7 +80,7 @@ def test_sync_writes_the_changed_records_and_reports_the_stale_ones():
     assert r.exit_code == 0, r.output
     assert r.stdout.splitlines()[-3:] == [
         "docs -> Docs: copied 0, unchanged 10, rejects 0, stale 1, deleted 0",
-        "Total: copied 0, unchanged 10, stale 1, deleted 0",
+        "Total: copied 0, unchanged 10, rejects 0, stale 1, deleted 0",
         "Run to-weaviate sync --prune to delete the 1 stale object.",
     ]
 
@@ -88,8 +98,16 @@ def test_sync_prune_deletes_the_stale_objects():
     r = invoke(fakes, "sync", "--prune")
     assert r.exit_code == 0, r.output
     assert r.stdout.splitlines()[-1] == (
-        "Total: copied 0, unchanged 10, stale 0, deleted 0"
+        "Total: copied 0, unchanged 10, rejects 0, stale 0, deleted 0"
     )
+
+
+PRUNE_HINT_TEXT = (
+    "More than 10% of the objects with a source_id have no source record. "
+    "Check that the records were deleted on purpose and that no other migration "
+    "directory or application writes objects with a source_id to the collection. "
+    "To delete them, run to-weaviate sync --prune --force."
+)
 
 
 def test_sync_prune_refuses_more_than_ten_percent_without_force():
@@ -99,16 +117,48 @@ def test_sync_prune_refuses_more_than_ten_percent_without_force():
     assert error_of(r) == (
         1,
         "prune_limit",
-        "Stale objects above 10% in 1 collection; nothing was deleted there.",
-        PRUNE_HINT,
+        "Stale objects above 10% in Docs; nothing was deleted there.",
+        PRUNE_HINT_TEXT,
     )
+    assert PRUNE_HINT == PRUNE_HINT_TEXT
     row = json.loads(r.stdout)["collections"][0]
     assert counts(row) == (0, 8, 0, 2, 0) and row["prune_refused"] is True
     assert len(fakes.writer.objects) == 10 and fakes.deleter.calls == 0
+    r = invoke(fakes, "sync", "--prune")
+    assert (
+        "docs -> Docs: copied 0, unchanged 8, rejects 0, stale 2, deleted 0, "
+        "prune refused"
+    ) in r.stdout.splitlines()
     r = invoke(fakes, "sync", "--prune", "--force", "--json")
     row = row_of(r)
     assert counts(row) == (0, 8, 0, 2, 2) and row["prune_refused"] is False
     assert len(fakes.writer.objects) == 8
+
+
+def test_sync_with_rejects_and_a_refused_prune_reports_both():
+    fakes = copied(FakeFactories(FakeSource(cli_records(10)), writer=FakeWriter()))
+    del fakes.source.records[:2]
+    fakes.writer.reject_ids = {"id-3"}
+    fakes.source.records[1] = replace(fakes.source.records[1], document="changed")
+    r = invoke(fakes, "sync", "--prune", "--json")
+    code, name, message, hint = error_of(r)
+    assert (code, name) == (1, "rejects")
+    assert message == (
+        "1 record rejected. Stale objects above 10% in Docs; nothing was deleted "
+        "there."
+    )
+    assert hint.endswith(PRUNE_HINT_TEXT)
+
+
+def test_sync_force_needs_prune():
+    fakes = copied(FakeFactories(FakeSource(cli_records(10))))
+    r = invoke(fakes, "sync", "--force", "--json")
+    assert error_of(r) == (
+        2,
+        "usage",
+        "--force needs --prune.",
+        "Run to-weaviate sync --prune --force.",
+    )
 
 
 class ShrinkingSource(FakeSource):
@@ -119,18 +169,51 @@ class ShrinkingSource(FakeSource):
         self.records.pop()
 
 
-def test_sync_prune_stops_when_the_source_count_changes_during_the_listing():
+@pytest.mark.parametrize(
+    ("flags", "command"),
+    [
+        ((), "to-weaviate sync --prune"),
+        (("--force",), "to-weaviate sync --prune --force"),
+    ],
+)
+def test_sync_prune_stops_when_the_source_count_changes_during_the_listing(
+    flags, command
+):
     fakes = copied(FakeFactories(ShrinkingSource(cli_records(10))))
-    r = invoke(fakes, "sync", "--prune", "--json")
+    r = invoke(fakes, "sync", "--prune", *flags, "--json")
     assert error_of(r) == (
         4,
         "source_writing",
         "docs changed while sync listed its ids: 10 records before, 10 listed, "
         "9 after.",
-        SOURCE_WRITING_HINT,
+        f"Stop the writes to the source, then run {command} again.",
     )
     assert json.loads(r.stdout)["collection"] == "docs"
     assert len(fakes.writer.objects) == 10 and fakes.deleter.calls == 0
+
+
+def test_a_sync_whose_batch_is_refused_names_sync_in_the_hint():
+    fakes, _ = refusing(10, lambda n: all_failed(REFUSED))
+    r = invoke(fakes, "sync", "--parallelism", "1", "--json")
+    assert r.exit_code == 4
+    d = json.loads(r.stdout)
+    assert d["code"] == "target_unreachable"
+    assert d["hint"] == "Fix the cause and run to-weaviate sync again."
+
+
+def test_a_failed_sync_after_a_plan_edit_keeps_the_target_guard(tmp_path):
+    fakes = copied(FakeFactories(FakeSource(cli_records(10))))
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    edit_target(
+        tmp_path / DIR,
+        properties=[p for p in target.properties if p.name != "year"],
+        dropped=[*target.dropped, DroppedKey(source_key="year", reason="not needed")],
+    )
+    fakes.writer.fail_on_call = fakes.writer.calls + 1
+    assert invoke(fakes, "sync", "--json").exit_code == 5
+    fakes.writer.fail_on_call = None
+    r = invoke(fakes, "sync", "--json", WEAVIATE_URL="http://other:8099")
+    assert error_of(r)[:2] == (2, "state_mismatch")
 
 
 def test_a_sync_that_fails_before_its_first_page_keeps_status_and_the_target_guard():
@@ -146,18 +229,25 @@ def test_a_sync_that_fails_before_its_first_page_keeps_status_and_the_target_gua
     assert len(fakes.writer.objects) == 10
 
 
-def test_sync_prune_stops_when_weaviate_deletes_only_some_objects():
+@pytest.mark.parametrize(
+    ("flags", "command"),
+    [
+        ((), "to-weaviate sync --prune"),
+        (("--force",), "to-weaviate sync --prune --force"),
+    ],
+)
+def test_sync_prune_stops_when_weaviate_reports_failed_deletions(flags, command):
     fakes = copied(FakeFactories(FakeSource(cli_records(10))))
     del fakes.source.records[2]
-    fakes.deleter.error = DeleteFailed("Docs", 1, 1)
-    r = invoke(fakes, "sync", "--prune", "--json")
+    fakes.deleter.error = DeleteFailed("Docs", 1, 2)
+    r = invoke(fakes, "sync", "--prune", *flags, "--json")
     assert error_of(r) == (
         4,
         "delete_failed",
-        "Weaviate failed to delete 1 of 1 objects of Docs.",
-        "Run to-weaviate sync --prune again.",
+        "Weaviate did not delete 1 of 2 objects of docs in Docs.",
+        f"Run {command} again.",
     )
-    assert json.loads(r.stdout)["collection"] == "Docs"
+    assert json.loads(r.stdout)["collection"] == "docs"
 
 
 def test_sync_rejects_exit_1_with_the_rejects_hint():
@@ -224,11 +314,6 @@ def test_sync_passes_the_consistency_to_the_writer_and_the_deleter():
     assert fakes.consistency[-1] == "QUORUM" and fakes.delete_consistency == ["QUORUM"]
 
 
-def inspected(fakes: FakeFactories) -> FakeFactories:
-    assert invoke(fakes, "inspect", "chroma").exit_code == 0
-    return fakes
-
-
 def test_sync_enables_the_trained_quantizers_per_entry(tmp_path):
     fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
     _set_index(
@@ -255,12 +340,14 @@ def test_sync_text_output_lists_each_entry_and_the_total(tmp_path):
     assert lines[-3:] == [
         f"docs -> Docs (tenant a): {entry}",
         f"docs -> Docs (tenant b): {entry}",
-        "Total: copied 20, unchanged 0, stale 0, deleted 0",
+        "Total: copied 20, unchanged 0, rejects 0, stale 0, deleted 0",
     ]
     assert "Syncing docs to Docs (tenant a)" in lines
-    assert (
-        "Synced docs: 10 records written, 0 unchanged, 0 rejects, 0 stale, 0 deleted"
-    ) in lines
+    for tenant in ("a", "b"):
+        assert (
+            f"Synced docs to Docs (tenant {tenant}): 10 records written, "
+            "0 unchanged, 0 rejects, 0 stale, 0 deleted"
+        ) in lines
 
 
 def test_status_after_a_sync_shows_every_record_copied():
@@ -277,7 +364,7 @@ def test_verify_after_a_deletion_names_sync_prune():
     r = invoke(fakes, "verify", "--json")
     assert r.exit_code == 1, r.output
     checks = {c["name"]: c for c in json.loads(r.stdout)["checks"]}
-    assert checks["count"]["detail"].endswith(TARGET_ABOVE_SOURCE)
+    assert checks["count"]["detail"].endswith(COUNT_ABOVE_SOURCE)
     assert checks["ids"]["detail"].endswith(TARGET_ABOVE_SOURCE)
     assert '["id-2"]' in checks["ids"]["detail"]
 
@@ -288,6 +375,8 @@ def test_copy_stores_the_plan_hash(tmp_path):
     state = State(tmp_path / DIR / "state.sqlite")
     try:
         assert state.set_plan_hash(entry.source.ref, plan_hash(entry)) is False
+        # Another hash is reported as a change only when one was stored.
+        assert state.set_plan_hash(entry.source.ref, b"\0" * 16) is True
     finally:
         state.close()
 
@@ -302,8 +391,10 @@ def test_sync_without_a_copy_before_creates_the_collection_and_copies():
 
 def test_sync_help_names_prune():
     r = invoke(FakeFactories(FakeSource(cli_records(1))), "sync", "--help")
-    assert r.exit_code == 0 and "--prune" in r.stdout and "--force" in r.stdout
-    assert "Read the source again and write the new and changed records." in r.stdout
+    # A CI runner can make Rich color the help, which splits the option names.
+    text = re.sub(r"\x1b\[[0-9;]*m", "", r.stdout)
+    assert r.exit_code == 0 and "--prune" in text and "--force" in text
+    assert "Read the source again and write the new and changed records." in text
 
 
 def test_sync_rejects_a_parallelism_outside_the_range():
@@ -352,4 +443,3 @@ def test_sync_events_hold_plan_changed_and_sync_finished(tmp_path):
     assert last["event"] == "sync_finished"
     counted = (last["copied"], last["unchanged"], last["stale"], last["deleted"])
     assert counted == (9, 0, 1, 1)
-    assert Path(".to-weaviate/events.jsonl").exists()

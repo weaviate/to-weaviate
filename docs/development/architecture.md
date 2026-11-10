@@ -106,25 +106,30 @@ property that an existing collection lacks. `check` writes nothing.
 **`sync`**: the checks and the lock of `copy`, then for each plan entry
 `engine/sync.sync_collection`:
 
-1. stores the hash of the plan entry in `state.sqlite`. A hash that differs
-   from the stored one deletes the record hashes of the entry, so every
-   record is written again, and `sync` warns and writes the event
-   `plan_changed`;
+1. stores the hash of the plan entry in `state.sqlite`. When it differs
+   from the stored one, `sync` warns and writes the event `plan_changed`.
+   Each record hash is made from the plan hash and the record
+   (`engine/copy.record_hash`), so no stored hash matches after the edit
+   and every record is written again;
 2. runs `copy_collection` with `fresh` and `skip_unchanged`: after the
    compaction wait it resets the read positions and the rejects of the
    entry, then hashes each record and writes only those whose hash differs
-   from the stored one;
+   from the stored one. The count it reads after the pass becomes the
+   total;
 3. lists `Source.ids` and the `(uuid, source_id)` pairs of the target in a
-   scratch sqlite file (`engine/verify.id_tables`) and counts the objects
-   whose `source_id` names no record: the stale objects. An object without
-   `source_id` is not counted. The hashes of the records without a target
-   object are deleted, so the next sync writes them;
+   scratch sqlite file (`engine/verify.id_tables`, in a `sync-` directory)
+   and counts the objects with a `source_id` that no listed record has: the
+   stale objects. An object without `source_id` is not counted. The records
+   without a target object, other than the rejects of this run, are read
+   with `Source.get` and written (`engine/copy.write_records`);
 4. with `--prune`, compares `Source.count` from before and after the listing
-   with the listed count and raises `SourceWriting` when they differ. Else it
-   deletes the hashes of the stale objects, then the objects through
-   `target/deleter`, unless they are more than 10% of the objects and
-   `--force` is not given. A request that deleted only some of its objects
-   raises `DeleteFailed`.
+   with the listed count and raises `SourceWriting` when they differ. Unless
+   the stale objects are more than 10% of the objects with a `source_id` and
+   `--force` is not given, it reads the stale records with `Source.get`, a
+   batch of 1000 at a time, keeps the objects of the records it finds, and
+   deletes the hashes and then the objects of the others through
+   `target/deleter`. A request that deleted only some of its objects raises
+   `DeleteFailed`.
 
    After `sync_collection` returns, `sync` enables the trained quantizers as
    `copy` does.
@@ -144,11 +149,12 @@ source conforms; nothing checks it at run time.
 | Member | Called by |
 |---|---|
 | `inspect(namespaces, collections, sample_pages)` | `inspect`. The result goes to `inspect.json` and into the draft plan. |
-| `partitions(collection, parallelism)` | `copy`, once per collection in every run. `state.sqlite` keeps the partitions of the first run. |
+| `partitions(collection, parallelism)` | `copy`, once per collection in every run. `state.sqlite` keeps the partitions of the first run until a `sync` replaces them with its own. |
 | `read(collection, partition, cursor, with_vectors)` | `copy`, in a pool of `--parallelism` threads, one task per partition. Returns a `Page`; `next_cursor` `None` ends the partition. |
 | `ids_at(collection, offset, limit)`, `page_size` | `copy`, after the stored partitions finish: one call checks that no record before the end moved. After a move, `copy` reads ids backwards, `page_size` at a time, to find where the tail starts. |
 | `count(collection)` | `copy` (the live total and the tail), `sync` (the guard of `--prune`) and `verify` (the `count` check). |
 | `ids(collection)` | `verify`, the `ids` check, and `sync`, the stale objects. |
+| `get(collection, ids, with_vectors)` | `sync`: the records without a target object, and the stale records before `--prune` deletes their objects. |
 | `sample(collection, size, rng, with_vectors)` | `verify`, the `records` check. |
 | `wait_compacted(collection, waiting)`, `compaction_state(collection)` | `copy`, `sync` and `verify`, before the first page and after the last read. |
 | `tenant`, `searched_namespaces` | `inspect`, for the message when it finds no collection. |
@@ -164,7 +170,8 @@ source conforms; nothing checks it at run time.
 | Records come in insertion order. A deletion moves later records one position down; an addition goes after the last record. | Resuming and finding new records depend on this order. |
 | `read` is safe to call from up to 8 threads for different partitions of one collection. | `copy --parallelism` runs up to 8 reads of one collection at once. |
 | A vector that holds a non-number arrives as NaN. | The engine turns such a record into a reject. |
-| `count` equals the number of records `read` returns. | `verify`'s `count` check compares it with Weaviate. |
+| `count` equals the number of records `read` returns and the number of ids `ids` lists. | `verify`'s `count` check compares it with Weaviate; `sync --prune` stops with `source_writing` when it differs from the listing. |
+| `get` returns the records of the ids it holds and leaves out the others. | `sync --prune` keeps the object of every record that `get` returns. |
 | `inspect` lists every metadata key in `fields`. | A key missing from the plan makes each record that has it a reject. |
 | Metadata values are `bool`, `int`, `float`, `str`, `None`, or lists of one of these. | `types.py` maps and converts only these. |
 | Errors are the source's own exception class, with a `status` and an optional `hint`. | `cli.py` maps them to `auth_failed` or `source_unreachable`. |

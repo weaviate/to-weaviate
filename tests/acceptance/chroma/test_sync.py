@@ -30,7 +30,7 @@ from conftest import (
     write_plan,
 )
 
-from to_weaviate.engine.verify import TARGET_ABOVE_SOURCE
+from to_weaviate.engine.verify import COUNT_ABOVE_SOURCE, TARGET_ABOVE_SOURCE
 
 TARGET = "Sync"
 BASE = order_records(0, SYNC_COUNT)
@@ -83,7 +83,7 @@ def test_sync_writes_the_changed_records_and_prune_deletes_the_stale_ones(
     r = run(["verify"], tmp_path)
     assert r.exit_code == 1 and r.data["code"] == "verification_failed", r
     checks = {c["name"]: c for c in r.data["checks"]}
-    assert checks["count"]["detail"].endswith(TARGET_ABOVE_SOURCE), r
+    assert checks["count"]["detail"].endswith(COUNT_ABOVE_SOURCE), r
     assert checks["ids"]["detail"].endswith(TARGET_ABOVE_SOURCE), r
     r = run(["sync", "--prune"], tmp_path)
     assert r.exit_code == 0, r

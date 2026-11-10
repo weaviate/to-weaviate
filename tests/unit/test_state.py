@@ -245,12 +245,14 @@ def test_set_plan_hash_stores_the_first_hash_and_keeps_the_record_hashes(tmp_pat
     assert state.unchanged(REF, [("a", b"1"), ("b", b"2")]) == {"a", "b"}
 
 
-def test_set_plan_hash_with_another_hash_deletes_the_record_hashes(tmp_path):
+def test_set_plan_hash_with_another_hash_reports_it_and_keeps_the_record_hashes(
+    tmp_path,
+):
     state = make_state(tmp_path)
     state.set_plan_hash(REF, b"p1")
     state.record_hashes(REF, [("a", b"1"), ("b", b"2")])
     assert state.set_plan_hash(REF, b"p2") is True
-    assert state.unchanged(REF, [("a", b"1"), ("b", b"2")]) == set()
+    assert state.unchanged(REF, [("a", b"1"), ("b", b"2")]) == {"a", "b"}
     assert state.set_plan_hash(REF, b"p2") is False
 
 
@@ -258,11 +260,15 @@ def test_set_plan_hash_touches_one_ref_only(tmp_path):
     state = make_state(tmp_path)
     state.set_plan_hash(REF, b"p1")
     state.set_plan_hash("other", b"p1")
-    state.record_hashes(REF, [("a", b"1")])
-    state.record_hashes("other", [("a", b"1")])
     assert state.set_plan_hash("other", b"p2") is True
-    assert state.unchanged(REF, [("a", b"1")]) == {"a"}
-    assert state.unchanged("other", [("a", b"1")]) == set()
+    assert state.set_plan_hash(REF, b"p1") is False
+
+
+def test_store_plan_hash_keeps_a_stored_hash(tmp_path):
+    state = make_state(tmp_path)
+    state.store_plan_hash(REF, b"p1")
+    state.store_plan_hash(REF, b"p2")
+    assert state.set_plan_hash(REF, b"p1") is False
 
 
 def test_delete_hashes_removes_the_named_ids_only(tmp_path):
@@ -377,6 +383,27 @@ def test_init_collection_fresh_replaces_partitions_and_rejects(tmp_path):
     progress = state.progress()[0]
     assert (progress.copied, progress.rejects, progress.total) == (0, 0, 10)
     assert state.unchanged(REF, [("r1", b"1")]) == {"r1"}
+
+
+def test_set_total_replaces_a_higher_total(tmp_path):
+    state = make_state(tmp_path)
+    state.init_collection(REF, parts("a"), 10)
+    state.set_total(REF, 7)
+    assert state.progress()[0].total == 7
+
+
+def test_delete_hashes_returns_the_number_deleted(tmp_path):
+    state = make_state(tmp_path)
+    state.record_hashes(REF, [("a", b"1"), ("b", b"2")])
+    assert state.delete_hashes(REF, ["a", "c"]) == 1
+
+
+def test_rejected_ids_lists_the_stored_rejects_of_a_ref(tmp_path):
+    state = make_state(tmp_path)
+    state.init_collection(REF, parts("a"), 10)
+    state.add_rejects(REF, [Reject("r1", "bad"), Reject("r2", "bad")])
+    state.add_rejects("other", [Reject("r3", "bad")])
+    assert state.rejected_ids(REF) == {"r1", "r2"}
 
 
 def test_state_file_without_targets_opens_and_stores_a_target(tmp_path):

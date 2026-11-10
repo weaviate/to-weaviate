@@ -45,9 +45,10 @@ reads the schema and the tenants, counts the objects and reads them. A key
 without the permission for one of these steps makes the command stop with
 `auth_failed`, exit 3.
 
-`copy` creates every target collection before it writes the first object.
-When the key may not create a collection, `copy` stops before it writes any
-object. A collection that it created earlier in the same run stays.
+`copy` and `sync` create every target collection before they write the
+first object. When the key may not create a collection, they stop before
+they write any object. A collection that they created earlier in the same
+run stays.
 
 ## Vectorizer keys
 
@@ -75,7 +76,7 @@ they connect, when a planned `text2vec-openai`, `text2vec-cohere`,
 `text2vec-jinaai`, `text2vec-voyageai`, `text2vec-mistral`,
 `text2vec-huggingface` or `text2vec-google` vectorizer has no key. They do
 not check the keys of other modules. A provider that refuses the key during
-`copy` stops it with `auth_failed`, exit 3. The message names the provider,
+`copy` or `sync` stops it with `auth_failed`, exit 3. The message names the provider,
 and the hint names its variables.
 
 ## Async indexing

@@ -234,15 +234,14 @@ ADD_PROPERTY_HINT = (
     "Weaviate refused to add the property; read its message and edit plan.yaml."
 )
 BATCH_HINT = "Fix the cause and run to-weaviate copy again. It resumes at this page."
-DELETE_FAILED_HINT = "Run to-weaviate sync --prune again."
 PRUNE_HINT = (
-    "Check that the source settings name the source of the plan. To delete them "
-    "anyway, run to-weaviate sync --prune --force."
+    f"More than {PRUNE_LIMIT_PERCENT}% of the objects with a source_id have no "
+    "source record. Check that the records were deleted on purpose and that no "
+    "other migration directory or application writes objects with a source_id "
+    "to the collection. To delete them, run to-weaviate sync --prune --force."
 )
-SOURCE_WRITING_HINT = (
-    "Stop the writes to the source, then run to-weaviate sync --prune again."
-)
-MISSING_TEXT = "missing in the collection; copy will add it"
+SYNC_BATCH_HINT = "Fix the cause and run to-weaviate sync again."
+MISSING_TEXT = "missing in the collection; copy and sync add it"
 # A part of a text in single or double quotes; a quote after a backslash is
 # part of it, as in a Python repr.
 _QUOTED = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
@@ -330,22 +329,6 @@ def _as_cli_error(exc: Exception) -> CliError:
             "directory_unwritable",
             f"{where} cannot be written: {os.strerror(exc.errno)}.",
             UNWRITABLE_ERRNOS[exc.errno],
-        )
-    if isinstance(exc, DeleteFailed):
-        return CliError(
-            "delete_failed",
-            f"Weaviate failed to delete {exc.failed} of {exc.matched} objects of "
-            f"{exc.collection}.",
-            DELETE_FAILED_HINT,
-            fields={"collection": exc.collection},
-        )
-    if isinstance(exc, SourceWriting):
-        return CliError(
-            "source_writing",
-            f"{exc.collection} changed while sync listed its ids: {exc.before} "
-            f"records before, {exc.listed} listed, {exc.after} after.",
-            SOURCE_WRITING_HINT,
-            fields={"collection": exc.collection},
         )
     if isinstance(exc, SourceChanged):
         changes = ", ".join(
@@ -1062,7 +1045,7 @@ def _copy_lock(directory: Path) -> Iterator[None]:
     except Locked as exc:
         raise CliError(
             "usage",
-            f"Another to-weaviate copy uses {directory}.",
+            f"Another to-weaviate copy or sync uses {directory}.",
             "Wait for it to end, or use another --dir.",
         ) from exc
 
@@ -1322,18 +1305,20 @@ def _sync_output(
                 },
             }
         )
+        refused = ", prune refused" if result.prune_refused else ""
         lines.append(
             f"{entry.source.name} -> {place}: copied {result.copied}, unchanged "
             f"{result.unchanged}, rejects {result.rejects}, stale {result.stale}, "
-            f"deleted {result.deleted}"
+            f"deleted {result.deleted}{refused}"
         )
     totals = {
         key: sum(getattr(r, key) for r in results.values())
-        for key in ("copied", "unchanged", "stale", "deleted")
+        for key in ("copied", "unchanged", "rejects", "stale", "deleted")
     }
     lines.append(
         f"Total: copied {totals['copied']}, unchanged {totals['unchanged']}, "
-        f"stale {totals['stale']}, deleted {totals['deleted']}"
+        f"rejects {totals['rejects']}, stale {totals['stale']}, "
+        f"deleted {totals['deleted']}"
     )
     if not prune and totals["stale"]:
         lines.append(
@@ -1353,6 +1338,10 @@ def _sync(
     force: bool,
     json_output: bool,
 ) -> None:
+    if force and not prune:
+        raise CliError(
+            "usage", "--force needs --prune.", "Run to-weaviate sync --prune --force."
+        )
     with _writing(
         factories, directory, names, parallelism, consistency, json_output
     ) as run:
@@ -1363,50 +1352,85 @@ def _sync(
             trained = _begin_entry(run, entry)
             place = target_label(entry.target.name, entry.target.tenant)
             _info(json_output, f"Syncing {entry.source.name} to {place}")
-            result = sync_collection(
-                run.source,
-                run.writer,
-                run.reader,
-                deleter,
-                run.state,
-                run.events,
-                entry,
-                run.inspected[ref],
-                parallelism,
-                prune,
-                force,
-                directory,
-                warn=_warning(entry.source.name),
-                waiting=_waiting(json_output, entry.source.name),
-            )
+            try:
+                result = sync_collection(
+                    run.source,
+                    run.writer,
+                    run.reader,
+                    deleter,
+                    run.state,
+                    run.events,
+                    entry,
+                    run.inspected[ref],
+                    parallelism,
+                    prune,
+                    force,
+                    directory,
+                    warn=_warning(entry.source.name),
+                    waiting=_waiting(json_output, entry.source.name),
+                )
+            except (SourceWriting, DeleteFailed, BatchRefused) as exc:
+                raise _sync_error(exc, entry, force) from exc
             if trained:
                 _enable_quantizers(run, entry, json_output)
             _info(
                 json_output,
-                f"Synced {entry.source.name}: {_plural(result.copied, 'record')} "
-                f"written, {result.unchanged} unchanged, "
-                f"{_plural(result.rejects, 'reject')}, {result.stale} stale, "
-                f"{result.deleted} deleted",
+                f"Synced {entry.source.name} to {place}: "
+                f"{_plural(result.copied, 'record')} written, {result.unchanged} "
+                f"unchanged, {_plural(result.rejects, 'reject')}, {result.stale} "
+                f"stale, {result.deleted} deleted",
             )
             results[ref] = result
     document, text = _sync_output(run.entries, results, prune)
     document["added_properties"] = run.added
     document["warnings"] = _findings_document([], run.warnings)["warnings"]
     text = "\n".join([*_findings_text([], run.warnings), text])
+    refused = [
+        target_label(e.target.name, e.target.tenant)
+        for e in run.entries
+        if results[e.source.ref].prune_refused
+    ]
+    limit = (
+        f"Stale objects above {PRUNE_LIMIT_PERCENT}% in {', '.join(refused)}; "
+        "nothing was deleted there."
+    )
     rejects = sum(r.rejects for r in results.values())
     if rejects:
-        raise _rejects_error(rejects, directory, document, text)
-    refused = sum(r.prune_refused for r in results.values())
+        error = _rejects_error(rejects, directory, document, text)
+        if refused:
+            error.message = f"{error.message} {limit}"
+            error.hint = f"{error.hint} {PRUNE_HINT}"
+        raise error
     if refused:
-        raise CliError(
-            "prune_limit",
-            f"Stale objects above {PRUNE_LIMIT_PERCENT}% in "
-            f"{_plural(refused, 'collection')}; nothing was deleted there.",
-            PRUNE_HINT,
-            fields=document,
-            text=text,
-        )
+        raise CliError("prune_limit", limit, PRUNE_HINT, fields=document, text=text)
     _emit_success(json_output, {"status": "success", **document}, text)
+
+
+def _sync_error(
+    exc: SourceWriting | DeleteFailed | BatchRefused, entry: CollectionPlan, force: bool
+) -> CliError:
+    command = (
+        "to-weaviate sync --prune --force" if force else "to-weaviate sync --prune"
+    )
+    if isinstance(exc, SourceWriting):
+        return CliError(
+            "source_writing",
+            f"{exc.collection} changed while sync listed its ids: "
+            f"{_plural(exc.before, 'record')} before, {exc.listed} listed, "
+            f"{exc.after} after.",
+            f"Stop the writes to the source, then run {command} again.",
+            fields={"collection": exc.collection},
+        )
+    if isinstance(exc, DeleteFailed):
+        place = target_label(entry.target.name, entry.target.tenant)
+        return CliError(
+            "delete_failed",
+            f"Weaviate did not delete {exc.failed} of "
+            f"{_plural(exc.matched, 'object')} of {entry.source.name} in {place}.",
+            f"Run {command} again.",
+            fields={"collection": entry.source.name},
+        )
+    return CliError("target_unreachable", str(exc), SYNC_BATCH_HINT)
 
 
 def _status(directory: Path, json_output: bool) -> None:
@@ -1517,6 +1541,12 @@ ParallelismOption = Annotated[
 ConsistencyOption = Annotated[
     Consistency | None,
     typer.Option("--consistency", help="Write consistency level."),
+]
+SyncConsistencyOption = Annotated[
+    Consistency | None,
+    typer.Option(
+        "--consistency", help="Consistency level of the writes and the deletions."
+    ),
 ]
 
 
@@ -1643,7 +1673,7 @@ def build_app(
     def sync(
         collection: NamesOption = None,
         parallelism: ParallelismOption = DEFAULT_PARALLELISM,
-        consistency: ConsistencyOption = None,
+        consistency: SyncConsistencyOption = None,
         prune: Annotated[
             bool,
             typer.Option(
@@ -1654,14 +1684,17 @@ def build_app(
             bool,
             typer.Option(
                 "--force",
-                help=f"Prune a collection with more than {PRUNE_LIMIT_PERCENT}% "
-                "stale objects.",
+                help=f"With --prune, prune a collection with more than "
+                f"{PRUNE_LIMIT_PERCENT}% stale objects.",
             ),
         ] = False,
         directory: DirOption = DEFAULT_DIR,
         json_output: JsonOption = False,
     ) -> None:
-        """Read the source again and write the new and changed records."""
+        """Read the source again and write the new and changed records.
+
+        --prune deletes the objects whose source record is gone.
+        """
         with _handled(json_output):
             _sync(
                 factories,
@@ -1711,7 +1744,7 @@ _client: weaviate.WeaviateClient | None = None
 
 
 def _weaviate_client(settings: WeaviateSettings) -> weaviate.WeaviateClient:
-    """One client per process, shared by the writer, reader and schema."""
+    """One client per process, shared by the writer, reader, schema and deleter."""
     global _client
     if _client is None:
         _client = connect(settings)

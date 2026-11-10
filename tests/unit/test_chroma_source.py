@@ -24,6 +24,7 @@ class Call:
     offset: int
     include: list[str]
     where: dict | None
+    ids: list[str] | None = None
 
 
 def _next(items):
@@ -71,10 +72,21 @@ class FakeClient:
         return {**self.collection, **_next(self.states)}
 
     def get(
-        self, tenant, database, collection_id, *, limit, offset, include, where=None
+        self,
+        tenant,
+        database,
+        collection_id,
+        *,
+        limit,
+        offset,
+        include,
+        where=None,
+        ids=None,
     ):
-        self.calls.append(Call(limit, offset, list(include), where))
+        self.calls.append(Call(limit, offset, list(include), where, ids))
         rows = self.records
+        if ids is not None:
+            rows = [r for r in rows if r["id"] in ids]
         if where is not None:
             ((key, cond),) = where.items()
             rows = [r for r in rows if (r["metadata"] or {}).get(key) == cond["$eq"]]
@@ -375,6 +387,33 @@ def test_ids_at_reads_ids_without_a_payload(source, fake_client, inspected):
     assert source.ids_at(inspected, 650, 1) == []
     assert fake_client.calls[0] == Call(1, 649, [], None)
     assert source.page_size == CHROMA_MAX_PAGE
+
+
+def test_get_reads_the_records_with_the_ids_a_page_at_a_time(
+    source, fake_client, inspected
+):
+    fake_client.calls.clear()
+    wanted = [f"id{i}" for i in range(0, 650, 2)] + ["gone"]
+    records = source.get(inspected, wanted, True)
+    assert sorted(r.id for r in records) == sorted(wanted[:-1])
+    by_id = {r.id: r for r in records}
+    assert (by_id["id2"].vector, by_id["id2"].document) == ([2.0, 1.0], "doc 2")
+    assert by_id["id2"].metadata == {"year": 2002, "tags": ["a", "b"]}
+    assert [len(c.ids or []) for c in fake_client.calls] == [CHROMA_MAX_PAGE, 26]
+    assert all(c.offset == 0 and c.limit == len(c.ids or []) for c in fake_client.calls)
+
+
+def test_get_without_vectors_reads_no_embeddings(source, fake_client, inspected):
+    fake_client.calls.clear()
+    records = source.get(inspected, ["id1"], False)
+    assert [r.id for r in records] == ["id1"] and records[0].vector is None
+    assert "embeddings" not in fake_client.calls[0].include
+
+
+def test_get_of_no_id_sends_nothing(source, fake_client, inspected):
+    fake_client.calls.clear()
+    assert source.get(inspected, [], True) == []
+    assert fake_client.calls == []
 
 
 def test_count(source, inspected):

@@ -128,8 +128,8 @@ class State:
     """Copy progress in sqlite. Every method commits before it returns.
 
     Collections and partitions are listed in insertion (rowid) order. A file
-    written before the `targets` or the `quantizer_updates` table existed gets
-    the table when it is opened, with no row for any ref. A file written before
+    written before the `targets`, `quantizer_updates` or `plans` table existed
+    gets the table when it is opened, with no row for any ref. A file written before
     the `last_id` or the `previous_id` column existed gets the column, NULL in
     every row. A file that sqlite cannot read raises StateUnreadable when it is
     opened, and a file that another process keeps locked raises StateInUse.
@@ -334,6 +334,12 @@ class State:
                 (total, ref),
             )
 
+    def set_total(self, ref: str, total: int) -> None:
+        with self._transaction():
+            self._db.execute(
+                "UPDATE collections SET total = ? WHERE ref = ?", (total, ref)
+            )
+
     def add_rejects(self, ref: str, rejects: list[Reject]) -> None:
         """Store rejects and append the new ones to rejects.jsonl.
 
@@ -425,32 +431,49 @@ class State:
     def set_plan_hash(self, ref: str, digest: bytes) -> bool:
         """Store the hash of the plan entry of `ref`.
 
-        Returns True when another hash was stored. The record hashes of `ref`
-        were written under that other plan, so they go in the same commit.
+        Returns True when another hash was stored. The record hashes stay:
+        each one holds the plan hash it was written under, so none of them
+        matches under another plan.
         """
         with self._transaction():
             row = self._db.execute(
                 "SELECT hash FROM plans WHERE ref = ?", (ref,)
             ).fetchone()
-            changed = row is not None and bytes(row[0]) != digest
-            if changed:
-                self._db.execute("DELETE FROM hashes WHERE ref = ?", (ref,))
             self._db.execute(
                 "INSERT INTO plans (ref, hash) VALUES (?, ?) "
                 "ON CONFLICT(ref) DO UPDATE SET hash = excluded.hash",
                 (ref, digest),
             )
-        return changed
+        return row is not None and bytes(row[0]) != digest
 
-    def delete_hashes(self, ref: str, source_ids: list[str]) -> None:
+    def store_plan_hash(self, ref: str, digest: bytes) -> None:
+        """Store `digest` when `ref` has no plan hash yet."""
+        with self._transaction():
+            self._db.execute(
+                "INSERT OR IGNORE INTO plans (ref, hash) VALUES (?, ?)", (ref, digest)
+            )
+
+    def delete_hashes(self, ref: str, source_ids: list[str]) -> int:
+        """Delete the hashes of `source_ids`; returns how many were stored."""
+        deleted = 0
         with self._transaction():
             for i in range(0, len(source_ids), BATCH_SIZE):
                 batch = source_ids[i : i + BATCH_SIZE]
                 marks = ",".join("?" * len(batch))
-                self._db.execute(
+                cursor = self._db.execute(
                     f"DELETE FROM hashes WHERE ref = ? AND source_id IN ({marks})",
                     (ref, *batch),
                 )
+                deleted += cursor.rowcount
+        return deleted
+
+    def rejected_ids(self, ref: str) -> set[str]:
+        """The source ids, or uuids, of the stored rejects of `ref`."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT source_id FROM rejects WHERE ref = ?", (ref,)
+            ).fetchall()
+        return {source_id for (source_id,) in rows}
 
     def record_hashes(self, ref: str, hashes: list[tuple[str, bytes]]) -> None:
         with self._transaction():

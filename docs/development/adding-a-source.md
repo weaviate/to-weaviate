@@ -32,7 +32,7 @@ Chroma is the only source, so a few shared places name it. See
    (`--vectors`, `--vectorizer`, `--vectorizer-option`, `--index`,
    `--quantizer`, `--quantizer-bits`, `--force`). It writes `type: <name>` in
    the plan's `source` block.
-5. **Source selection.** Make `copy` and `verify` build the source from the
+5. **Source selection.** Make `copy`, `sync` and `verify` build the source from the
    plan's `source.type`. See [where the code names Chroma](#where-the-code-names-chroma).
 6. **Errors.** Map the new exception class to `auth_failed` and
    `source_unreachable` in `_as_cli_error` (`cli.py`), and write hints that
@@ -65,7 +65,7 @@ changes in these places, not only new modules.
 
 | Place | Current code | What a second source needs |
 |---|---|---|
-| Source selection in `cli.py` | `copy` and `verify` call `chroma_settings` and build a `ChromaSource`. `SourceFactory` takes `ChromaSettings`. | A dispatch on the plan's `source.type`, which `inspect` writes and no command reads. |
+| Source selection in `cli.py` | `copy`, `sync` and `verify` call `chroma_settings` and build a `ChromaSource`. `SourceFactory` takes `ChromaSettings`. | A dispatch on the plan's `source.type`, which `inspect` writes and no command reads. |
 | The embedding mapper | `cli.py` passes the Chroma `vectorizer_for` to `draft_plan` and to the plan findings of `check` and `copy`. | The mapper of the plan's source. |
 | Error mapping | `_as_cli_error` knows `ChromaError`; a raw `httpx.TransportError` becomes `target_unreachable`. | The new exception class. |
 | Names in shared models and messages | `SourceRef.namespace` and `SourcePlan.tenant` use Chroma's database and tenant. Hints name `inspect chroma` and `CHROMA_*`. | Neutral wording, or the source's own words. |

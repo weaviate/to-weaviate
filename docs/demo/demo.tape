@@ -22,7 +22,7 @@ Require curl
 
 Set Shell bash
 Set FontSize 18
-Set Width 1200
+Set Width 1320
 Set Height 620
 Set Padding 24
 Set WindowBar Colorful

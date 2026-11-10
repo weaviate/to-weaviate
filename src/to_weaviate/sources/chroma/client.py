@@ -319,6 +319,7 @@ class ChromaClient:
         offset: int,
         include: list[str],
         where: dict[str, Any] | None = None,
+        ids: list[str] | None = None,
     ) -> dict[str, Any]:
         if limit > CHROMA_MAX_PAGE:
             raise ValueError(
@@ -327,6 +328,8 @@ class ChromaClient:
         body: dict[str, Any] = {"limit": limit, "offset": offset, "include": include}
         if where is not None:
             body["where"] = where
+        if ids is not None:
+            body["ids"] = ids
         path = self._collection_path(tenant, database, collection_id) + "/get"
         result: dict[str, Any] = self._collection_request("POST", path, json=body)
         return result

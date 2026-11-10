@@ -25,7 +25,7 @@ To ask for another source, [open an issue](https://github.com/weaviate/to-weavia
 
 - **Read-only on the source.** No command writes to it or deletes from it.
 - **A plan you review first.** `inspect` drafts `plan.yaml`; nothing reaches
-  Weaviate until you run `copy`.
+  Weaviate until you run `copy` or `sync`.
 - **Your vectors or new ones.** Keep the source vectors, or let a Weaviate
   vectorizer embed the text.
 - **Resumable.** A rerun of `copy` continues at the page where the last run
@@ -66,7 +66,8 @@ flowchart LR
 3. `to-weaviate check` validates the plan against Weaviate. It creates nothing.
 4. `to-weaviate copy` creates the collections and copies the records. Some
    sources need the writes to them paused while `copy` and `sync` run; the
-   source guide says which. The others take writes throughout.
+   "Writes during a copy" section of each [source guide](docs/sources/README.md)
+   says which.
 5. Stop the writes to the source and run `to-weaviate sync --prune`. It
    writes the records that changed since the copy and deletes the objects
    whose source record is gone.
@@ -144,7 +145,7 @@ collections:
 
 ### Configure Weaviate
 
-`check`, `copy` and `verify` also need the Weaviate settings. For a Weaviate
+`check`, `copy`, `sync` and `verify` also need the Weaviate settings. For a Weaviate
 server on your machine, add:
 
 ```dotenv
@@ -175,7 +176,8 @@ Total: 5000 records
 ```
 
 Some sources need the writes to them paused while `copy` and `sync` run; the
-source guide says which. The others take writes throughout.
+"Writes during a copy" section of each [source guide](docs/sources/README.md)
+says which.
 
 ### Sync, verify and switch
 
@@ -187,9 +189,9 @@ deleted after the copy:
 ```console
 $ to-weaviate sync --prune
 Syncing support-articles to Support_articles
-Synced support-articles: 10 records written, 4990 unchanged, 0 rejects, 5 stale, 5 deleted
+Synced support-articles to Support_articles: 10 records written, 4990 unchanged, 0 rejects, 5 stale, 5 deleted
 support-articles -> Support_articles: copied 10, unchanged 4990, rejects 0, stale 5, deleted 5
-Total: copied 10, unchanged 4990, stale 5, deleted 5
+Total: copied 10, unchanged 4990, rejects 0, stale 5, deleted 5
 
 $ to-weaviate verify
 Verifying support-articles in Support_articles
@@ -201,8 +203,8 @@ PASS Support_articles records: sampled 300, compared 300, rejects skipped 0, dif
 Now switch your application to Weaviate. Do not run `sync` against this
 target afterwards: the source no longer holds the current data.
 
-With both servers on the machine that ran the tool, `copy` took 4.5 s,
-`sync --prune` 3.9 s and `verify` 1.0 s.
+With both servers on the machine that ran the tool, `copy` took 4.3 s,
+`sync --prune` 4.2 s and `verify` 1.0 s.
 
 ## Commands
 
@@ -222,7 +224,7 @@ JSON document. The exit code names the class of failure, with and without
 | Exit code | Meaning |
 |---|---|
 | 0 | Success |
-| 1 | Rejected records or a failed verification |
+| 1 | Rejected records, a failed verification, or stale objects above 10% that `sync --prune` left alone |
 | 2 | A usage, plan, state or directory error |
 | 3 | A missing or refused credential |
 | 4 | An unreachable server, a source that is compacting or still written to, or a deletion Weaviate did only partly |

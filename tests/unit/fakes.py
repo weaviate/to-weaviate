@@ -194,6 +194,14 @@ class FakeSource:
         self.calls.append("ids")
         return iter([r.id for r in self.records])
 
+    def get(
+        self, collection: SourceCollection, ids: list[str], with_vectors: bool
+    ) -> list[Record]:
+        self.calls.append("get")
+        wanted = set(ids)
+        found = [r for r in self.records if r.id in wanted]
+        return found if with_vectors else [replace(r, vector=None) for r in found]
+
     def ids_at(
         self, collection: SourceCollection, offset: int, limit: int
     ) -> list[str]:

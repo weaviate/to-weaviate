@@ -1,4 +1,8 @@
 import json
+import math
+import sqlite3
+import uuid
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 
@@ -14,6 +18,7 @@ from to_weaviate.engine.sync import (
     over_prune_limit,
     sync_collection,
 )
+from to_weaviate.engine.verify import ID_BATCH
 from to_weaviate.events import Events
 from to_weaviate.ids import to_uuid
 from to_weaviate.sources.base import Record, SourceCollection
@@ -108,6 +113,7 @@ def sync(
     force: bool = False,
     warn=None,
     delete_error: Exception | None = None,
+    parallelism: int = 2,
 ) -> tuple[SyncResult, FakeDeleter]:
     deleter = FakeDeleter(writer, error=delete_error)
     result = sync_collection(
@@ -119,7 +125,7 @@ def sync(
         events,
         entry,
         collection,
-        2,
+        parallelism,
         prune,
         force,
         workdir,
@@ -248,19 +254,169 @@ def test_a_sync_that_fails_before_its_first_page_keeps_the_progress(
     assert state.has_progress(C.ref)
 
 
-def test_an_object_missing_from_the_target_is_written_by_the_next_sync(
+def test_a_changed_record_that_the_tail_reads_again_counts_once(
+    src, state, events, tmp_path
+):
+    writer = copied(src, state, events)
+    src.records[990] = replace(src.records[990], document="changed")
+    # The tail reads id-990 again after the pass wrote it: its hash matches.
+    lossy = LosingTailSource(src.records)
+    result, _ = sync(lossy, writer, state, events, tmp_path)
+    assert (result.copied, result.unchanged) == (1, 998)
+    assert state.progress()[0].copied == 999
+
+
+def test_a_sync_sets_the_total_to_the_count_it_read(src, state, events, tmp_path):
+    writer = copied(src, state, events)
+    del src.records[995:]
+    sync(src, writer, state, events, tmp_path, prune=True)
+    progress = state.progress()[0]
+    assert (progress.copied, progress.total, progress.done) == (995, 995, True)
+
+
+def test_an_object_missing_from_the_target_is_written_by_the_same_sync(
     src, state, events, tmp_path
 ):
     writer = copied(src, state, events)
     # Deleted in Weaviate by something other than the tool.
     del writer.stored[("Docs", None)][to_uuid("id-7")]
     result, _ = sync(src, writer, state, events, tmp_path)
-    assert (result.copied, result.unchanged) == (0, 1000)
-    assert FakeReader(writer).count(ENTRY) == 999
-    # The sync dropped the hash of the missing object: the next one writes it.
-    result, _ = sync(src, writer, state, events, tmp_path)
     assert (result.copied, result.unchanged) == (1, 999)
     assert FakeReader(writer).count(ENTRY) == 1000
+    result, _ = sync(src, writer, state, events, tmp_path)
+    assert (result.copied, result.unchanged) == (0, 1000)
+
+
+def test_a_rejected_record_is_sent_to_the_target_once_per_sync(
+    src, state, events, tmp_path
+):
+    writer = copied(src, state, events, FakeWriter(reject_ids={"id-3"}))
+    calls = writer.calls
+    result, _ = sync(src, writer, state, events, tmp_path)
+    # The page of id-3 is written; the missing id-3 is not written again.
+    assert result.rejects == 1 and writer.calls == calls + 1
+
+
+class DeleteAndAddDuringListing(FakeSource):
+    """Deletes id-0 and adds id-1000 after the first page of an offset listing.
+
+    The listing then skips id-300, which moved into the page already read,
+    and the source count stays the same.
+    """
+
+    PAGE = 300
+
+    def ids(self, collection):
+        offset = 0
+        while page := [r.id for r in self.records[offset : offset + self.PAGE]]:
+            yield from page
+            if offset == 0:
+                del self.records[0]
+                self.records.extend(make_records(1, start=1000))
+            offset += len(page)
+
+
+def test_prune_keeps_the_object_of_a_record_the_listing_skipped(
+    state, events, tmp_path
+):
+    src = DeleteAndAddDuringListing(make_records(1000))
+    writer = copied(src, state, events)
+    result, deleter = sync(src, writer, state, events, tmp_path, prune=True)
+    assert (result.stale, result.deleted) == (0, 0) and deleter.deleted == []
+    assert to_uuid("id-300") in writer.objects
+    # id-1000 was added during the listing: the sync wrote it.
+    assert (result.copied, result.unchanged) == (1, 1000)
+    assert to_uuid("id-1000") in writer.objects
+
+
+def test_prune_keeps_an_object_whose_source_id_names_a_record_of_the_source(
+    src, state, events, tmp_path
+):
+    writer = copied(src, state, events)
+    other = TargetObject(
+        "00000000-0000-0000-0000-0000000000a1", {"source_id": "id-1"}, {}
+    )
+    writer.write(ENTRY, [other])
+    result, _ = sync(src, writer, state, events, tmp_path, prune=True)
+    assert (result.stale, result.deleted) == (0, 0)
+    assert other.uuid in writer.objects
+    # The hash of id-1 stays, so the next sync does not write it.
+    result, _ = sync(src, writer, state, events, tmp_path, prune=True)
+    assert (result.copied, result.unchanged) == (0, 1000)
+
+
+def test_the_prune_limit_counts_only_objects_with_a_source_id(state, events, tmp_path):
+    src = FakeSource(make_records(10))
+    c = src.inspect(None, None, None)[0]
+    entry = make_entry(c)
+    writer = FakeWriter()
+    copy_collection(src, writer, state, events, entry, c, 2)
+    foreign = [
+        TargetObject(str(uuid.UUID(int=i)), {"document": "x"}, {}) for i in range(1, 91)
+    ]
+    writer.write(entry, foreign)
+    del src.records[:2]
+    result, deleter = sync(src, writer, state, events, tmp_path, entry, c, prune=True)
+    # 2 of the 10 objects with a source_id: above the limit.
+    assert (result.stale, result.deleted, result.prune_refused) == (2, 0, True)
+    assert deleter.calls == 0
+
+
+def test_prune_deletes_in_batches(state, events, tmp_path):
+    src = FakeSource(make_records(2500))
+    c = src.inspect(None, None, None)[0]
+    entry = make_entry(c)
+    writer = FakeWriter()
+    copy_collection(src, writer, state, events, entry, c, 2)
+    src.records.clear()
+    result, deleter = sync(
+        src, writer, state, events, tmp_path, entry, c, prune=True, force=True
+    )
+    assert (result.stale, result.deleted) == (2500, 2500)
+    assert deleter.calls == math.ceil(2500 / ID_BATCH)
+
+
+def test_a_plan_edit_keeps_the_record_hashes_until_the_records_are_written(
+    src, state, events, tmp_path
+):
+    writer = copied(src, state, events)
+    writer.fail_on_call = writer.calls + 1
+    with pytest.raises(RuntimeError, match="fake write failure"):
+        sync(src, writer, state, events, tmp_path, DROPPED, parallelism=1)
+    # The first page failed, so no partition advanced: the target guard of the
+    # next run depends on the record hashes alone.
+    assert state.progress()[0].copied == 0
+    assert state.has_progress(C.ref)
+    writer.fail_on_call = None
+    result, _ = sync(src, writer, state, events, tmp_path, DROPPED)
+    assert (result.copied, result.unchanged) == (1000, 0)
+    assert all("n" not in o.properties for o in writer.objects.values())
+
+
+def test_a_copy_after_a_plan_edit_leaves_the_warning_to_the_next_sync(
+    src, state, events, tmp_path
+):
+    writer = copied(src, state, events)
+    copy_collection(src, writer, state, events, DROPPED, C, 2)
+    warnings: list[str] = []
+    result, _ = sync(
+        src, writer, state, events, tmp_path, DROPPED, warn=warnings.append
+    )
+    assert (result.copied, result.unchanged, result.plan_changed) == (1000, 0, True)
+    assert warnings == [PLAN_CHANGED]
+
+
+def test_record_hashes_from_a_state_without_a_plan_hash_are_written_again(
+    src, state, events, tmp_path
+):
+    writer = copied(src, state, events)
+    # A state.sqlite of an earlier version holds record hashes and no plan hash.
+    with closing(sqlite3.connect(tmp_path / "state.sqlite")) as db:
+        db.execute("DELETE FROM plans")
+        db.commit()
+    result, _ = sync(src, writer, state, events, tmp_path, DROPPED)
+    assert (result.copied, result.unchanged) == (1000, 0)
+    assert all("n" not in o.properties for o in writer.objects.values())
 
 
 def test_a_failed_deletion_leaves_no_hash_behind(src, state, events, tmp_path):

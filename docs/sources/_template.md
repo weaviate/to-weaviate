@@ -80,6 +80,12 @@ to-weaviate inspect <name>
 <!-- Which stored embedding configurations map to a Weaviate vectorizer
 module, and what inspect stores of them. -->
 
+## Writes during a copy
+
+<!-- Whether the application can keep writing to the source while copy and
+sync run, and what the tool does when it cannot. The README and
+docs/commands.md point here for it. -->
+
 ## Limits
 
 - <Page size, rate limits, retries.>

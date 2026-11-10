@@ -2,7 +2,7 @@ import hashlib
 import json
 import math
 import threading
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
@@ -29,28 +29,41 @@ REJECTS_HINT = (
 
 @dataclass(frozen=True)
 class CopyResult:
+    # Records in Weaviate, skipped unchanged ones included, and rejects, over
+    # the runs since the last fresh one.
     copied: int
     rejects: int
     # The start offset of a tail that reads records of earlier runs again.
     reread_from: int | None = None
-    # Records skipped with `skip_unchanged`; counted in `copied` too.
-    unchanged: int = 0
-    # Records this run wrote: not the unchanged ones, not the rejects.
+    # Records this run wrote: not the unchanged ones, not the rejects. A record
+    # that changed again before a tail read it twice counts twice.
     written: int = 0
 
 
 def plan_hash(entry: CollectionPlan) -> bytes:
     """Hash of the target part of a plan entry, which decides each object.
 
-    State stores these hashes, so the encoding must not change.
+    Fields at their default and the reasons of dropped keys are left out, so
+    a field that a later version adds with a default changes no hash. State
+    stores these hashes, so the encoding must not change.
     """
+    target = entry.target.model_dump(mode="json", exclude_defaults=True)
+    for dropped in target.get("dropped", []):
+        dropped.pop("reason", None)
     payload = json.dumps(
-        entry.target.model_dump(mode="json"),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
+        target, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
     return hashlib.blake2b(payload.encode("utf-8"), digest_size=16).digest()
+
+
+def record_hash(plan: bytes, record: Record) -> bytes:
+    """The hash state stores for `record` written under the plan hash `plan`.
+
+    A plan entry edited since a record was written gives another hash, so a
+    sync writes the record again.
+    """
+    digest = hashlib.blake2b(plan + content_hash(record), digest_size=16)
+    return digest.digest()
 
 
 def content_hash(record: Record) -> bytes:
@@ -281,19 +294,11 @@ class _CollectionCopy:
         self._ref = collection.ref
         self._skip_unchanged = skip_unchanged
         self._with_vectors = any(v.mode == "keep" for v in entry.target.vectors)
+        self._plan = plan_hash(entry)
         self._lock = threading.Lock()
         self._copied = _progress(state, self._ref).copied
         self.total = collection.count
         self.written = 0
-        self._unchanged: dict[str, int] = {}
-
-    @property
-    def unchanged(self) -> int:
-        return sum(self._unchanged.values())
-
-    def unchanged_in(self, keys: Iterable[str]) -> int:
-        """The unchanged records this copy read in the partitions `keys`."""
-        return sum(self._unchanged.get(key, 0) for key in keys)
 
     def run(self, pending: list[tuple[Partition, str | None]], workers: int) -> None:
         """Copy every pending partition and raise the first worker error.
@@ -336,54 +341,79 @@ class _CollectionCopy:
             cursor = page.next_cursor
 
     def _copy_page(self, partition: Partition, page: Page, end: str | None) -> None:
-        rejects: list[Reject] = []
-        converted: list[tuple[Record, TargetObject]] = []
-        for record in page.records:
-            result = _not_a_number(record) or to_object(record, self._entry)
-            if isinstance(result, Reject):
-                rejects.append(result)
-            else:
-                converted.append((record, result))
-        digests = {record.id: content_hash(record) for record, _ in converted}
-        same: set[str] = set()
-        if self._skip_unchanged and digests:
-            same = self._state.unchanged(self._ref, list(digests.items()))
-            converted = [(r, o) for r, o in converted if r.id not in same]
-        write_rejects: list[Reject] = []
-        if converted:
-            write_rejects = self._writer.write(self._entry, [o for _, o in converted])
-        rejects.extend(write_rejects)
-        if rejects:
-            self._state.add_rejects(self._ref, rejects)
-        # A write reject names the source id, or the uuid when the plan has no
-        # source_id property.
-        rejected = {r.source_id for r in write_rejects}
-        written = [
-            record.id
-            for record, obj in converted
-            if record.id not in rejected and obj.uuid not in rejected
-        ]
-        if written:
-            self._state.record_hashes(
-                self._ref, [(record_id, digests[record_id]) for record_id in written]
-            )
+        written, same = write_records(
+            self._writer,
+            self._state,
+            self._entry,
+            self._ref,
+            self._plan,
+            page.records,
+            self._skip_unchanged,
+        )
         # An unchanged record counts as copied: the object is in Weaviate.
         self._state.advance(
             self._ref,
             partition.key,
             page.next_cursor,
-            len(written) + len(same),
+            written + same,
             stop=end,
             last_id=page.records[-1].id if page.records else None,
             previous_id=page.records[-2].id if len(page.records) > 1 else None,
         )
         with self._lock:
-            self._copied += len(written) + len(same)
-            self.written += len(written)
-            key = partition.key
-            self._unchanged[key] = self._unchanged.get(key, 0) + len(same)
+            self._copied += written + same
+            self.written += written
             copied = self._copied
         self._events.progress(self._ref, copied, self.total)
+
+
+def write_records(
+    writer: Writer,
+    state: State,
+    entry: CollectionPlan,
+    ref: str,
+    plan: bytes,
+    records: list[Record],
+    skip_unchanged: bool = False,
+) -> tuple[int, int]:
+    """Write `records` and store their hashes and rejects.
+
+    `plan` is the `plan_hash` of `entry`. With `skip_unchanged`, a record
+    whose stored hash matches is not written. Returns the number of records
+    written and the number skipped.
+    """
+    rejects: list[Reject] = []
+    converted: list[tuple[Record, TargetObject]] = []
+    for record in records:
+        result = _not_a_number(record) or to_object(record, entry)
+        if isinstance(result, Reject):
+            rejects.append(result)
+        else:
+            converted.append((record, result))
+    digests = {record.id: record_hash(plan, record) for record, _ in converted}
+    same: set[str] = set()
+    if skip_unchanged and digests:
+        same = state.unchanged(ref, list(digests.items()))
+        converted = [(r, o) for r, o in converted if r.id not in same]
+    write_rejects: list[Reject] = []
+    if converted:
+        write_rejects = writer.write(entry, [o for _, o in converted])
+    rejects.extend(write_rejects)
+    if rejects:
+        state.add_rejects(ref, rejects)
+    # A write reject names the source id, or the uuid when the plan has no
+    # source_id property.
+    rejected = {r.source_id for r in write_rejects}
+    written = [
+        record.id
+        for record, obj in converted
+        if record.id not in rejected and obj.uuid not in rejected
+    ]
+    if written:
+        state.record_hashes(
+            ref, [(record_id, digests[record_id]) for record_id in written]
+        )
+    return len(written), len(same)
 
 
 def raise_if_compacted(
@@ -413,15 +443,18 @@ def copy_collection(
     waiting: Callable[[int, int], None] | None = None,
     fresh: bool = False,
 ) -> CopyResult:
-    """Copy one collection and return its totals over all runs.
+    """Copy one collection and return its totals.
 
     Progress is stored in `state`, so a run after a failure resumes where the
     last one stopped. With `fresh`, the stored read positions and rejects of
     the collection go after `source.wait_compacted` returned, so the run reads
-    every record again; a run that stops in the wait keeps them. After the
-    stored partitions are finished, every run
-    reads the source count. The stored total is the highest count a run read.
-    Records beyond the end of the stored partitions are copied by a new
+    every record again; a run that stops in the wait keeps them. A fresh run
+    stores the count it read after its pass as the total. Otherwise the
+    stored total is the highest count a run read. A run stores the plan hash
+    of `entry` when none is stored; `sync` compares and replaces it.
+
+    After the stored partitions are finished, every run reads the source
+    count. Records beyond the end of the stored partitions are copied by a new
     partition without a stop, a tail. A finished tail stores its end offset,
     so a later run adds the next tail. A finished tail without an end offset,
     from an older state, gets no later tail.
@@ -444,17 +477,10 @@ def copy_collection(
     and the error document names the collection.
     """
     ref = collection.ref
-
-    def on_wait(unindexed: int, total: int) -> None:
-        events.emit(
-            "info", "compaction_wait", ref=ref, unindexed=unindexed, total=total
-        )
-        if waiting is not None:
-            waiting(unindexed, total)
-
-    before = source.wait_compacted(collection, on_wait)
-    # The hashes this run stores belong to this plan entry; sync compares.
-    state.set_plan_hash(ref, plan_hash(entry))
+    before = source.wait_compacted(
+        collection, compaction_reporter(events, ref, waiting)
+    )
+    state.store_plan_hash(ref, plan_hash(entry))
     state.init_collection(
         ref, source.partitions(collection, parallelism), collection.count, fresh=fresh
     )
@@ -463,10 +489,12 @@ def copy_collection(
         source, writer, state, events, entry, collection, skip_unchanged
     )
     copy.run(state.pending(ref), parallelism)
-    unchanged = copy.unchanged
     written = copy.written
     count = source.count(collection)
-    state.raise_total(ref, count)
+    if fresh:
+        state.set_total(ref, count)
+    else:
+        state.raise_total(ref, count)
     stored = state.partitions(ref)
     covered = _covered(stored)
     reread_from = None
@@ -495,14 +523,11 @@ def copy_collection(
                 previous_id=mark.previous_id if mark else None,
             )
             # The superseded counts are 0 now; a new copy reads the count again.
-            # The tail reads the superseded records again and counts them.
-            unchanged -= copy.unchanged_in(place.superseded)
             copy = _CollectionCopy(
                 source, writer, state, events, entry, collection, skip_unchanged
             )
             copy.total = count
             copy.run(state.pending(ref), parallelism)
-            unchanged += copy.unchanged
             written += copy.written
             # A tail reads to the last record, which can be past `count` now.
             state.raise_total(ref, source.count(collection))
@@ -520,6 +545,22 @@ def copy_collection(
         copied=progress.copied,
         rejects=progress.rejects,
     )
-    return CopyResult(
-        progress.copied, progress.rejects, reread_from, unchanged, written
-    )
+    return CopyResult(progress.copied, progress.rejects, reread_from, written)
+
+
+def compaction_reporter(
+    events: Events, ref: str, waiting: Callable[[int, int], None] | None
+) -> Callable[[int, int], None]:
+    """The `waiting` callback of `Source.wait_compacted` for collection `ref`.
+
+    Each report writes a `compaction_wait` event and goes to `waiting`.
+    """
+
+    def report(unindexed: int, total: int) -> None:
+        events.emit(
+            "info", "compaction_wait", ref=ref, unindexed=unindexed, total=total
+        )
+        if waiting is not None:
+            waiting(unindexed, total)
+
+    return report

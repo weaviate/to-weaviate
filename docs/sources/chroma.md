@@ -189,6 +189,17 @@ request and does not wait.
 A Chroma server older than 1.4.1 has no `indexing_status` route, and the
 tool reads it without the wait, as a single-node server.
 
+## Writes during a copy
+
+On Chroma Cloud and distributed Chroma, pause the writes while `copy` and
+`sync` run: a collection that keeps receiving writes stops them with
+`source_compacting` (see [Compaction](#compaction)). Writes made between two
+runs are copied by the next `sync`.
+
+On single-node Chroma and a Chroma directory on disk, the application can
+keep writing while `copy` and `sync` run. Stop the writes before the last
+`sync --prune`.
+
 ## Limits
 
 - Records come in pages of 300, the most that Chroma Cloud returns per
@@ -198,7 +209,10 @@ tool reads it without the wait, as a single-node server.
   attempts. A `Retry-After` header raises each wait to its value, up to 30 s
   per wait, so these retries can take longer.
 - A record deleted from Chroma during a copy can make `copy` skip another
-  record. See [`verify`](../commands.md#verify).
+  record; the next `sync` writes it. See [`verify`](../commands.md#verify).
+  The same deletion during the id listing of `sync --prune` makes the
+  listing skip a record; `sync` reads each stale record by id before it
+  deletes the object, so that object stays.
 - Sparse vectors are not migrated.
 
 ## Implementation

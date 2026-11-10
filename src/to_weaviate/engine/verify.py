@@ -38,6 +38,16 @@ TARGET_ABOVE_SOURCE = (
     "the target holds objects whose source records were deleted; stop the "
     "writes to the source and run to-weaviate sync --prune to delete them."
 )
+FOREIGN_OBJECTS = (
+    "the target holds objects without a source_id, which this tool did not "
+    "write; sync --prune leaves them, so delete them in Weaviate if they do not "
+    "belong to the collection."
+)
+# The count check cannot tell stale objects from objects without a source_id.
+COUNT_ABOVE_SOURCE = (
+    "the target holds objects that are not in the source; the ids check of a "
+    "verify without --quick says which and how to remove them."
+)
 NOTHING_COMPARED = "no record was compared; run to-weaviate verify again"
 EVERY_SAMPLE_REJECTED = (
     "every sampled record is rejected at copy time; read rejects.jsonl"
@@ -71,7 +81,10 @@ class IdDiff:
     missing: int
     extra: int
     missing_sample: list[str]  # source ids, at most ID_SAMPLE
-    extra_sample: list[str]  # source ids, at most ID_SAMPLE
+    # The source_id of each extra object, or its uuid when it has none; at
+    # most ID_SAMPLE.
+    extra_sample: list[str]
+    foreign: int = 0  # extra objects without a source_id
 
 
 def _quoted(value: Any) -> str:
@@ -123,7 +136,7 @@ def verify_counts(
     if found < expected:
         detail += f"; {TARGET_BELOW_SOURCE}"
     elif found > expected:
-        detail += f"; {TARGET_ABOVE_SOURCE}"
+        detail += f"; {COUNT_ABOVE_SOURCE}"
     return _check("count", entry, expected == found, detail)
 
 
@@ -156,6 +169,7 @@ def _counts(db: sqlite3.Connection) -> IdDiff:
         extra=_count(db, _EXTRA),
         missing_sample=sample("s.source_id", _MISSING),
         extra_sample=sample("COALESCE(t.source_id, t.uuid)", _EXTRA),
+        foreign=_count(db, f"{_EXTRA} AND t.source_id IS NULL"),
     )
 
 
@@ -166,13 +180,15 @@ def id_tables(
     entry: CollectionPlan,
     collection: SourceCollection,
     workdir: Path,
+    prefix: str = "verify-",
 ) -> Iterator[sqlite3.Connection]:
     """A database with the source ids and the target (uuid, source_id) pairs.
 
-    The ids go through a temporary sqlite file under `workdir`, so memory does
-    not grow with the collection. The file is removed on exit.
+    The ids go through a temporary sqlite file in a directory under `workdir`
+    whose name starts with `prefix`, so memory does not grow with the
+    collection. The directory is removed on exit.
     """
-    with tempfile.TemporaryDirectory(prefix="verify-", dir=workdir) as scratch:
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=workdir) as scratch:
         with closing(sqlite3.connect(Path(scratch) / "ids.sqlite")) as db:
             _load(db, source.ids(collection), reader.source_ids(entry))
             yield db
@@ -183,22 +199,33 @@ def source_listed(db: sqlite3.Connection) -> int:
     return _count(db, "FROM source")
 
 
-def target_total(db: sqlite3.Connection) -> int:
-    """The number of target objects that `id_tables` listed."""
-    return _count(db, "FROM target")
+def owned_total(db: sqlite3.Connection) -> int:
+    """The number of listed target objects that have a source_id."""
+    return _count(db, "FROM target WHERE source_id IS NOT NULL")
+
+
+def _batches_of(cursor: sqlite3.Cursor) -> Iterator[list[Any]]:
+    while rows := cursor.fetchmany(ID_BATCH):
+        yield rows
 
 
 def missing_source_ids(db: sqlite3.Connection) -> Iterator[list[str]]:
     """The source ids without a target object, in batches of ID_BATCH."""
     cursor = db.execute(f"SELECT s.source_id {_MISSING} ORDER BY s.uuid")
-    while rows := cursor.fetchmany(ID_BATCH):
+    for rows in _batches_of(cursor):
         yield [source_id for (source_id,) in rows]
 
 
-def stale_objects(db: sqlite3.Connection) -> list[tuple[str, str]]:
-    """(uuid, source_id) of the objects with a source_id and no source record."""
-    rows = db.execute(f"SELECT t.uuid, t.source_id {_STALE} ORDER BY t.uuid")
-    return [(str(uuid), str(source_id)) for uuid, source_id in rows]
+def stale_count(db: sqlite3.Connection) -> int:
+    """The number of objects with a source_id that names no listed record."""
+    return _count(db, _STALE)
+
+
+def stale_batches(db: sqlite3.Connection) -> Iterator[list[tuple[str, str]]]:
+    """(uuid, source_id) of the stale objects, in batches of ID_BATCH."""
+    cursor = db.execute(f"SELECT t.uuid, t.source_id {_STALE} ORDER BY t.uuid")
+    for rows in _batches_of(cursor):
+        yield [(str(uuid), str(source_id)) for uuid, source_id in rows]
 
 
 def diff_ids(
@@ -221,8 +248,10 @@ def verify_ids(diff: IdDiff, entry: CollectionPlan) -> Check:
         detail += f"; extra ids {_quoted(diff.extra_sample)}"
     if diff.missing:
         detail += f"; {MISSING_IDS}"
-    if diff.extra:
+    if diff.extra > diff.foreign:
         detail += f"; {TARGET_ABOVE_SOURCE}"
+    if diff.foreign:
+        detail += f"; {FOREIGN_OBJECTS}"
     return _check("ids", entry, diff.missing == diff.extra == 0, detail)
 
 

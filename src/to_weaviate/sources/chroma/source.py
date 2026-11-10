@@ -147,7 +147,9 @@ class ChromaSource:
         offset: int,
         include: list[str],
         where: dict[str, Any] | None = None,
+        ids: list[str] | None = None,
     ) -> dict[str, Any]:
+        by_id = {} if ids is None else {"ids": ids}
         return self._client.get(
             self._tenant,
             collection.namespace,
@@ -156,6 +158,7 @@ class ChromaSource:
             offset=offset,
             include=include,
             where=where,
+            **by_id,
         )
 
     @property
@@ -348,6 +351,19 @@ class ChromaSource:
             yield from ids
             last = set(ids)
             offset += len(ids)
+
+    def get(
+        self, collection: SourceCollection, ids: list[str], with_vectors: bool
+    ) -> list[Record]:
+        include = [*READ_INCLUDE, "embeddings"] if with_vectors else READ_INCLUDE
+        records: list[Record] = []
+        for start in range(0, len(ids), CHROMA_MAX_PAGE):
+            batch = ids[start : start + CHROMA_MAX_PAGE]
+            response = self._get(
+                collection, limit=len(batch), offset=0, include=include, ids=batch
+            )
+            records.extend(_records(response))
+        return records
 
     def ids_at(
         self, collection: SourceCollection, offset: int, limit: int

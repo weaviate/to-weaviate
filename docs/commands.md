@@ -96,10 +96,10 @@ after Weaviate has stored the page. When a run stops for any reason, the next
 object's UUID comes from its source id, so a page written twice replaces the
 same objects and adds none.
 
-One `copy` at a time can use a directory. While it runs it holds a lock on
-`copy.lock`, and a second `copy` exits with `usage`. The operating system
-releases the lock when the process ends. On a system without `fcntl`, such as
-Windows, `copy` runs without the lock.
+One `copy` or `sync` at a time can use a directory. While it runs it holds a
+lock on `copy.lock`, and a second `copy` or `sync` exits with `usage`. The
+operating system releases the lock when the process ends. On a system without
+`fcntl`, such as Windows, `copy` and `sync` run without the lock.
 
 ### Records added or deleted between runs
 
@@ -125,8 +125,9 @@ Weaviate refuses, to `rejects.jsonl` with the reason. They then exit 1,
 `rejects`. A reject stays until its cause is fixed: edit the plan or the
 record in the source, then run [`sync`](#sync). It reads the record again
 and writes it. Objects already in Weaviate are written only when they
-changed. `rejects.jsonl` keeps the lines of earlier runs; `status` counts the
-rejects of the last run.
+changed. `rejects.jsonl` keeps the lines of earlier runs, so a reject that
+stays has one line for each run that met it. `status` counts the rejects of
+the last `sync` and of the `copy` runs after it.
 
 ### Retries
 
@@ -156,11 +157,11 @@ planned property that the collection lacks and lists it under
 
 `state.sqlite` records the target of each source collection: the Weaviate
 host and port, the collection and the tenant. Once records of a collection
-are copied, `copy` stops with `state_mismatch`, exit 2, when `WEAVIATE_URL`
-or the plan names another target, or when the target collection is gone. To
-copy to another target, use another `--dir`.
+are copied, `copy` and `sync` stop with `state_mismatch`, exit 2, when
+`WEAVIATE_URL` or the plan names another target, or when the target
+collection is gone. To copy to another target, use another `--dir`.
 
-`copy` and `verify` also stop with `invalid_plan` before they connect when
+`copy`, `sync` and `verify` also stop with `invalid_plan` before they connect when
 the source settings name another source than the one in `plan.yaml`. Each
 source guide names the settings it compares, for example
 [Chroma](sources/chroma.md#connection-settings).
@@ -178,7 +179,7 @@ of its own:
 | `--parallelism N` | As for `copy`. |
 | `--consistency ONE\|QUORUM\|ALL` | As for `copy`. The deletions of `--prune` use it too. |
 | `--prune` | Delete the objects whose source record is gone. |
-| `--force` | Prune a collection with more than 10% stale objects. |
+| `--force` | With `--prune`, prune a collection with more than 10% stale objects. Without `--prune` it is a usage error. |
 
 ### The cutover
 
@@ -192,57 +193,78 @@ of its own:
 5. Switch the application to Weaviate.
 
 Some sources need the writes to them paused while `copy` and `sync` run; the
-source guide says which. The writes made between two runs are copied by the
-next one.
+"Writes during a copy" section of each [source guide](sources/README.md)
+says which. The writes made between two runs are copied by the next one.
 
 Do not run `sync` against that target after the switch. The source no longer
-holds the current data: `sync` would write the old records over the new
-ones, and `--prune` would delete the objects added in Weaviate.
+holds the current data. `sync` would write each record whose object your
+application deleted in Weaviate again, and `--prune` would delete the objects
+with a `source_id` whose record is not in the source.
 
 ### What a sync writes
 
-`copy` stores a hash of each record it writes in `state.sqlite`. `sync`
-reads every record of the source, hashes it, and writes the records whose
-hash differs from the stored one or has none: new records, changed records
-and the rejects of earlier runs. The other records count as `unchanged` and
-are not written. An object deleted from Weaviate by something other than
-this tool is found when `sync` lists the ids: `sync` forgets the hash of its
-record, so the next `sync` writes the record again. `sync` reads the whole
-source, so it takes about as long as a `copy` that writes nothing. Like `copy`, it holds `copy.lock`; `verify` and
-`status` run beside it.
+`copy` stores a hash of each record it writes in `state.sqlite`, made from
+the record and the plan entry. `sync` reads every record of the source,
+hashes it, and writes the records whose hash differs from the stored one or
+has none: new records, changed records and the rejects of earlier runs. The
+other records count as `unchanged` and are not written.
+
+Then `sync` lists the ids of the source and of the target. A record without
+an object in Weaviate, for example one whose object something other than
+this tool deleted, is read from the source by id and written in the same
+run. `sync` reads the whole source and lists both sides, so it takes about
+as long as a `copy` that writes nothing plus a full `verify` of the ids.
+Like `copy`, it holds `copy.lock`; `verify` and `status` run beside it, and
+a `verify` during a `sync --prune` can count objects that are being written
+or deleted.
 
 A plan entry edited since the last run, for example a renamed property or a
-dropped key, describes other objects than the ones in Weaviate. `sync` then
-writes every record of that entry again, prints `Warning: <source>: the plan
-entry changed since the last copy; every record is written again`, writes
-the event `plan_changed` and reports `plan_changed` for the entry.
+dropped key, describes other objects than the ones in Weaviate, and no
+stored hash matches. `sync` then writes every record of that entry again,
+prints `Warning: <source>: the plan entry changed since the last copy; every
+record is written again`, writes the event `plan_changed` and reports
+`plan_changed` for the entry. A `copy` after the edit leaves the warning to
+the next `sync`. Edits to a text that does not reach the objects, such as
+the reason of a dropped key, change no hash.
 
 ### Stale objects and `--prune`
 
 A stale object is an object of the target collection, or of the entry's
-tenant, whose `source_id` names no record of the source. Every `sync` counts
-them and reports them as `stale`. Without `--prune` it deletes nothing and
-ends with `Run to-weaviate sync --prune to delete the N stale objects.` An
-object without a `source_id`, written by something other than this tool, is
-neither counted nor deleted.
+tenant, that has a `source_id` and no source record with that id. Every
+`sync` counts them and reports them as `stale`. Without `--prune` it deletes
+nothing and ends with `Run to-weaviate sync --prune to delete the N stale
+objects.` An object without a `source_id`, written by something other than
+this tool, is neither counted nor deleted.
 
-With `--prune`, `sync` forgets the hashes of the stale objects of each
-collection and deletes the objects, 100 per request, after it wrote the new
-and changed records. A record that comes back is written again, also after a
-deletion that failed. When Weaviate reports that it deleted only some of the
-objects of a request, `sync` stops with `delete_failed`, exit 4; run
-`sync --prune` again to delete the rest. Two checks limit what `--prune`
-deletes:
+`--prune` treats every object with a `source_id` as one that this migration
+directory wrote. Give each target collection, or each tenant, one migration
+directory and one source: the objects that another directory wrote there
+are stale to this one, and `--prune` deletes them.
 
-- When more than 10% of the objects of a collection are stale, `sync`
-  deletes nothing in that collection and reports `prune_refused` for it.
-  Once every collection is done it exits 1, `prune_limit`. A source that is
-  not the one the plan was made from looks like this, so check the source
-  settings first. To delete the objects anyway, run `sync --prune --force`.
+With `--prune`, after it wrote the new and changed records, `sync` reads the
+stale records from the source by id. A record that the source holds was
+missed by the id listing, for example because the application deleted an
+earlier record while the ids were listed; its object stays. For the others,
+`sync` forgets the hashes and deletes the objects, 100 per request. A record
+that comes back is written again, also after a deletion that failed. When
+Weaviate reports objects of a request that it did not delete, `sync` stops
+with `delete_failed`, exit 4; run the same `sync --prune` again to delete
+the rest. Two checks limit what `--prune` deletes:
+
+- When more than 10% of the objects with a `source_id` in a collection are
+  stale, `sync` deletes nothing there, reports `prune_refused` for it and
+  ends its line with `prune refused`. Once every collection is done it exits
+  1, `prune_limit`, and names the collections. When records were also
+  rejected, it exits with `rejects` and that message names them. Check that
+  the records were deleted on purpose and that no other migration directory
+  or application writes objects with a `source_id` to the collection. To
+  delete the objects anyway, run `sync --prune --force`.
 - `sync --prune` reads the source count before and after it lists the ids.
   When either differs from the listed count, the source is still written to.
-  `sync` stops with `source_writing`, exit 4, and deletes nothing. Stop the
-  writes and run it again.
+  `sync` stops with `source_writing`, exit 4, and deletes nothing in that
+  collection. The collections synced before it keep their writes and
+  deletions; their `sync_finished` events are in `events.jsonl`. Stop the
+  writes and run the same command again.
 
 The output names, per entry and in total, the records `copied` (written),
 `unchanged`, the `rejects`, the `stale` objects and the objects `deleted`.
@@ -260,7 +282,11 @@ The JSON document is under [JSON output](#json-output).
 | `records` | A random sample of records: every property, and each kept source vector, rounded to float32, within 1e-5. |
 
 A failed check exits 1, `verification_failed`. Its detail names the cause,
-and the fix where there is one.
+and the fix where there is one. Extra objects with a `source_id` lost their
+source record, and `sync --prune` deletes them. Extra objects without a
+`source_id` were written by something other than this tool; `sync --prune`
+leaves them, so delete them in Weaviate if they do not belong there. The
+`count` check cannot tell the two apart and points to the `ids` check.
 
 | Option | Effect |
 |---|---|
@@ -281,7 +307,9 @@ during a copy.
 
 The total is the highest of the inspected count and the counts that `copy`
 read. The copied count includes records that were deleted from the source
-after `copy` wrote them, so after deletions it can be above the total.
+after `copy` wrote them, so after deletions it can be above the total. A
+`sync` stores the count it read as the total and counts every record it
+read, so after a `sync` the copied count is the total minus the rejects.
 
 ## Migration directory
 
@@ -295,8 +323,9 @@ pass `--dir`:
 | `state.sqlite` | `copy`, `sync` | Progress, read positions, the recorded targets, a hash of each written record and of each plan entry |
 | `copy.lock` | `copy`, `sync` | The lock of the running `copy` or `sync` |
 | `events.jsonl` | `copy`, `sync` | The events of `copy` and `sync`: `collection_started`, `progress` (at most one every 5 s per collection), `compaction_wait`, `source_changed`, `collection_finished`, `plan_changed` and `sync_finished` |
-| `rejects.jsonl` | `copy`, `sync` | One line per rejected record, with the reason |
+| `rejects.jsonl` | `copy`, `sync` | One line per rejected record and run that met it, with the reason |
 | `report.md`, `report.json` | `verify` | The verification report |
+| `verify-…/`, `sync-…/` | `verify`, `sync` | The source and target ids while the command lists them; removed when it ends |
 
 When the disk is full, or the directory or a file in it is read-only, a
 command stops with `directory_unwritable`, exit 2. The message names the
