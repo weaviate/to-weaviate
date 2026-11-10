@@ -9,7 +9,7 @@
 metadata, resumes where it stopped, and checks the copy against the source.
 It only reads from the source.
 
-![to-weaviate copy copies 5,000 records with 1536-dimension vectors, then to-weaviate verify prints PASS for the count, ids and records checks](docs/demo/demo.gif)
+![to-weaviate inspect reads a Chroma collection of 5,000 records with 1536-dimension vectors, the start of plan.yaml shows the source and target, then check, copy and verify run and verify prints PASS for the count, ids and records checks](docs/demo/demo.gif)
 
 The Weaviate team maintains it.
 
