@@ -105,7 +105,7 @@ to-weaviate inspect chroma
 |---|---|
 | Collection | A collection. `inspect` turns the name into one Weaviate accepts: `docs-cosine` becomes `Docs_cosine`, and a name that does not start with a letter gets the prefix `C_`. |
 | Record id | The object UUID. A canonical lowercase UUID stays as it is; any other id becomes a UUIDv5 of the id. The `source_id` property holds the original id. |
-| Embedding | The vector `default`, or `source` with `--vectors both`. Not copied with `--vectors embed`, unless the sampled documents are empty: then the plan keeps the embedding as `default` and notes it. |
+| Embedding | The vector `default`, or `source` with `--vectors both`. Not copied with `--vectors embed`. With `embed` or `both`, a collection whose sampled documents are empty keeps the embedding as `default`, and the plan notes it. |
 | Document | The `document` property, `text` with `word` tokenization. |
 | URI | The `uri` property. |
 | Metadata key | A property. See [types and conversion](../plan-file.md#types-and-conversion). |

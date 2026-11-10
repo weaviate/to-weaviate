@@ -161,5 +161,5 @@ logic in `engine/copy.py`.
   the source lists (`stored_embedding` in `sources/chroma/mapping.py`). A new
   file writer must store the same forms.
 - With `--json`, stdout holds exactly one JSON document, unless the parser
-  refuses an option value or Ctrl-C stops the command.
+  refuses an option value (exit 2) or Ctrl-C stops the command (exit 130).
 - Every error code has one exit code, in `ERROR_EXIT` (`output.py`).

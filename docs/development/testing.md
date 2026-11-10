@@ -60,7 +60,7 @@ and schema. `tests/unit/chroma_server.py` serves a fake Chroma through
 ## Acceptance tests
 
 The acceptance tests run the installed `to-weaviate` command against real
-servers that are already running. No test starts a server; the `infra`
+servers that are already running. No test starts a server. Some `infra`
 tests restart the compose Chroma or delete a Weaviate pod. The tests run
 only against the test endpoints:
 

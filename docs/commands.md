@@ -20,7 +20,7 @@ Every command takes these options:
 | Option | Effect |
 |---|---|
 | `--dir PATH` | The [migration directory](#migration-directory). Default: `./.to-weaviate`. |
-| `--json` | Print one JSON document on stdout. Progress lines and the `Warning:` lines of `copy` go to stderr; plan warnings are in the document under `warnings`. See [JSON output](#json-output). |
+| `--json` | Print one JSON document on stdout, except in the two cases of [JSON output](#json-output). Progress lines and the `Warning:` lines of `copy` go to stderr; plan warnings are in the document under `warnings`. |
 
 `to-weaviate --version` prints the version.
 
@@ -221,8 +221,8 @@ cause, and the file when the operating system reports it. `copy` resumes at its 
 
 With `--json`, stdout holds exactly one JSON document and every document has
 `status`: `success` or `error`. Two cases print no document: an option value
-that the parser refuses exits 2 with its message on stderr, and Ctrl-C stops
-the command. An error document also has `code`, `message` and `hint`:
+that the parser refuses exits 2 with its message on stderr, and Ctrl-C exits
+130 with no output. An error document also has `code`, `message` and `hint`:
 
 ```json
 {
