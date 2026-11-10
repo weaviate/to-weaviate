@@ -9,6 +9,8 @@
 metadata, resumes where it stopped, and checks the copy against the source.
 It only reads from the source.
 
+![to-weaviate copy copies 5,000 records with 1536-dimension vectors, then to-weaviate verify prints PASS for the count, ids and records checks](docs/demo/demo.gif)
+
 The Weaviate team maintains it.
 
 ## Supported sources
@@ -69,81 +71,110 @@ unless you pass `--dir`.
 
 ## Quickstart
 
-This example migrates one Chroma collection. Each
-[source guide](docs/sources/README.md) lists the settings of its source.
+This example migrates the Chroma collection `support-articles` from a Chroma
+server on port 8001 to a Weaviate server on port 8099, both on your machine.
+Replace the collection name and the settings with your own.
+[`docs/demo/seed.py`](docs/demo/seed.py) creates this collection: 5,000
+records with 1536-dimension vectors.
 
-Put the connection settings in a `.env` file in the directory where you run
-the tool, or export them:
+### Configure the source
+
+`inspect` reads only the settings of its source. Put them in a `.env` file in
+the directory where you run the tool, or export them:
 
 ```dotenv
-CHROMA_URL=http://localhost:8000
-WEAVIATE_URL=https://my-cluster.weaviate.cloud
-WEAVIATE_API_KEY=<Weaviate API key>
+CHROMA_URL=http://localhost:8001
 ```
 
-The output below comes from a run against a local Chroma on port 8001 and a
-local Weaviate on port 8099.
+Each [source guide](docs/sources/README.md) lists the settings of its source,
+with an example for each deployment.
 
-Inspect the source:
+### Inspect
 
 ```console
-$ to-weaviate inspect chroma --collection docs-cosine
+$ to-weaviate inspect chroma --collection support-articles
 Inspecting Chroma at http://localhost:8001
-docs-cosine -> Docs_cosine
-  count: 700
-  dimension: 8
+support-articles -> Support_articles
+  count: 5000
+  dimension: 1536
   distance: cosine
   vectors: default (keep, no vectorizer)
 Decisions:
-  docs-cosine (vector_mode): No Weaviate vectorizer matches the source embedding function. Either supply query vectors from the application, or run inspect with --vectors embed to re-vectorize the documents in Weaviate.
-  docs-cosine (mixed_types): key code has the types int: 650, text: 50; values are stored as text
+  support-articles (vector_mode): No Weaviate vectorizer matches the source embedding function. Either supply query vectors from the application, or run inspect with --vectors embed to re-vectorize the documents in Weaviate.
 Review .to-weaviate/plan.yaml, then run to-weaviate check.
 ```
 
-Review `.to-weaviate/plan.yaml`. Each entry maps one source collection to
-one Weaviate collection. An excerpt:
+### Review the plan
+
+Each entry of `.to-weaviate/plan.yaml` maps one source collection to one
+Weaviate collection. An excerpt:
 
 ```yaml
 collections:
 - source:
-    name: docs-cosine
-    count: 700
+    name: support-articles
+    count: 5000
+    dimension: 1536
   target:
-    name: Docs_cosine
+    name: Support_articles
     vectors:
     - name: default
       mode: keep
       distance: cosine
     properties:
-    - source_key: category
-      name: category
+    - source_key: product
+      name: product
       type: text
-    - source_key: year
-      name: year
+    - source_key: views
+      name: views
       type: int
+    - source_key: verified
+      name: verified
+      type: boolean
 ```
 
-Then check the plan, copy, and verify:
+[The plan file](docs/plan-file.md) lists the edits you can make.
+
+### Configure Weaviate
+
+`check`, `copy` and `verify` also need the Weaviate settings. For the local
+server of this example, add:
+
+```dotenv
+WEAVIATE_URL=http://localhost:8099
+WEAVIATE_GRPC_URL=http://localhost:50099
+WEAVIATE_API_KEY=<Weaviate API key>
+```
+
+Leave `WEAVIATE_API_KEY` unset for a server without authentication. For a
+Weaviate Cloud cluster, set `WEAVIATE_URL` to the cluster URL and
+`WEAVIATE_API_KEY` to an API key of the cluster from the
+[Weaviate Cloud console](https://console.weaviate.cloud), and leave
+`WEAVIATE_GRPC_URL` unset. [Weaviate target](docs/weaviate.md) has the
+details.
+
+### Check, copy and verify
 
 ```console
 $ to-weaviate check
 Checking the target at http://localhost:8099
-warning coerced_keys Docs_cosine: key code has the types int: 650, text: 50; values are stored as text
-No errors, 1 warning.
+No errors, 0 warnings.
 
 $ to-weaviate copy
-Copying docs-cosine to Docs_cosine
-Copied docs-cosine: 700 records, 0 rejects
-warning coerced_keys Docs_cosine: key code has the types int: 650, text: 50; values are stored as text
-docs-cosine -> Docs_cosine: copied 700 of 700, rejects 0, done
-Total: 700 records
+Copying support-articles to Support_articles
+Copied support-articles: 5000 records, 0 rejects
+support-articles -> Support_articles: copied 5000 of 5000, rejects 0, done
+Total: 5000 records
 
 $ to-weaviate verify
-Verifying docs-cosine in Docs_cosine
-PASS Docs_cosine count: source count 700, target count 700
-PASS Docs_cosine ids: missing 0, extra 0
-PASS Docs_cosine records: sampled 300, compared 300, rejects skipped 0, differing 0
+Verifying support-articles in Support_articles
+PASS Support_articles count: source count 5000, target count 5000
+PASS Support_articles ids: missing 0, extra 0
+PASS Support_articles records: sampled 300, compared 300, rejects skipped 0, differing 0
 ```
+
+With both servers on the machine that ran the tool, `copy` took 4.8 s and
+`verify` took 1.4 s.
 
 ## Commands
 
@@ -156,11 +187,20 @@ PASS Docs_cosine records: sampled 300, compared 300, rejects skipped 0, differin
 | `status` | Shows the progress of each collection from the migration directory. |
 
 Every command takes `--dir` and `--json`. With `--json`, stdout holds one
-JSON document, unless the parser refuses an option value (exit 2) or you
-press Ctrl-C (exit 130). The exit code names the class of failure, with and without
-`--json`: 1 for rejects or a failed verification, 2 for a usage, plan,
-state or directory error, 3 for credentials, 4 for an unreachable server or
-a source that is compacting, 5 for an internal error. [Commands](docs/commands.md#exit-codes) lists every error code.
+JSON document, unless the parser refuses an option value or you press
+Ctrl-C. The exit code names the class of failure, with and without `--json`:
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | Rejected records or a failed verification |
+| 2 | A usage, plan, state or directory error |
+| 3 | A missing or refused credential |
+| 4 | An unreachable server, or a source that is compacting |
+| 5 | An internal error |
+| 130 | Stopped with Ctrl-C |
+
+[Commands](docs/commands.md#exit-codes) lists every error code.
 
 ## Documentation
 

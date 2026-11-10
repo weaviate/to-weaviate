@@ -272,3 +272,4 @@ The exit code is the same with and without `--json`.
 | 3 | Missing credential or authentication failure | `missing_credential`, `auth_failed` |
 | 4 | Source or target unreachable, or a source collection that the source compacted during the read or did not finish compacting | `source_unreachable`, `target_unreachable`, `source_compacting` |
 | 5 | Internal error | `internal_error` |
+| 130 | Stopped with Ctrl-C; no output | |
