@@ -85,7 +85,8 @@ jobs:
               REPLICATION_MINIMUM_FACTOR: "${{ matrix.replication }}"
       # The kubectl-relay forwards of the action can stop forwarding gRPC
       # after the SIGKILL resume test; the script replaces them.
-      - run: sh tests/acceptance/port-forward.sh
+      - id: forward
+        run: sh tests/acceptance/port-forward.sh
       - if: matrix.chroma == 'single'
         run: docker compose -f tests/acceptance/chroma/docker-compose.yml up -d --wait
       # Deploys distributed Chroma in the kind cluster and forwards its
@@ -102,9 +103,14 @@ jobs:
         with:
           name: acceptance-junit-${{ matrix.name }}
           path: /tmp/acceptance-junit.xml
-      # The logs have a line for each start and exit of a forward, for a
-      # test that failed with exit 4. The cluster leg also has the log of the
-      # Chroma forward.
+      # Each forward's log has a line for each start and exit of its kubectl
+      # port-forward, so this step shows whether a forward died during the
+      # suite and when; the gRPC forward of the action died after
+      # test_resume.py killed a copy. The cluster leg also has the log of the
+      # Chroma forward. A failure prints the full tails, for a test that
+      # failed with exit 4.
+      - if: always() && steps.forward.outcome == 'success'
+        run: grep -E 'starting|exited|lost connection' /tmp/port-forward-*.log | tail -n 100
       - if: failure()
         run: tail -n 200 /tmp/port-forward-*.log
       # The restart counts, the compactor pod (an OOM kill shows there), and
