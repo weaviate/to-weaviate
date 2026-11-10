@@ -34,9 +34,9 @@ pieces are `tests/acceptance/conftest.py` and `tests/e2e.py`.
 ## Not covered
 
 - Chroma Cloud. No test account exists. The unit tests cover the tool's side
-  with fakes, and the CI `cluster` leg covers distributed Chroma, which
-  Chroma Cloud runs. Its quotas, rate limits and sharded collections stay
-  untested.
+  with fakes, and the CI job `acceptance (cluster)` covers distributed
+  Chroma, which Chroma Cloud runs. Its quotas, rate limits and sharded
+  collections stay untested.
 - A Weaviate Cloud sandbox cluster, and Weaviate versions other than
   `tests/acceptance/weaviate-version`.
 - A Weaviate key that may read but not write. Unit tests cover the error.
@@ -156,11 +156,11 @@ values to every child process, and the target refuses them.
 | `acceptance (single)` | The acceptance suite against one Weaviate node and the single-node Chroma |
 | `acceptance (cluster)` | The acceptance suite against three Weaviate nodes with replication factor 3 and distributed Chroma |
 
-Both acceptance legs run Weaviate in a kind cluster with `ASYNC_INDEXING`.
-The tests in `tests/acceptance/chroma/test_cluster.py` run on the `cluster`
-leg only. Each leg uploads its JUnit XML as the artifact
-`acceptance-junit-<leg>`; some tests record measurements there as test
-properties.
+Both acceptance jobs run Weaviate in a kind cluster with `ASYNC_INDEXING`.
+The tests in `tests/acceptance/chroma/test_cluster.py` run in the `cluster`
+job only. Each job uploads its JUnit XML as the artifact
+`acceptance-junit-single` or `acceptance-junit-cluster`; some tests record
+measurements there as test properties.
 
 ## Writing tests
 
