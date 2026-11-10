@@ -218,7 +218,7 @@ def _test_endpoints() -> Iterator[None]:
         reason = (
             "the acceptance suite runs only against the test endpoints: "
             + "; ".join(problems)
-            + ". See README.md."
+            + ". See docs/development/testing.md."
         )
         # CI sets it, so that a suite that skips every test does not pass.
         if os.environ.get(REQUIRE_VARIABLE) == "1":
