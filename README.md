@@ -81,9 +81,6 @@ WEAVIATE_URL=https://my-cluster.weaviate.cloud
 WEAVIATE_API_KEY=<Weaviate API key>
 ```
 
-The output below comes from a run against a local Chroma on port 8001 and a
-local Weaviate on port 8099.
-
 Inspect the source:
 
 ```console
@@ -156,8 +153,7 @@ PASS Docs_cosine records: sampled 300, compared 300, rejects skipped 0, differin
 | `status` | Shows the progress of each collection from the migration directory. |
 
 Every command takes `--dir` and `--json`. With `--json`, stdout holds one
-JSON document, unless the parser refuses an option value (exit 2) or you
-press Ctrl-C (exit 130). The exit code names the class of failure, with and without
+JSON document. The exit code names the class of failure, with and without
 `--json`: 1 for rejects or a failed verification, 2 for a usage, plan,
 state or directory error, 3 for credentials, 4 for an unreachable server or
 a source that is compacting, 5 for an internal error. [Commands](docs/commands.md#exit-codes) lists every error code.
