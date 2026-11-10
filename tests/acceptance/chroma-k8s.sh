@@ -1,10 +1,11 @@
 #!/bin/sh
-# Starts and stops the open-source distributed Chroma of the cluster leg of
-# .github/workflows/ci.yml, in namespace chroma of the kind cluster that the
-# current kubectl context names. Its HTTP API is forwarded to localhost:8001,
-# the CHROMA_URL of the acceptance suite. Runs only in that leg, after the
-# weaviate-local-k8s action. It refuses to run when GITHUB_ACTIONS is not true
-# or the machine is not Linux amd64. The service images exist for amd64 only.
+# Starts and stops the open-source distributed Chroma of the cluster setup of
+# .github/workflows/acceptance.yml, in namespace chroma of the kind cluster
+# that the current kubectl context names. Its HTTP API is forwarded to
+# localhost:8001, the CHROMA_URL of the acceptance suite. Runs only in that
+# setup, after the weaviate-local-k8s action. It refuses to run when
+# GITHUB_ACTIONS is not true or the machine is not Linux amd64. The service
+# images exist for amd64 only.
 # down deletes the namespace chroma of the current kind cluster.
 #
 # Usage: chroma-k8s.sh up|down. up renders the Helm chart
@@ -47,12 +48,12 @@ STOP_TRIES=10
 case "$(uname -m)" in
 x86_64 | amd64) ;;
 *)
-    echo "the distributed Chroma images are amd64 only; this leg runs in CI. Nothing was started or deleted." >&2
+    echo "the distributed Chroma images are amd64 only; CI runs the cluster setup. Nothing was started or deleted." >&2
     exit 2
     ;;
 esac
 if [ "$(uname -s)" != Linux ]; then
-    echo "chroma-k8s.sh runs on Linux only; this leg runs in CI. Nothing was started or deleted." >&2
+    echo "chroma-k8s.sh runs on Linux only; CI runs the cluster setup. Nothing was started or deleted." >&2
     exit 2
 fi
 # up binds port 8001 and down deletes a namespace of the current kind

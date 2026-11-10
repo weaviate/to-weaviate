@@ -1,0 +1,185 @@
+# One setup of the acceptance tests: Weaviate in a kind cluster through the
+# weaviate-local-k8s action, a Chroma, and the suite under tests/acceptance.
+# ci.yml calls it once for the single setup and once per attempt of the
+# cluster setup. An attempt on a runner whose CPU cannot run distributed
+# Chroma ends in its first step, and ci.yml runs the next attempt.
+name: acceptance
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: The name of the setup, single or cluster.
+        required: true
+        type: string
+      replicas:
+        description: Weaviate pods. The cases of test_cluster.py run when it is at least 3.
+        required: true
+        type: number
+      workers:
+        description: Worker nodes of the kind cluster.
+        required: true
+        type: number
+      replication:
+        description: REPLICATION_MINIMUM_FACTOR of the Weaviate pods.
+        required: true
+        type: string
+      chroma:
+        description: >-
+          The Chroma of the setup. single is the compose container; distributed
+          is the open-source distributed Chroma in the kind cluster, with
+          which the seed waits for compaction and the compaction case of
+          test_source_order.py runs.
+        required: true
+        type: string
+      attempt:
+        description: The number of this attempt of the setup, from 1.
+        required: false
+        type: number
+        default: 1
+      attempts:
+        description: How many attempts of the setup ci.yml makes.
+        required: false
+        type: number
+        default: 1
+    outputs:
+      cpu-unsupported:
+        description: >-
+          true when the runner's CPU lacks AVX-512 and this attempt of the
+          cluster setup ran no test.
+        value: ${{ jobs.tests.outputs.cpu-unsupported }}
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      cpu-unsupported: ${{ steps.cpu.outputs.unsupported }}
+    env:
+      WEAVIATE_URL: http://localhost:8099
+      WEAVIATE_GRPC_URL: http://localhost:50099
+      WEAVIATE_API_KEY: admin-key
+      CHROMA_URL: http://localhost:8001
+      TO_WEAVIATE_REQUIRE_ACCEPTANCE: "1"
+      # Every Weaviate Cloud instance runs with ASYNC_INDEXING, so both setups
+      # do. Read by the tests whose outcome depends on it.
+      WEAVIATE_ASYNC_INDEXING: "true"
+      ACCEPTANCE_NODES: ${{ inputs.replicas }}
+      ACCEPTANCE_CHROMA: ${{ inputs.chroma }}
+    steps:
+      # The query-service and compaction-service images of distributed Chroma
+      # 1.5.9 exit with SIGILL (exit code 132) on a CPU without AVX-512. Part
+      # of the ubuntu-latest pool is AMD EPYC 7763, which lacks it, and there
+      # chroma-k8s.sh up fails after its 10-minute wait. The step reads the
+      # CPU flags before anything is installed. Every later step is skipped
+      # when unsupported is true, and ci.yml runs the next attempt on another
+      # runner; the last attempt fails in the last step instead.
+      - id: cpu
+        if: inputs.chroma == 'distributed'
+        env:
+          ATTEMPT: ${{ inputs.attempt }}
+          ATTEMPTS: ${{ inputs.attempts }}
+        run: |
+          model=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n 1)
+          if grep -q -w avx512f /proc/cpuinfo; then
+            echo "The runner's CPU is $model, with avx512f."
+            exit 0
+          fi
+          echo "unsupported=true" >>"$GITHUB_OUTPUT"
+          echo "model=$model" >>"$GITHUB_OUTPUT"
+          message="The runner's CPU is $model, without avx512f. The query-service and compaction-service of distributed Chroma exit with SIGILL on it, so chroma-k8s.sh up would fail after 10 minutes. Attempt $ATTEMPT of $ATTEMPTS ran no test."
+          if [ "$ATTEMPT" -lt "$ATTEMPTS" ]; then
+            message="$message Attempt $((ATTEMPT + 1)) runs on another runner."
+            echo "::warning::$message"
+          else
+            message="$message No attempt is left."
+            echo "::error::$message"
+          fi
+          echo "$message" >>"$GITHUB_STEP_SUMMARY"
+      - if: steps.cpu.outputs.unsupported != 'true'
+        uses: actions/checkout@v4
+      - if: steps.cpu.outputs.unsupported != 'true'
+        run: echo "WEAVIATE_VERSION=$(cat tests/acceptance/weaviate-version)" >> "$GITHUB_ENV"
+      # The action runs its own checkout, so it comes before any step that
+      # writes to the workspace.
+      - if: steps.cpu.outputs.unsupported != 'true'
+        uses: weaviate/weaviate-local-k8s@v2
+        with:
+          weaviate-version: ${{ env.WEAVIATE_VERSION }}
+          workers: ${{ inputs.workers }}
+          replicas: ${{ inputs.replicas }}
+          weaviate-port: 8099
+          weaviate-grpc-port: 50099
+          rbac: true
+          modules: text2vec-transformers
+          expose-pods: false
+          # The chart passes each env entry to the Weaviate pods.
+          values-override: |
+            env:
+              ASYNC_INDEXING: "true"
+              REPLICATION_MINIMUM_FACTOR: "${{ inputs.replication }}"
+      # The kubectl-relay forwards of the action can stop forwarding gRPC
+      # after the SIGKILL resume test; the script replaces them.
+      - id: forward
+        if: steps.cpu.outputs.unsupported != 'true'
+        run: sh tests/acceptance/port-forward.sh
+      - if: steps.cpu.outputs.unsupported != 'true' && inputs.chroma == 'single'
+        run: docker compose -f tests/acceptance/chroma/docker-compose.yml up -d --wait
+      # Deploys distributed Chroma in the kind cluster and forwards its
+      # frontend to port 8001.
+      - if: steps.cpu.outputs.unsupported != 'true' && inputs.chroma == 'distributed'
+        run: sh tests/acceptance/chroma-k8s.sh up
+      - if: steps.cpu.outputs.unsupported != 'true'
+        uses: actions/setup-python@v5
+        with: {python-version: "3.13"}
+      - if: steps.cpu.outputs.unsupported != 'true'
+        run: pip install -e ".[test]" && pytest tests/acceptance -v --junitxml=/tmp/acceptance-junit.xml
+      # A case can record measurements as test properties, which only the XML
+      # holds on a pass. At most one attempt of a setup reaches this step, so
+      # no other upload uses the name.
+      - if: always() && steps.cpu.outputs.unsupported != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-junit-${{ inputs.name }}
+          path: /tmp/acceptance-junit.xml
+      # Each forward's log has a line for each start and exit of its kubectl
+      # port-forward, so this step shows whether a forward died during the
+      # suite and when; the gRPC forward of the action died after
+      # test_resume.py killed a copy. The cluster setup also has the log of the
+      # Chroma forward. A failure prints the full tails, for a test that
+      # failed with exit 4.
+      - if: always() && steps.forward.outcome == 'success'
+        run: grep -E 'starting|exited|lost connection' /tmp/port-forward-*.log | tail -n 100
+      - if: failure()
+        run: tail -n 200 /tmp/port-forward-*.log
+      # The restart counts, the compactor pod (an OOM kill shows there), and
+      # the last log lines of each pod of five Chroma services; the previous
+      # log too for a pod that restarted. The label app of each workload is
+      # its name in the chart, so sts/query-service gives both of its pods.
+      - if: failure() && inputs.chroma == 'distributed'
+        run: |
+          kubectl -n chroma get pods -o wide || true
+          kubectl -n chroma describe pod -l app=compaction-service || true
+          for workload in sts/compaction-service sts/rust-log-service \
+            deploy/rust-frontend-service sts/query-service deploy/sysdb; do
+            for pod in $(kubectl -n chroma get pods -l "app=${workload#*/}" -o name || true); do
+              echo "--- $workload: kubectl -n chroma logs $pod --tail=500"
+              kubectl -n chroma logs "$pod" --all-containers --tail=500 || true
+              restarts=$(kubectl -n chroma get "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}' || true)
+              if [ "${restarts:-0}" -gt 0 ]; then
+                echo "--- $workload: kubectl -n chroma logs $pod --previous --tail=500 ($restarts restarts)"
+                kubectl -n chroma logs "$pod" --all-containers --previous --tail=500 || true
+              fi
+            done
+          done
+      # The last attempt has no next runner, so a skipped attempt fails here.
+      - if: steps.cpu.outputs.unsupported == 'true' && inputs.attempt >= inputs.attempts
+        env:
+          MODEL: ${{ steps.cpu.outputs.model }}
+          ATTEMPTS: ${{ inputs.attempts }}
+        run: |
+          echo "::error::All $ATTEMPTS attempts of the cluster setup ran on a runner without avx512f, the last on $MODEL. Rerun the failed jobs for another runner: gh run rerun <run id> --failed"
+          exit 1

@@ -1,8 +1,7 @@
 #!/bin/sh
 # Replaces the Weaviate port-forwards of the weaviate-local-k8s action with
 # kubectl port-forward processes that a loop starts again when they exit.
-# Runs only in the acceptance job of .github/workflows/ci.yml, right after the
-# action.
+# Runs only in .github/workflows/acceptance.yml, right after the action.
 #
 # The action forwards ports 8099 and 50099 through kubectl-relay. After a test
 # kills a copy with SIGKILL, kubectl-relay can stop forwarding gRPC while HTTP
@@ -11,7 +10,7 @@
 # starts a new one.
 #
 # The ports are the action's weaviate-port and weaviate-grpc-port inputs in
-# ci.yml. The key is WEAVIATE_API_KEY of the job.
+# acceptance.yml. The key is WEAVIATE_API_KEY of the job.
 set -eu
 
 HTTP_PORT=8099
