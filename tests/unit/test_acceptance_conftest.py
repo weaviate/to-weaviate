@@ -123,7 +123,7 @@ def test_nodes_is_the_variable_when_it_is_set(env, server):
 
 
 def test_shard_replicas_counts_each_replica_of_each_shard(monkeypatch):
-    # The cluster leg: 3 nodes, one shard per node, replication factor 3.
+    # The cluster setup of CI: 3 nodes, one shard per node, replication factor 3.
     config = SimpleNamespace(
         sharding_config=SimpleNamespace(actual_count=3),
         replication_config=SimpleNamespace(factor=3),

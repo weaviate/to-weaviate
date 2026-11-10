@@ -1,6 +1,6 @@
 """Cases that need a Weaviate cluster of 3 nodes with replication factor 3.
 
-Two of them delete a pod with kubectl. They run on the cluster leg of CI,
+Two of them delete a pod with kubectl. They run in the cluster setup of CI,
 where REPLICATION_MINIMUM_FACTOR is 3, and skip on a cluster of fewer than
 3 nodes.
 """
@@ -43,7 +43,7 @@ def _needs_three_nodes(_test_endpoints: None) -> None:
 
 
 TARGET = "Resume"
-# The REPLICATION_MINIMUM_FACTOR of the cluster leg.
+# The REPLICATION_MINIMUM_FACTOR of the cluster setup of CI.
 REPLICATION_FACTOR = 3
 NAMESPACE = "weaviate"
 POD = "weaviate-1"
