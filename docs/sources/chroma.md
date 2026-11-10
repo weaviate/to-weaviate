@@ -15,7 +15,7 @@ the plan keeps the source vector. It never writes to Chroma.
 | Deployment | Notes |
 |---|---|
 | Chroma Cloud | The default `CHROMA_URL`. Needs `CHROMA_API_KEY`. |
-| Distributed Chroma | The open-source cluster. `copy` and `verify` wait for its compaction; see [Compaction](#compaction). |
+| Distributed Chroma | The open-source cluster. `copy`, `sync` and `verify` wait for its compaction; see [Compaction](#compaction). |
 | Single-node Chroma | A `chroma run` server or the `chromadb/chroma` container. |
 | A Chroma directory on disk | Serve it with `chroma run`, then read it as a single-node server. |
 
@@ -167,22 +167,22 @@ hold a token.
 Distributed Chroma and Chroma Cloud keep new writes in a log until a
 compaction moves them into the collection. A compaction of more than 5,000
 records gives them new positions, so a read by position during it skips
-records. To prevent that, `copy` and `verify` do two things on these
+records. To prevent that, `copy`, `sync` and `verify` do two things on these
 deployments:
 
 - Before the first page of each collection, they ask Chroma every 5 s how
   many writes are left to compact, until none is left. They give up at the
   first answer after 600 s that still counts one. Each time the number changes
   they print `Waiting for Chroma to compact <name>: <N> of <M> operations not
-  compacted`, and `copy` writes the event `compaction_wait`.
+  compacted`, and `copy` and `sync` write the event `compaction_wait`.
 - After the last read, they check whether Chroma compacted the collection
   during the read. When it did, they stop with `source_compacting`, exit 4.
-  The next `copy` reads that collection again from the start, and `verify`
-  writes no report.
+  The next `copy` or `sync` reads that collection again from the start, and
+  `verify` writes no report.
 
 A collection that receives writes all the time does not reach zero within
-600 s, so `copy` stops with `source_compacting` before its first page. Stop
-the writes to the source before you copy, and run `verify` after the copy.
+600 s, so `copy` and `sync` stop with `source_compacting` before their first
+page. Pause the writes to the source while they run.
 
 Single-node Chroma has no compaction. The tool sends one `indexing_status`
 request and does not wait.

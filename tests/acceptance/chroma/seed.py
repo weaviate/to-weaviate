@@ -68,6 +68,10 @@ ORDER = "order"
 ORDER_COUNT = 1000
 BURST = "burst"
 BURST_COUNT = 40_000
+# The collection of test_sync.py: order records that the cases add to,
+# change and delete after the copy.
+SYNC = "sync"
+SYNC_COUNT = 100
 # A distributed Chroma compacts every 10 s, at most 10,000 records of a
 # collection per run (compaction_interval_sec and max_compaction_size of
 # rust/worker/chroma_config.yaml in the Chroma repository), so bulk needs five
@@ -606,6 +610,25 @@ def add_records(name: str, records: list[Record]) -> None:
     """Add `records` to the collection `name`, in adds of ADD_BATCH."""
     with _test_server() as http:
         _add(http, _collection_id(http, name), records)
+
+
+def update_records(name: str, records: list[Record]) -> None:
+    """Replace the embedding, document, metadata and uri of `records` in `name`."""
+    with _test_server() as http:
+        collection_id = _collection_id(http, name)
+        for start in range(0, len(records), ADD_BATCH):
+            batch = records[start : start + ADD_BATCH]
+            updated = http.post(
+                f"/collections/{collection_id}/update",
+                json={
+                    "ids": [r.id for r in batch],
+                    "embeddings": [r.embedding for r in batch],
+                    "documents": [r.document for r in batch],
+                    "metadatas": [r.metadata for r in batch],
+                    "uris": [r.uri for r in batch],
+                },
+            )
+            updated.raise_for_status()
 
 
 def delete_records(name: str, ids: list[str]) -> None:

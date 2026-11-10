@@ -2371,10 +2371,10 @@ def test_the_rejects_hint_says_how_to_copy_a_rejected_record_again():
     d = json.loads(r.stdout)
     assert (d["code"], d["hint"]) == (
         "rejects",
-        "See .to-weaviate/rejects.jsonl for each record and the reason. Rejects "
-        "are final for this directory. After fixing the cause, copy plan.yaml "
-        "and inspect.json to a new --dir and run to-weaviate copy there; "
-        "objects already in Weaviate are written again unchanged.",
+        "See .to-weaviate/rejects.jsonl for each record and the reason. A "
+        "reject stays until its cause is fixed; then to-weaviate sync writes "
+        "the record. Objects already in Weaviate are written only when they "
+        "changed.",
     )
 
 

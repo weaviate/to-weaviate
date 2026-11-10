@@ -178,7 +178,9 @@ def cli_app(monkeypatch, server: ChromaServer, fakes: FakeFactories) -> Any:
         return ChromaClient(settings, transport=transport, sleep=lambda s: None)
 
     monkeypatch.setattr(cli, "ChromaClient", client)
-    return build_app(cli._chroma_source, fakes._writer, fakes._reader, fakes._schema)
+    return build_app(
+        cli._chroma_source, fakes._writer, fakes._reader, fakes._schema, fakes._deleter
+    )
 
 
 def run_cli(app: Any, *args: str, **env: str | None) -> Any:

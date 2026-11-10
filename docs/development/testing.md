@@ -24,6 +24,7 @@ pieces are `tests/acceptance/conftest.py` and `tests/e2e.py`.
 |---|---|
 | Lost or duplicated records | Faults in the middle of a page, short pages, refused batches, objects above the gRPC message limit, two source ids with one UUID, a second `copy` on the same directory, a 50,000-record copy |
 | Resuming | A killed `copy`, a refused page, a refused quantizer update, a state file of an older or newer format, a corrupted state file, a changed target or source |
+| Sync | Records added, changed and deleted after the copy, `--prune` and its 10% limit, a source written to during the id listing, one tenant of a shared collection with an object the tool did not write, a plan edit after the copy, rejects written once the plan is fixed |
 | Secrets | No API key, URL password or embedding-function secret in any output, traceback or file of the migration directory. The acceptance suite checks stdout and stderr of each command that it runs to completion, and every file under the test's directory. A command started in the background (`start` in `tests/e2e.py`) has its stderr discarded. |
 | Plan and schema | Every plan field, the allowed edits end to end, the index and quantizer rules, property types and conversions, names that need renaming, existing collections with other settings |
 | Data fidelity | Distances, metadata types, values at the type limits, unicode, empty and long values, embedding-function mappings |

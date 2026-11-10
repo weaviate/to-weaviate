@@ -39,9 +39,10 @@ WEAVIATE_GRPC_URL=http://localhost:50051
 
 `check` reads the module list and the schema. `copy` reads the module list,
 the schema and the tenants, creates collections and tenants, adds
-properties, updates quantizer settings and writes objects. `verify` reads
-the schema and the tenants, counts the objects and reads them. A key without
-the permission for one of these steps makes the command stop with
+properties, updates quantizer settings and writes objects. `sync` does the
+same and reads the objects; with `--prune` it also deletes objects. `verify`
+reads the schema and the tenants, counts the objects and reads them. A key
+without the permission for one of these steps makes the command stop with
 `auth_failed`, exit 3.
 
 `copy` creates every target collection before it writes the first object.
@@ -69,8 +70,8 @@ it to Weaviate as a request header and never prints it.
 When two variables name the same header, the first one in `API_KEY_MAP` that
 is set wins. The table lists them in that order.
 
-`check` and `copy` stop with `missing_credential`, exit 3, before they
-connect, when a planned `text2vec-openai`, `text2vec-cohere`,
+`check`, `copy` and `sync` stop with `missing_credential`, exit 3, before
+they connect, when a planned `text2vec-openai`, `text2vec-cohere`,
 `text2vec-jinaai`, `text2vec-voyageai`, `text2vec-mistral`,
 `text2vec-huggingface` or `text2vec-google` vectorizer has no key. They do
 not check the keys of other modules. A provider that refuses the key during

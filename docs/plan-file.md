@@ -104,6 +104,9 @@ and the properties `source_id`, `uri` and the other metadata keys.
 - Change the `mode` of a vector (`keep` or `embed`), the vectorizer, the
   index type or the quantizer.
 
+After a `copy`, an edit to an entry makes the next
+[`sync`](commands.md#sync) write every record of that entry again.
+
 ## Properties
 
 `inspect` drafts one property per source field. Three come from the record

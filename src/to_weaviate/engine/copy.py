@@ -2,7 +2,7 @@ import hashlib
 import json
 import math
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
@@ -21,10 +21,9 @@ from to_weaviate.target.writer import Reject, TargetObject, Writer, to_object
 
 NOT_A_NUMBER = "embedding holds a value that is not a number"
 SOURCE_CHANGED = "the source changed since the last run; re-reading from the start"
-REJECTS_ARE_FINAL = (
-    "Rejects are final for this directory. After fixing the cause, copy "
-    "plan.yaml and inspect.json to a new --dir and run to-weaviate copy there; "
-    "objects already in Weaviate are written again unchanged."
+REJECTS_HINT = (
+    "A reject stays until its cause is fixed; then to-weaviate sync writes the "
+    "record. Objects already in Weaviate are written only when they changed."
 )
 
 
@@ -34,6 +33,24 @@ class CopyResult:
     rejects: int
     # The start offset of a tail that reads records of earlier runs again.
     reread_from: int | None = None
+    # Records skipped with `skip_unchanged`; counted in `copied` too.
+    unchanged: int = 0
+    # Records this run wrote: not the unchanged ones, not the rejects.
+    written: int = 0
+
+
+def plan_hash(entry: CollectionPlan) -> bytes:
+    """Hash of the target part of a plan entry, which decides each object.
+
+    State stores these hashes, so the encoding must not change.
+    """
+    payload = json.dumps(
+        entry.target.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.blake2b(payload.encode("utf-8"), digest_size=16).digest()
 
 
 def content_hash(record: Record) -> bytes:
@@ -267,6 +284,16 @@ class _CollectionCopy:
         self._lock = threading.Lock()
         self._copied = _progress(state, self._ref).copied
         self.total = collection.count
+        self.written = 0
+        self._unchanged: dict[str, int] = {}
+
+    @property
+    def unchanged(self) -> int:
+        return sum(self._unchanged.values())
+
+    def unchanged_in(self, keys: Iterable[str]) -> int:
+        """The unchanged records this copy read in the partitions `keys`."""
+        return sum(self._unchanged.get(key, 0) for key in keys)
 
     def run(self, pending: list[tuple[Partition, str | None]], workers: int) -> None:
         """Copy every pending partition and raise the first worker error.
@@ -318,6 +345,7 @@ class _CollectionCopy:
             else:
                 converted.append((record, result))
         digests = {record.id: content_hash(record) for record, _ in converted}
+        same: set[str] = set()
         if self._skip_unchanged and digests:
             same = self._state.unchanged(self._ref, list(digests.items()))
             converted = [(r, o) for r, o in converted if r.id not in same]
@@ -339,17 +367,21 @@ class _CollectionCopy:
             self._state.record_hashes(
                 self._ref, [(record_id, digests[record_id]) for record_id in written]
             )
+        # An unchanged record counts as copied: the object is in Weaviate.
         self._state.advance(
             self._ref,
             partition.key,
             page.next_cursor,
-            len(written),
+            len(written) + len(same),
             stop=end,
             last_id=page.records[-1].id if page.records else None,
             previous_id=page.records[-2].id if len(page.records) > 1 else None,
         )
         with self._lock:
-            self._copied += len(written)
+            self._copied += len(written) + len(same)
+            self.written += len(written)
+            key = partition.key
+            self._unchanged[key] = self._unchanged.get(key, 0) + len(same)
             copied = self._copied
         self._events.progress(self._ref, copied, self.total)
 
@@ -379,11 +411,15 @@ def copy_collection(
     skip_unchanged: bool = False,
     warn: Callable[[str], None] | None = None,
     waiting: Callable[[int, int], None] | None = None,
+    fresh: bool = False,
 ) -> CopyResult:
     """Copy one collection and return its totals over all runs.
 
     Progress is stored in `state`, so a run after a failure resumes where the
-    last one stopped. After the stored partitions are finished, every run
+    last one stopped. With `fresh`, the stored read positions and rejects of
+    the collection go after `source.wait_compacted` returned, so the run reads
+    every record again; a run that stops in the wait keeps them. After the
+    stored partitions are finished, every run
     reads the source count. The stored total is the highest count a run read.
     Records beyond the end of the stored partitions are copied by a new
     partition without a stop, a tail. A finished tail stores its end offset,
@@ -417,14 +453,18 @@ def copy_collection(
             waiting(unindexed, total)
 
     before = source.wait_compacted(collection, on_wait)
+    # The hashes this run stores belong to this plan entry; sync compares.
+    state.set_plan_hash(ref, plan_hash(entry))
     state.init_collection(
-        ref, source.partitions(collection, parallelism), collection.count
+        ref, source.partitions(collection, parallelism), collection.count, fresh=fresh
     )
     events.emit("info", "collection_started", ref=ref, total=collection.count)
     copy = _CollectionCopy(
         source, writer, state, events, entry, collection, skip_unchanged
     )
     copy.run(state.pending(ref), parallelism)
+    unchanged = copy.unchanged
+    written = copy.written
     count = source.count(collection)
     state.raise_total(ref, count)
     stored = state.partitions(ref)
@@ -455,11 +495,15 @@ def copy_collection(
                 previous_id=mark.previous_id if mark else None,
             )
             # The superseded counts are 0 now; a new copy reads the count again.
+            # The tail reads the superseded records again and counts them.
+            unchanged -= copy.unchanged_in(place.superseded)
             copy = _CollectionCopy(
                 source, writer, state, events, entry, collection, skip_unchanged
             )
             copy.total = count
             copy.run(state.pending(ref), parallelism)
+            unchanged += copy.unchanged
+            written += copy.written
             # A tail reads to the last record, which can be past `count` now.
             state.raise_total(ref, source.count(collection))
     try:
@@ -476,4 +520,6 @@ def copy_collection(
         copied=progress.copied,
         rejects=progress.rejects,
     )
-    return CopyResult(progress.copied, progress.rejects, reread_from)
+    return CopyResult(
+        progress.copied, progress.rejects, reread_from, unchanged, written
+    )

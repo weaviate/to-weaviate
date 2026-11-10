@@ -262,7 +262,7 @@ def test_source_ids_yields_every_pair_across_a_transient_error():
     pairs = list(reader(client).source_ids(ENTRY))
     assert pairs == [
         (str(objects[0].uuid), "a"),
-        (str(objects[1].uuid), str(objects[1].uuid)),
+        (str(objects[1].uuid), None),
         (str(objects[2].uuid), "c"),
     ]
     assert client.collection.calls == [

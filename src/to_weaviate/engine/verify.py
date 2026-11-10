@@ -6,12 +6,12 @@ import sqlite3
 import struct
 import tempfile
 from collections.abc import Iterable, Iterator
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, TypeVar
 
-from to_weaviate.engine.copy import REJECTS_ARE_FINAL
+from to_weaviate.engine.copy import REJECTS_HINT
 from to_weaviate.ids import to_uuid
 from to_weaviate.plan import CollectionPlan
 from to_weaviate.sources.base import Source, SourceCollection
@@ -28,15 +28,15 @@ REPORT_MD = "report.md"
 REPORT_JSON = "report.json"
 TARGET_BELOW_SOURCE = (
     "run to-weaviate copy again. If the counts still differ, records were "
-    f"skipped or rejected: read rejects.jsonl. {REJECTS_ARE_FINAL}"
+    f"skipped or rejected: run to-weaviate sync, and read rejects.jsonl. {REJECTS_HINT}"
 )
 MISSING_IDS = (
     "run to-weaviate copy again. If ids are still missing, records were "
-    f"skipped or rejected: read rejects.jsonl. {REJECTS_ARE_FINAL}"
+    f"skipped or rejected: run to-weaviate sync, and read rejects.jsonl. {REJECTS_HINT}"
 )
 TARGET_ABOVE_SOURCE = (
-    "the target holds objects whose source records were deleted. This version "
-    "has no command that removes them."
+    "the target holds objects whose source records were deleted; stop the "
+    "writes to the source and run to-weaviate sync --prune to delete them."
 )
 NOTHING_COMPARED = "no record was compared; run to-weaviate verify again"
 EVERY_SAMPLE_REJECTED = (
@@ -47,12 +47,14 @@ _TABLES = """
 PRAGMA journal_mode = OFF;
 PRAGMA synchronous = OFF;
 CREATE TABLE source (source_id TEXT PRIMARY KEY, uuid TEXT NOT NULL);
-CREATE TABLE target (uuid TEXT PRIMARY KEY, source_id TEXT NOT NULL);
+CREATE TABLE target (uuid TEXT PRIMARY KEY, source_id TEXT);
 """
 _MISSING = (
     "FROM source s WHERE NOT EXISTS (SELECT 1 FROM target t WHERE t.uuid = s.uuid)"
 )
 _EXTRA = "FROM target t WHERE NOT EXISTS (SELECT 1 FROM source s WHERE s.uuid = t.uuid)"
+# An object without source_id was not written by the tool.
+_STALE = f"{_EXTRA} AND t.source_id IS NOT NULL"
 
 
 @dataclass(frozen=True)
@@ -125,11 +127,11 @@ def verify_counts(
     return _check("count", entry, expected == found, detail)
 
 
-def _diff(
+def _load(
     db: sqlite3.Connection,
     source_ids: Iterable[str],
-    target_pairs: Iterable[tuple[str, str]],
-) -> IdDiff:
+    target_pairs: Iterable[tuple[str, str | None]],
+) -> None:
     db.executescript(_TABLES)
     for batch in _batches(((i, to_uuid(i)) for i in source_ids), ID_BATCH):
         db.executemany("INSERT OR IGNORE INTO source VALUES (?, ?)", batch)
@@ -139,19 +141,64 @@ def _diff(
         db.commit()
     db.execute("CREATE INDEX source_uuid ON source (uuid)")
 
-    def count(where: str) -> int:
-        return int(db.execute(f"SELECT COUNT(*) {where}").fetchone()[0])
 
+def _count(db: sqlite3.Connection, where: str) -> int:
+    return int(db.execute(f"SELECT COUNT(*) {where}").fetchone()[0])
+
+
+def _counts(db: sqlite3.Connection) -> IdDiff:
     def sample(column: str, where: str) -> list[str]:
         rows = db.execute(f"SELECT {column} {where} LIMIT ?", (ID_SAMPLE,))
         return [str(row[0]) for row in rows]
 
     return IdDiff(
-        missing=count(_MISSING),
-        extra=count(_EXTRA),
+        missing=_count(db, _MISSING),
+        extra=_count(db, _EXTRA),
         missing_sample=sample("s.source_id", _MISSING),
-        extra_sample=sample("t.source_id", _EXTRA),
+        extra_sample=sample("COALESCE(t.source_id, t.uuid)", _EXTRA),
     )
+
+
+@contextmanager
+def id_tables(
+    source: Source,
+    reader: TargetReader,
+    entry: CollectionPlan,
+    collection: SourceCollection,
+    workdir: Path,
+) -> Iterator[sqlite3.Connection]:
+    """A database with the source ids and the target (uuid, source_id) pairs.
+
+    The ids go through a temporary sqlite file under `workdir`, so memory does
+    not grow with the collection. The file is removed on exit.
+    """
+    with tempfile.TemporaryDirectory(prefix="verify-", dir=workdir) as scratch:
+        with closing(sqlite3.connect(Path(scratch) / "ids.sqlite")) as db:
+            _load(db, source.ids(collection), reader.source_ids(entry))
+            yield db
+
+
+def source_listed(db: sqlite3.Connection) -> int:
+    """The number of source ids that `id_tables` listed."""
+    return _count(db, "FROM source")
+
+
+def target_total(db: sqlite3.Connection) -> int:
+    """The number of target objects that `id_tables` listed."""
+    return _count(db, "FROM target")
+
+
+def missing_source_ids(db: sqlite3.Connection) -> Iterator[list[str]]:
+    """The source ids without a target object, in batches of ID_BATCH."""
+    cursor = db.execute(f"SELECT s.source_id {_MISSING} ORDER BY s.uuid")
+    while rows := cursor.fetchmany(ID_BATCH):
+        yield [source_id for (source_id,) in rows]
+
+
+def stale_objects(db: sqlite3.Connection) -> list[tuple[str, str]]:
+    """(uuid, source_id) of the objects with a source_id and no source record."""
+    rows = db.execute(f"SELECT t.uuid, t.source_id {_STALE} ORDER BY t.uuid")
+    return [(str(uuid), str(source_id)) for uuid, source_id in rows]
 
 
 def diff_ids(
@@ -161,14 +208,9 @@ def diff_ids(
     collection: SourceCollection,
     workdir: Path,
 ) -> IdDiff:
-    """Source ids without a target object, and target objects without a source id.
-
-    The ids go through a temporary sqlite file under `workdir`, so memory does
-    not grow with the collection. The file is removed before this returns.
-    """
-    with tempfile.TemporaryDirectory(prefix="verify-", dir=workdir) as scratch:
-        with closing(sqlite3.connect(Path(scratch) / "ids.sqlite")) as db:
-            return _diff(db, source.ids(collection), reader.source_ids(entry))
+    """Source ids without a target object, and target objects without a source id."""
+    with id_tables(source, reader, entry, collection, workdir) as db:
+        return _counts(db)
 
 
 def verify_ids(diff: IdDiff, entry: CollectionPlan) -> Check:

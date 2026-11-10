@@ -1055,6 +1055,8 @@ def test_error_exit_covers_every_code():
         "source_unreachable": 4,
         "target_unreachable": 4,
         "source_compacting": 4,
+        "source_writing": 4,
+        "delete_failed": 4,
         "internal_error": 5,
     }
 

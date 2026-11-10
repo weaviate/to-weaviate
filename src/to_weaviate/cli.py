@@ -62,9 +62,15 @@ from to_weaviate.engine.check import (
     userinfo_only,
 )
 from to_weaviate.engine.copy import (
-    REJECTS_ARE_FINAL,
+    REJECTS_HINT,
     copy_collection,
     raise_if_compacted,
+)
+from to_weaviate.engine.sync import (
+    PRUNE_LIMIT_PERCENT,
+    SourceWriting,
+    SyncResult,
+    sync_collection,
 )
 from to_weaviate.engine.verify import (
     REPORT_MD,
@@ -132,6 +138,7 @@ from to_weaviate.state import (
     unwritable_reason,
 )
 from to_weaviate.target.connect import connect
+from to_weaviate.target.deleter import DeleteFailed, Deleter, WeaviateDeleter
 from to_weaviate.target.reader import TargetReader, WeaviateReader
 from to_weaviate.target.schema import (
     USERINFO_TEXT,
@@ -153,6 +160,7 @@ SourceFactory = Callable[[ChromaSettings], Source]
 WriterFactory = Callable[[WeaviateSettings, str | None], Writer]
 ReaderFactory = Callable[[WeaviateSettings], TargetReader]
 SchemaFactory = Callable[[WeaviateSettings], Schema]
+DeleterFactory = Callable[[WeaviateSettings, str | None], Deleter]
 
 VectorsMode = Literal["keep", "embed", "both"]
 IndexType = Literal["default", "hnsw", "flat", "dynamic", "hfresh"]
@@ -226,6 +234,14 @@ ADD_PROPERTY_HINT = (
     "Weaviate refused to add the property; read its message and edit plan.yaml."
 )
 BATCH_HINT = "Fix the cause and run to-weaviate copy again. It resumes at this page."
+DELETE_FAILED_HINT = "Run to-weaviate sync --prune again."
+PRUNE_HINT = (
+    "Check that the source settings name the source of the plan. To delete them "
+    "anyway, run to-weaviate sync --prune --force."
+)
+SOURCE_WRITING_HINT = (
+    "Stop the writes to the source, then run to-weaviate sync --prune again."
+)
 MISSING_TEXT = "missing in the collection; copy will add it"
 # A part of a text in single or double quotes; a quote after a backslash is
 # part of it, as in a Python repr.
@@ -238,6 +254,7 @@ class _Factories:
     writer: WriterFactory
     reader: ReaderFactory
     schema: SchemaFactory
+    deleter: DeleterFactory
 
 
 def _short(text: str) -> str:
@@ -313,6 +330,22 @@ def _as_cli_error(exc: Exception) -> CliError:
             "directory_unwritable",
             f"{where} cannot be written: {os.strerror(exc.errno)}.",
             UNWRITABLE_ERRNOS[exc.errno],
+        )
+    if isinstance(exc, DeleteFailed):
+        return CliError(
+            "delete_failed",
+            f"Weaviate failed to delete {exc.failed} of {exc.matched} objects of "
+            f"{exc.collection}.",
+            DELETE_FAILED_HINT,
+            fields={"collection": exc.collection},
+        )
+    if isinstance(exc, SourceWriting):
+        return CliError(
+            "source_writing",
+            f"{exc.collection} changed while sync listed its ids: {exc.before} "
+            f"records before, {exc.listed} listed, {exc.after} after.",
+            SOURCE_WRITING_HINT,
+            fields={"collection": exc.collection},
         )
     if isinstance(exc, SourceChanged):
         changes = ", ".join(
@@ -1074,14 +1107,38 @@ def _select(entries: list[CollectionPlan], names: list[str]) -> list[CollectionP
     return [e for e in entries if e.source.name in names or e.target.name in names]
 
 
-def _copy(
+@dataclass(frozen=True)
+class _Run:
+    """What a copy or a sync works on, once the plan and the target are checked."""
+
+    inspected: dict[str, SourceCollection]
+    entries: list[CollectionPlan]
+    warnings: list[Finding]
+    target_settings: WeaviateSettings
+    source: Source
+    writer: Writer
+    reader: TargetReader
+    schema: Schema
+    state: State
+    events: Events
+    targets: dict[str, Target]
+    added: list[dict[str, str]]
+
+
+@contextmanager
+def _writing(
     factories: _Factories,
     directory: Path,
     names: list[str],
     parallelism: int,
     consistency: Consistency | None,
     json_output: bool,
-) -> None:
+) -> Iterator[_Run]:
+    """The checks before a copy or a sync, then the state under `copy.lock`.
+
+    Raises the plan, source, provider-key, module and state errors, and
+    creates the target collections. The state is closed on exit.
+    """
     if not 1 <= parallelism <= MAX_PARALLELISM:
         raise CliError(
             "usage",
@@ -1136,64 +1193,216 @@ def _copy(
                 for prop in missing:
                     _info(json_output, f"Added the property {prop} to {name}")
                     added.append({"collection": name, "property": prop})
-            events = Events(directory / EVENTS_FILE)
-            rereads: dict[str, int] = {}
-            for entry in entries:
-                ref = entry.source.ref
-                state.set_target(ref, targets[ref])
-                trained = _needs_quantizer_update(entry)
-                if trained:
-                    state.expect_quantizer_update(ref)
-                else:
-                    # A row from a run with an earlier plan would keep the
-                    # entry not done.
-                    state.quantizers_updated(ref)
-                _info(
-                    json_output, f"Copying {entry.source.name} to {entry.target.name}"
-                )
-                result = copy_collection(
-                    source,
-                    writer,
-                    state,
-                    events,
-                    entry,
-                    inspected[ref],
-                    parallelism,
-                    warn=_warning(entry.source.name),
-                    waiting=_waiting(json_output, entry.source.name),
-                )
-                if result.reread_from is not None:
-                    rereads[ref] = result.reread_from
-                if trained:
-                    _info(
-                        json_output,
-                        f"Enabling the trained quantizers of {entry.target.name}",
-                    )
-                    schema.enable_trained_quantizers(entry)
-                    state.quantizers_updated(ref)
-                _info(
-                    json_output,
-                    f"Copied {entry.source.name}: {_plural(result.copied, 'record')}, "
-                    f"{_plural(result.rejects, 'reject')}",
-                )
-            progress = {p.ref: p for p in state.progress()}
+            yield _Run(
+                inspected,
+                entries,
+                warnings,
+                target_settings,
+                source,
+                writer,
+                reader,
+                schema,
+                state,
+                Events(directory / EVENTS_FILE),
+                targets,
+                added,
+            )
         finally:
             state.close()
-    rows = _rows(entries, progress)
+
+
+def _begin_entry(run: _Run, entry: CollectionPlan) -> bool:
+    """Record the target of `entry`; True when its quantizers need an update."""
+    ref = entry.source.ref
+    run.state.set_target(ref, run.targets[ref])
+    trained = _needs_quantizer_update(entry)
+    if trained:
+        run.state.expect_quantizer_update(ref)
+    else:
+        # A row from a run with an earlier plan would keep the entry not done.
+        run.state.quantizers_updated(ref)
+    return trained
+
+
+def _enable_quantizers(run: _Run, entry: CollectionPlan, json_output: bool) -> None:
+    _info(json_output, f"Enabling the trained quantizers of {entry.target.name}")
+    run.schema.enable_trained_quantizers(entry)
+    run.state.quantizers_updated(entry.source.ref)
+
+
+def _rejects_error(
+    rejects: int, directory: Path, document: dict[str, Any], text: str
+) -> CliError:
+    return CliError(
+        "rejects",
+        f"{_plural(rejects, 'record')} rejected.",
+        f"See {directory / REJECTS_FILE} for each record and the reason. "
+        f"{REJECTS_HINT}",
+        fields=document,
+        text=text,
+    )
+
+
+def _copy(
+    factories: _Factories,
+    directory: Path,
+    names: list[str],
+    parallelism: int,
+    consistency: Consistency | None,
+    json_output: bool,
+) -> None:
+    with _writing(
+        factories, directory, names, parallelism, consistency, json_output
+    ) as run:
+        rereads: dict[str, int] = {}
+        for entry in run.entries:
+            ref = entry.source.ref
+            trained = _begin_entry(run, entry)
+            _info(json_output, f"Copying {entry.source.name} to {entry.target.name}")
+            result = copy_collection(
+                run.source,
+                run.writer,
+                run.state,
+                run.events,
+                entry,
+                run.inspected[ref],
+                parallelism,
+                warn=_warning(entry.source.name),
+                waiting=_waiting(json_output, entry.source.name),
+            )
+            if result.reread_from is not None:
+                rereads[ref] = result.reread_from
+            if trained:
+                _enable_quantizers(run, entry, json_output)
+            _info(
+                json_output,
+                f"Copied {entry.source.name}: {_plural(result.copied, 'record')}, "
+                f"{_plural(result.rejects, 'reject')}",
+            )
+        progress = {p.ref: p for p in run.state.progress()}
+    rows = _rows(run.entries, progress)
     for row in rows:
         if row["ref"] in rereads:
             row["reread_from"] = rereads[row["ref"]]
-    document, text = _progress_output(entries, rows)
-    document["added_properties"] = added
-    document["warnings"] = _findings_document([], warnings)["warnings"]
-    text = "\n".join([*_findings_text([], warnings), text])
+    document, text = _progress_output(run.entries, rows)
+    document["added_properties"] = run.added
+    document["warnings"] = _findings_document([], run.warnings)["warnings"]
+    text = "\n".join([*_findings_text([], run.warnings), text])
     rejects = sum(row["rejects"] for row in rows)
     if rejects:
+        raise _rejects_error(rejects, directory, document, text)
+    _emit_success(json_output, {"status": "success", **document}, text)
+
+
+def _sync_output(
+    entries: list[CollectionPlan], results: dict[str, SyncResult], prune: bool
+) -> tuple[dict[str, Any], str]:
+    rows = []
+    lines = []
+    for entry in entries:
+        result = results[entry.source.ref]
+        place = target_label(entry.target.name, entry.target.tenant)
+        rows.append(
+            {
+                "ref": entry.source.ref,
+                "source": entry.source.name,
+                "target": entry.target.name,
+                "tenant": entry.target.tenant,
+                **{
+                    key: getattr(result, key)
+                    for key in (
+                        "copied",
+                        "unchanged",
+                        "rejects",
+                        "stale",
+                        "deleted",
+                        "plan_changed",
+                        "prune_refused",
+                    )
+                },
+            }
+        )
+        lines.append(
+            f"{entry.source.name} -> {place}: copied {result.copied}, unchanged "
+            f"{result.unchanged}, rejects {result.rejects}, stale {result.stale}, "
+            f"deleted {result.deleted}"
+        )
+    totals = {
+        key: sum(getattr(r, key) for r in results.values())
+        for key in ("copied", "unchanged", "stale", "deleted")
+    }
+    lines.append(
+        f"Total: copied {totals['copied']}, unchanged {totals['unchanged']}, "
+        f"stale {totals['stale']}, deleted {totals['deleted']}"
+    )
+    if not prune and totals["stale"]:
+        lines.append(
+            "Run to-weaviate sync --prune to delete the "
+            f"{_plural(totals['stale'], 'stale object')}."
+        )
+    return {"prune": prune, "collections": rows}, "\n".join(lines)
+
+
+def _sync(
+    factories: _Factories,
+    directory: Path,
+    names: list[str],
+    parallelism: int,
+    consistency: Consistency | None,
+    prune: bool,
+    force: bool,
+    json_output: bool,
+) -> None:
+    with _writing(
+        factories, directory, names, parallelism, consistency, json_output
+    ) as run:
+        deleter = factories.deleter(run.target_settings, consistency)
+        results: dict[str, SyncResult] = {}
+        for entry in run.entries:
+            ref = entry.source.ref
+            trained = _begin_entry(run, entry)
+            place = target_label(entry.target.name, entry.target.tenant)
+            _info(json_output, f"Syncing {entry.source.name} to {place}")
+            result = sync_collection(
+                run.source,
+                run.writer,
+                run.reader,
+                deleter,
+                run.state,
+                run.events,
+                entry,
+                run.inspected[ref],
+                parallelism,
+                prune,
+                force,
+                directory,
+                warn=_warning(entry.source.name),
+                waiting=_waiting(json_output, entry.source.name),
+            )
+            if trained:
+                _enable_quantizers(run, entry, json_output)
+            _info(
+                json_output,
+                f"Synced {entry.source.name}: {_plural(result.copied, 'record')} "
+                f"written, {result.unchanged} unchanged, "
+                f"{_plural(result.rejects, 'reject')}, {result.stale} stale, "
+                f"{result.deleted} deleted",
+            )
+            results[ref] = result
+    document, text = _sync_output(run.entries, results, prune)
+    document["added_properties"] = run.added
+    document["warnings"] = _findings_document([], run.warnings)["warnings"]
+    text = "\n".join([*_findings_text([], run.warnings), text])
+    rejects = sum(r.rejects for r in results.values())
+    if rejects:
+        raise _rejects_error(rejects, directory, document, text)
+    refused = sum(r.prune_refused for r in results.values())
+    if refused:
         raise CliError(
-            "rejects",
-            f"{_plural(rejects, 'record')} rejected.",
-            f"See {directory / REJECTS_FILE} for each record and the reason. "
-            f"{REJECTS_ARE_FINAL}",
+            "prune_limit",
+            f"Stale objects above {PRUNE_LIMIT_PERCENT}% in "
+            f"{_plural(refused, 'collection')}; nothing was deleted there.",
+            PRUNE_HINT,
             fields=document,
             text=text,
         )
@@ -1297,6 +1506,18 @@ NamesOption = Annotated[
     list[str] | None,
     typer.Option("--collection", metavar="NAME", help="Collection name. Repeatable."),
 ]
+ParallelismOption = Annotated[
+    int,
+    typer.Option(
+        "--parallelism",
+        metavar="N",
+        help=f"Reads per collection, 1 to {MAX_PARALLELISM}.",
+    ),
+]
+ConsistencyOption = Annotated[
+    Consistency | None,
+    typer.Option("--consistency", help="Write consistency level."),
+]
 
 
 def build_app(
@@ -1304,9 +1525,10 @@ def build_app(
     writer_factory: WriterFactory,
     reader_factory: ReaderFactory,
     schema_factory: SchemaFactory,
+    deleter_factory: DeleterFactory,
 ) -> typer.Typer:
     factories = _Factories(
-        source_factory, writer_factory, reader_factory, schema_factory
+        source_factory, writer_factory, reader_factory, schema_factory, deleter_factory
     )
     # Locals can hold values read from the environment, so tracebacks omit them.
     app = typer.Typer(
@@ -1401,18 +1623,8 @@ def build_app(
     @app.command("copy")
     def copy(
         collection: NamesOption = None,
-        parallelism: Annotated[
-            int,
-            typer.Option(
-                "--parallelism",
-                metavar="N",
-                help=f"Reads per collection, 1 to {MAX_PARALLELISM}.",
-            ),
-        ] = DEFAULT_PARALLELISM,
-        consistency: Annotated[
-            Consistency | None,
-            typer.Option("--consistency", help="Write consistency level."),
-        ] = None,
+        parallelism: ParallelismOption = DEFAULT_PARALLELISM,
+        consistency: ConsistencyOption = None,
         directory: DirOption = DEFAULT_DIR,
         json_output: JsonOption = False,
     ) -> None:
@@ -1424,6 +1636,41 @@ def build_app(
                 collection or [],
                 parallelism,
                 consistency,
+                json_output,
+            )
+
+    @app.command("sync")
+    def sync(
+        collection: NamesOption = None,
+        parallelism: ParallelismOption = DEFAULT_PARALLELISM,
+        consistency: ConsistencyOption = None,
+        prune: Annotated[
+            bool,
+            typer.Option(
+                "--prune", help="Delete the objects whose source record is gone."
+            ),
+        ] = False,
+        force: Annotated[
+            bool,
+            typer.Option(
+                "--force",
+                help=f"Prune a collection with more than {PRUNE_LIMIT_PERCENT}% "
+                "stale objects.",
+            ),
+        ] = False,
+        directory: DirOption = DEFAULT_DIR,
+        json_output: JsonOption = False,
+    ) -> None:
+        """Read the source again and write the new and changed records."""
+        with _handled(json_output):
+            _sync(
+                factories,
+                directory,
+                collection or [],
+                parallelism,
+                consistency,
+                prune,
+                force,
                 json_output,
             )
 
@@ -1491,4 +1738,14 @@ def _weaviate_schema(settings: WeaviateSettings) -> Schema:
     return WeaviateSchema(_weaviate_client(settings))
 
 
-app = build_app(_chroma_source, _weaviate_writer, _weaviate_reader, _weaviate_schema)
+def _weaviate_deleter(settings: WeaviateSettings, consistency: str | None) -> Deleter:
+    return WeaviateDeleter(_weaviate_client(settings), consistency)
+
+
+app = build_app(
+    _chroma_source,
+    _weaviate_writer,
+    _weaviate_reader,
+    _weaviate_schema,
+    _weaviate_deleter,
+)

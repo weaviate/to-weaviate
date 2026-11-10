@@ -36,13 +36,17 @@ class TargetReader(Protocol):
 
     def source_ids(
         self, entry: CollectionPlan
-    ) -> Iterator[tuple[str, str]]: ...  # (uuid, source_id)
+    ) -> Iterator[tuple[str, str | None]]: ...  # (uuid, source_id); None when unset
 
 
-def _source_id(obj: Any) -> str:
-    """The object's source_id, or its uuid when the property is not set."""
+def _source_id(obj: Any) -> str | None:
+    """The object's source_id, or None when the property is not set."""
     value = obj.properties.get(SOURCE_ID)
-    return str(obj.uuid) if value is None else str(value)
+    return None if value is None else str(value)
+
+
+def _source_id_or_uuid(obj: Any) -> str:
+    return _source_id(obj) or str(obj.uuid)
 
 
 class WeaviateReader:
@@ -117,7 +121,7 @@ class WeaviateReader:
                 return_properties=[SOURCE_ID],
             )
         )
-        return [_source_id(obj) for obj in response.objects]
+        return [_source_id_or_uuid(obj) for obj in response.objects]
 
     def filter_equal(
         self, entry: CollectionPlan, prop: str, value: Any, limit: int
@@ -130,9 +134,9 @@ class WeaviateReader:
                 return_properties=[SOURCE_ID],
             )
         )
-        return [_source_id(obj) for obj in response.objects]
+        return [_source_id_or_uuid(obj) for obj in response.objects]
 
-    def source_ids(self, entry: CollectionPlan) -> Iterator[tuple[str, str]]:
+    def source_ids(self, entry: CollectionPlan) -> Iterator[tuple[str, str | None]]:
         # The client's iterator keeps its cursor when a page request raises,
         # so a retried next() asks for the same page again.
         objects = iter(self._collection(entry).iterator(return_properties=[SOURCE_ID]))

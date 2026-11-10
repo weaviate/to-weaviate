@@ -8,9 +8,9 @@ command-line interface. The entry point is `to_weaviate.cli:app`.
 ```mermaid
 flowchart TB
     cli["cli.py: commands, settings, errors"]
-    engine["engine/: check, copy, verify"]
+    engine["engine/: check, copy, sync, verify"]
     sources["sources/: the Source protocol and one package per source"]
-    target["target/: Weaviate schema, writer, reader"]
+    target["target/: Weaviate schema, writer, reader, deleter"]
     dir["migration directory: plan.py, state.py, events.py, lock.py"]
     cli --> engine
     cli --> sources
@@ -27,7 +27,7 @@ An arrow means "calls". Every layer imports the types of `plan.py` and
 
 - `cli.py` parses a command, reads the settings, builds the source and the
   Weaviate clients, and maps every exception to an error code.
-- `engine/` runs copy and verify through the `Source` protocol, and computes
+- `engine/` runs copy, sync and verify through the `Source` protocol, and computes
   the check findings from the plan and `inspect.json`. It imports no source
   package.
 - `sources/` reads a source database. `sources/base.py` defines the protocol;
@@ -45,7 +45,7 @@ An arrow means "calls". Every layer imports the types of `plan.py` and
 | `settings.py` | `load_env` (`.env` under the environment), the source and Weaviate settings, URL validation, `API_KEY_MAP` |
 | `output.py` | `ERROR_EXIT` (error code to exit code), JSON and text output, secret redaction |
 | `plan.py` | The plan model, `draft_plan`, `load_plan`, `save_plan`, and the index and quantizer rules |
-| `state.py` | `state.sqlite`: read positions, rejects, recorded targets, quantizer updates |
+| `state.py` | `state.sqlite`: read positions, rejects, recorded targets, quantizer updates, the content hash of each written record and the hash of each plan entry |
 | `events.py` | `events.jsonl` |
 | `lock.py` | `copy.lock` |
 | `retry.py` | `with_retry`: 7 attempts, random delays up to 30 s |
@@ -53,13 +53,15 @@ An arrow means "calls". Every layer imports the types of `plan.py` and
 | `types.py` | Metadata value to Weaviate type, and the conversion of values |
 | `ids.py` | `to_uuid`: source id to object UUID |
 | `engine/check.py` | Findings from the plan and `inspect.json`: entries, names, the `source_id` property, types, distances, vectorizer options, unmapped keys, quantizer training. `module_findings` for the enabled modules, `provider_keys` for the keys a plan needs. |
-| `engine/copy.py` | `copy_collection`: the partitioned, threaded, resumable copy and the tail of new records |
-| `engine/verify.py` | The `count`, `ids` and `records` checks, and the report |
+| `engine/copy.py` | `copy_collection`: the partitioned, threaded, resumable copy and the tail of new records; `plan_hash` |
+| `engine/sync.py` | `sync_collection`: a copy that skips unchanged records, the count of stale objects, and their deletion with `--prune` |
+| `engine/verify.py` | The `count`, `ids` and `records` checks, and the report; `id_tables`, the scratch sqlite file of source ids and target ids that `verify` and `sync` diff |
 | `sources/base.py` | The `Source` protocol and the types `SourceCollection`, `FieldStats`, `Record`, `Partition`, `Page` |
 | `target/connect.py` | Weaviate Cloud or custom connection, from the settings |
 | `target/schema.py` | Creates collections from the plan, compares an existing collection with it, updates quantizers, classifies transient errors |
 | `target/writer.py` | Record to Weaviate object or reject; chunks of at most 4 MiB by estimated size, an object above that alone, with retries |
-| `target/reader.py` | Reads objects back for `verify` |
+| `target/reader.py` | Reads objects back for `verify`; lists the uuid and `source_id` of every object for `verify` and `sync` |
+| `target/deleter.py` | Deletes objects by uuid for `sync --prune`, 100 per request, with retries; raises `DeleteFailed` when a request deleted only some |
 
 ## How each command runs
 
@@ -101,6 +103,32 @@ property that an existing collection lacks. `check` writes nothing.
    quantizers and records that in `state.sqlite`. Then the next entry
    starts.
 
+**`sync`**: the checks and the lock of `copy`, then for each plan entry
+`engine/sync.sync_collection`:
+
+1. stores the hash of the plan entry in `state.sqlite`. A hash that differs
+   from the stored one deletes the record hashes of the entry, so every
+   record is written again, and `sync` warns and writes the event
+   `plan_changed`;
+2. runs `copy_collection` with `fresh` and `skip_unchanged`: after the
+   compaction wait it resets the read positions and the rejects of the
+   entry, then hashes each record and writes only those whose hash differs
+   from the stored one;
+3. lists `Source.ids` and the `(uuid, source_id)` pairs of the target in a
+   scratch sqlite file (`engine/verify.id_tables`) and counts the objects
+   whose `source_id` names no record: the stale objects. An object without
+   `source_id` is not counted. The hashes of the records without a target
+   object are deleted, so the next sync writes them;
+4. with `--prune`, compares `Source.count` from before and after the listing
+   with the listed count and raises `SourceWriting` when they differ. Else it
+   deletes the hashes of the stale objects, then the objects through
+   `target/deleter`, unless they are more than 10% of the objects and
+   `--force` is not given. A request that deleted only some of its objects
+   raises `DeleteFailed`.
+
+   After `sync_collection` returns, `sync` enables the trained quantizers as
+   `copy` does.
+
 **`verify`**: `engine/verify.py` compares `Source.count` with the object
 count, diffs `Source.ids` against the target ids in a scratch sqlite file,
 and compares `Source.sample` records with the objects that `target/reader`
@@ -119,10 +147,10 @@ source conforms; nothing checks it at run time.
 | `partitions(collection, parallelism)` | `copy`, once per collection in every run. `state.sqlite` keeps the partitions of the first run. |
 | `read(collection, partition, cursor, with_vectors)` | `copy`, in a pool of `--parallelism` threads, one task per partition. Returns a `Page`; `next_cursor` `None` ends the partition. |
 | `ids_at(collection, offset, limit)`, `page_size` | `copy`, after the stored partitions finish: one call checks that no record before the end moved. After a move, `copy` reads ids backwards, `page_size` at a time, to find where the tail starts. |
-| `count(collection)` | `copy` (the live total and the tail) and `verify` (the `count` check). |
-| `ids(collection)` | `verify`, the `ids` check. |
+| `count(collection)` | `copy` (the live total and the tail), `sync` (the guard of `--prune`) and `verify` (the `count` check). |
+| `ids(collection)` | `verify`, the `ids` check, and `sync`, the stale objects. |
 | `sample(collection, size, rng, with_vectors)` | `verify`, the `records` check. |
-| `wait_compacted(collection, waiting)`, `compaction_state(collection)` | `copy` and `verify`, before the first page and after the last read. |
+| `wait_compacted(collection, waiting)`, `compaction_state(collection)` | `copy`, `sync` and `verify`, before the first page and after the last read. |
 | `tenant`, `searched_namespaces` | `inspect`, for the message when it finds no collection. |
 | `namespaces()` | The source's own `inspect`, when no namespace is given. |
 | `name`, `capabilities`, `vector_search`, `filter_equal` | Declared by the protocol; no command calls them. |

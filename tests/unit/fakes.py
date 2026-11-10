@@ -457,9 +457,38 @@ class FakeReader:
         ]
         return matches[:limit]
 
-    def source_ids(self, entry: CollectionPlan) -> Iterator[tuple[str, str]]:
+    def source_ids(self, entry: CollectionPlan) -> Iterator[tuple[str, str | None]]:
         for obj in list(self._objects(entry).values()):
-            yield obj.uuid, _source_id(obj)
+            value = obj.properties.get("source_id")
+            yield obj.uuid, None if value is None else str(value)
+
+
+class FakeDeleter:
+    """Deleter over the stored objects of a FakeWriter or FakeInsertClient.
+
+    `deleted` holds (target name, tenant, uuid) in deletion order. `error` is
+    raised by every call.
+    """
+
+    def __init__(
+        self, store: FakeWriter | FakeInsertClient, error: Exception | None = None
+    ) -> None:
+        self.store = store
+        self.error = error
+        self.deleted: list[tuple[str, str | None, str]] = []
+        self.calls = 0
+
+    def delete(self, entry: CollectionPlan, uuids: list[str]) -> int:
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        place = self.store.stored.get((entry.target.name, entry.target.tenant), {})
+        removed = 0
+        for uuid in uuids:
+            if place.pop(uuid, None) is not None:
+                self.deleted.append((entry.target.name, entry.target.tenant, uuid))
+                removed += 1
+        return removed
 
 
 class FakeSchema:
@@ -527,12 +556,12 @@ class FakeSchema:
 
 
 class FakeFactories:
-    """The four `build_app` factories over fakes. Counts the factory calls.
+    """The five `build_app` factories over fakes. Counts the factory calls.
 
     `source_error` is raised by the source factory, `target_error` by the
-    writer, reader and schema factories, like a failed connection. The reader
-    reads what the writer stored. A WeaviateWriter over a FakeInsertClient
-    needs that client as `store`.
+    writer, reader, schema and deleter factories, like a failed connection.
+    The reader and the deleter work on what the writer stored. A
+    WeaviateWriter over a FakeInsertClient needs that client as `store`.
     """
 
     def __init__(
@@ -553,9 +582,13 @@ class FakeFactories:
         self.source_calls = 0
         self.schema_calls = 0
         self.consistency: list[str | None] = []
+        self.delete_consistency: list[str | None] = []
+        self.deleter = FakeDeleter(self.store or self.writer)  # type: ignore[arg-type]
 
     def app(self) -> typer.Typer:
-        return build_app(self._source, self._writer, self._reader, self._schema)
+        return build_app(
+            self._source, self._writer, self._reader, self._schema, self._deleter
+        )
 
     def _source(self, settings: ChromaSettings) -> FakeSource:
         self.source_calls += 1
@@ -574,7 +607,15 @@ class FakeFactories:
     def _reader(self, settings: WeaviateSettings) -> FakeReader:
         if self.target_error is not None:
             raise self.target_error
-        return FakeReader(self.store or self.writer)
+        return FakeReader(self.store or self.writer)  # type: ignore[arg-type]
+
+    def _deleter(
+        self, settings: WeaviateSettings, consistency: str | None
+    ) -> FakeDeleter:
+        if self.target_error is not None:
+            raise self.target_error
+        self.delete_consistency.append(consistency)
+        return self.deleter
 
     def _schema(self, settings: WeaviateSettings) -> FakeSchema:
         self.schema_calls += 1

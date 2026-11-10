@@ -49,6 +49,10 @@ CREATE TABLE IF NOT EXISTS targets (
 CREATE TABLE IF NOT EXISTS quantizer_updates (
     ref TEXT PRIMARY KEY
 );
+CREATE TABLE IF NOT EXISTS plans (
+    ref TEXT PRIMARY KEY,
+    hash BLOB NOT NULL
+);
 """
 
 
@@ -183,13 +187,17 @@ class State:
             self._db.close()
 
     def init_collection(
-        self, ref: str, partitions: list[Partition], total: int
+        self, ref: str, partitions: list[Partition], total: int, fresh: bool = False
     ) -> None:
         """Store `ref` with `total`, and `partitions` when it has none.
 
-        A stored total that is higher stays.
+        A stored total that is higher stays. With `fresh`, the stored
+        partitions and rejects of `ref` go first, in the same transaction.
         """
         with self._transaction():
+            if fresh:
+                self._db.execute("DELETE FROM partitions WHERE ref = ?", (ref,))
+                self._db.execute("DELETE FROM rejects WHERE ref = ?", (ref,))
             self._db.execute(
                 "INSERT INTO collections (ref, total) VALUES (?, ?) "
                 "ON CONFLICT(ref) DO UPDATE SET total = MAX(total, excluded.total)",
@@ -382,12 +390,13 @@ class State:
             self._db.execute("DELETE FROM quantizer_updates WHERE ref = ?", (ref,))
 
     def has_progress(self, ref: str) -> bool:
-        """True when a record of `ref` was copied or a partition of it finished."""
+        """True when `ref` has a copied record, a finished partition or a hash."""
         with self._lock:
             (found,) = self._db.execute(
                 "SELECT EXISTS (SELECT 1 FROM partitions WHERE ref = ? AND "
-                "(finished = 1 OR copied > 0))",
-                (ref,),
+                "(finished = 1 OR copied > 0)) "
+                "OR EXISTS (SELECT 1 FROM hashes WHERE ref = ?)",
+                (ref, ref),
             ).fetchone()
         return bool(found)
 
@@ -412,6 +421,36 @@ class State:
         with self._transaction():
             self._db.execute("DELETE FROM partitions WHERE ref = ?", (ref,))
             self._db.execute("DELETE FROM rejects WHERE ref = ?", (ref,))
+
+    def set_plan_hash(self, ref: str, digest: bytes) -> bool:
+        """Store the hash of the plan entry of `ref`.
+
+        Returns True when another hash was stored. The record hashes of `ref`
+        were written under that other plan, so they go in the same commit.
+        """
+        with self._transaction():
+            row = self._db.execute(
+                "SELECT hash FROM plans WHERE ref = ?", (ref,)
+            ).fetchone()
+            changed = row is not None and bytes(row[0]) != digest
+            if changed:
+                self._db.execute("DELETE FROM hashes WHERE ref = ?", (ref,))
+            self._db.execute(
+                "INSERT INTO plans (ref, hash) VALUES (?, ?) "
+                "ON CONFLICT(ref) DO UPDATE SET hash = excluded.hash",
+                (ref, digest),
+            )
+        return changed
+
+    def delete_hashes(self, ref: str, source_ids: list[str]) -> None:
+        with self._transaction():
+            for i in range(0, len(source_ids), BATCH_SIZE):
+                batch = source_ids[i : i + BATCH_SIZE]
+                marks = ",".join("?" * len(batch))
+                self._db.execute(
+                    f"DELETE FROM hashes WHERE ref = ? AND source_id IN ({marks})",
+                    (ref, *batch),
+                )
 
     def record_hashes(self, ref: str, hashes: list[tuple[str, bytes]]) -> None:
         with self._transaction():

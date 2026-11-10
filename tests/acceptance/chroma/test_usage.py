@@ -91,7 +91,7 @@ def test_a_rejected_record_is_copied_from_a_new_directory(seeded, tmp_path):
         add_to_tiny_l2(10, 1, {"note": "added later"})
         r = run(["copy"], first)
         assert r.exit_code == 1 and r.data["code"] == "rejects", r
-        assert "Rejects are final for this directory." in r.data["hint"], r
+        assert "then to-weaviate sync writes the record" in r.data["hint"], r
         plan = read_plan(first)
         plan["collections"][0]["target"]["properties"].append(NOTE)
         write_plan(first, plan)

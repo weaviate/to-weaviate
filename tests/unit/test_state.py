@@ -237,6 +237,60 @@ def test_reset_keeps_hashes(tmp_path):
     assert state.unchanged(REF, [("r1", b"1")]) == {"r1"}
 
 
+def test_set_plan_hash_stores_the_first_hash_and_keeps_the_record_hashes(tmp_path):
+    state = make_state(tmp_path)
+    assert state.set_plan_hash(REF, b"p1") is False
+    state.record_hashes(REF, [("a", b"1"), ("b", b"2")])
+    assert state.set_plan_hash(REF, b"p1") is False
+    assert state.unchanged(REF, [("a", b"1"), ("b", b"2")]) == {"a", "b"}
+
+
+def test_set_plan_hash_with_another_hash_deletes_the_record_hashes(tmp_path):
+    state = make_state(tmp_path)
+    state.set_plan_hash(REF, b"p1")
+    state.record_hashes(REF, [("a", b"1"), ("b", b"2")])
+    assert state.set_plan_hash(REF, b"p2") is True
+    assert state.unchanged(REF, [("a", b"1"), ("b", b"2")]) == set()
+    assert state.set_plan_hash(REF, b"p2") is False
+
+
+def test_set_plan_hash_touches_one_ref_only(tmp_path):
+    state = make_state(tmp_path)
+    state.set_plan_hash(REF, b"p1")
+    state.set_plan_hash("other", b"p1")
+    state.record_hashes(REF, [("a", b"1")])
+    state.record_hashes("other", [("a", b"1")])
+    assert state.set_plan_hash("other", b"p2") is True
+    assert state.unchanged(REF, [("a", b"1")]) == {"a"}
+    assert state.unchanged("other", [("a", b"1")]) == set()
+
+
+def test_delete_hashes_removes_the_named_ids_only(tmp_path):
+    state = make_state(tmp_path)
+    state.record_hashes(REF, [("a", b"1"), ("b", b"2"), ("c", b"3")])
+    state.record_hashes("other", [("a", b"1")])
+    state.delete_hashes(REF, ["a", "c", "missing"])
+    assert state.unchanged(REF, [("a", b"1"), ("b", b"2"), ("c", b"3")]) == {"b"}
+    assert state.unchanged("other", [("a", b"1")]) == {"a"}
+
+
+def test_delete_hashes_beyond_batch_size(tmp_path):
+    state = make_state(tmp_path)
+    hashes = [(f"id{i}", str(i).encode()) for i in range(1700)]
+    state.record_hashes(REF, hashes)
+    state.delete_hashes(REF, [h[0] for h in hashes[:1600]])
+    assert state.unchanged(REF, hashes) == {h[0] for h in hashes[1600:]}
+
+
+def test_an_old_state_file_gets_the_plans_table(tmp_path):
+    path = tmp_path / "state" / "state.sqlite"
+    old_state_file(path, REF, 10, Partition("a", "0", "10"), "5", 5)
+    state = State(path)
+    _opened.append(state)
+    assert state.set_plan_hash(REF, b"p1") is False
+    assert state.set_plan_hash(REF, b"p2") is True
+
+
 def test_reset_clears_stored_rejects_and_keeps_file(tmp_path):
     state = make_state(tmp_path)
     state.init_collection(REF, parts("a"), 10)
@@ -303,6 +357,26 @@ def test_has_progress_is_false_without_partitions(tmp_path):
     state = make_state(tmp_path)
     state.init_collection(REF, [], 0)
     assert not state.has_progress(REF)
+
+
+def test_has_progress_with_record_hashes_and_no_partitions(tmp_path):
+    state = make_state(tmp_path)
+    state.record_hashes(REF, [("a", b"1")])
+    assert state.has_progress(REF)
+    assert not state.has_progress("other")
+
+
+def test_init_collection_fresh_replaces_partitions_and_rejects(tmp_path):
+    state = make_state(tmp_path)
+    state.init_collection(REF, parts("a", "b"), 10)
+    state.advance(REF, "a", None, 5)
+    state.add_rejects(REF, [Reject("r1", "bad")])
+    state.record_hashes(REF, [("r1", b"1")])
+    state.init_collection(REF, parts("c"), 8, fresh=True)
+    assert state.pending(REF) == [(parts("c")[0], None)]
+    progress = state.progress()[0]
+    assert (progress.copied, progress.rejects, progress.total) == (0, 0, 10)
+    assert state.unchanged(REF, [("r1", b"1")]) == {"r1"}
 
 
 def test_state_file_without_targets_opens_and_stores_a_target(tmp_path):
