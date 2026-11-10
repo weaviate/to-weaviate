@@ -1,8 +1,8 @@
 # Chroma
 
 `to-weaviate inspect chroma` reads collections from Chroma. For each record
-the tool copies its id, document, URI and metadata, and its embedding unless
-the plan embeds the documents again. It never writes to Chroma.
+the tool copies its id, document, URI and metadata, and its embedding when
+the plan keeps the source vector. It never writes to Chroma.
 
 > [!IMPORTANT]
 > Chroma Cloud stops accepting writes on 2026-12-07 and stops serving reads
@@ -29,9 +29,12 @@ the plan embeds the documents again. It never writes to Chroma.
 | `CHROMA_DATABASE` | no | The database that `inspect chroma` reads when you pass no `--database`. With neither, it reads every database of the tenant. |
 | `CHROMA_TOKEN_HEADER` | no | The header that carries the key. Default: `x-chroma-token`. With `Authorization`, the tool sends `Bearer <key>`. |
 
-`inspect` records `CHROMA_URL` and `CHROMA_TENANT` in `plan.yaml`. `copy`
-and `verify` stop with `invalid_plan` before they connect when either names
-another source.
+`inspect` records `CHROMA_URL`, without its userinfo, query and fragment,
+and `CHROMA_TENANT`, or null when it is unset, in `plan.yaml`. `copy` and
+`verify` compare both with the current values as text, and stop with
+`invalid_plan` before they connect when either differs. Set both as you set
+them for `inspect`: a trailing `/`, another letter case in the host, or a
+tenant that was unset then also counts as a difference.
 
 The target settings are on [Weaviate target](../weaviate.md).
 
@@ -100,9 +103,9 @@ to-weaviate inspect chroma
 
 | Chroma | Weaviate |
 |---|---|
-| Collection | A collection. `inspect` turns the name into one Weaviate accepts: `docs-cosine` becomes `Docs_cosine`, and a name that starts with a digit gets the prefix `C_`. |
+| Collection | A collection. `inspect` turns the name into one Weaviate accepts: `docs-cosine` becomes `Docs_cosine`, and a name that does not start with a letter gets the prefix `C_`. |
 | Record id | The object UUID. A canonical lowercase UUID stays as it is; any other id becomes a UUIDv5 of the id. The `source_id` property holds the original id. |
-| Embedding | The vector `default`, or `source` with `--vectors both`. Not copied with `--vectors embed`. |
+| Embedding | The vector `default`, or `source` with `--vectors both`. Not copied with `--vectors embed`, unless the sampled documents are empty: then the plan keeps the embedding as `default` and notes it. |
 | Document | The `document` property, `text` with `word` tokenization. |
 | URI | The `uri` property. |
 | Metadata key | A property. See [types and conversion](../plan-file.md#types-and-conversion). |
@@ -120,11 +123,13 @@ Without one, Chroma uses `l2`.
 | `cosine` | `cosine` |
 | `ip` | `dot` |
 
-### Embedding functions
+### Embedding models
 
-When a collection stores its embedding function, and Weaviate has a module
-for that model, `inspect` sets the module as the vectorizer of the kept
-vector. Weaviate can then embed query text with the same model.
+When a collection stores its embedding function, Weaviate has a module for
+that model, and you run `inspect` without `--vectorizer`, `inspect` sets the
+module as the vectorizer of the kept vector `default`. Weaviate can then
+embed query text with the same model. With `--vectors both`, the vector
+`source` gets no vectorizer.
 
 | Chroma embedding function | Weaviate module |
 |---|---|
@@ -149,6 +154,10 @@ function gets no vectorizer, the plan notes why:
   as the model name of `voyageai` or the project of `google_vertex`), or any
   other function: no mapping.
 
+Chroma stores some embedding functions without a name (type `legacy`). For
+such a collection `inspect` stores no embedding, sets no vectorizer and
+writes no note.
+
 `inspect.json` and `plan.yaml` store only the configuration keys that the
 mapping reads. They never store `default_headers`, because a header can
 hold a token.
@@ -161,8 +170,9 @@ records gives them new positions, so a read by position during it skips
 records. To prevent that, `copy` and `verify` do two things on these
 deployments:
 
-- Before the first page of each collection, they wait until Chroma reports
-  no write left to compact, for at most 600 s. Each time the number changes
+- Before the first page of each collection, they ask Chroma every 5 s how
+  many writes are left to compact, until none is left. They give up at the
+  first answer after 600 s that still counts one. Each time the number changes
   they print `Waiting for Chroma to compact <name>: <N> of <M> operations not
   compacted`, and `copy` writes the event `compaction_wait`.
 - After the last read, they check whether Chroma compacted the collection
@@ -183,8 +193,8 @@ tool reads it without the wait, as a single-node server.
 
 - Records come in pages of 300, the most that Chroma Cloud returns per
   request.
-- The tool retries a network error or HTTP 429, 500, 502, 503 or 504 from
-  Chroma up to 7 times, and waits 15.75 s to 31.5 s in total between the
+- The tool tries a Chroma request up to 7 times when it fails with a network
+  error, a timeout, or HTTP 429, 500, 502, 503 or 504, and waits 15.75 s to 31.5 s in total between the
   attempts. A `Retry-After` header raises each wait to its value, up to 30 s
   per wait, so these retries can take longer.
 - A record deleted from Chroma during a copy can make `copy` skip another
@@ -210,8 +220,11 @@ variables.
 
 ### How it reads
 
-- `inspect` lists the tenant's databases and collections, then reads pages
-  of metadata to collect each key's types.
+- `inspect` lists the tenant's databases when neither `--database` nor
+  `CHROMA_DATABASE` names one, then the collections of each database in
+  pages of 1,000. For each collection it reads the count and pages of
+  metadata to collect each key's types. It then reads the first page and up
+  to 10 spread pages of documents to estimate the document size.
 - `read` uses `/get` with an offset and a limit of at most 300. Chroma
   returns records in insertion order, so `partitions` splits a collection
   into offset ranges, one per thread. A deletion moves the later records one

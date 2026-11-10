@@ -101,7 +101,8 @@ and the properties `source_id`, `uri` and the other metadata keys.
   `target.dropped` with a reason. Each metadata key must be a property or
   listed under `dropped`; `check` refuses a key that is neither
   (`unmapped_key`).
-- Change the vector mode, the vectorizer, the index type or the quantizer.
+- Change the `mode` of a vector (`keep` or `embed`), the vectorizer, the
+  index type or the quantizer.
 
 ## Properties
 
@@ -132,11 +133,15 @@ Every other `source_key` is a metadata key. A property has these fields:
 
 - A key with one type keeps it.
 - A key with `int` and `number` values becomes `number`.
-- A key with any other mix becomes `text`, and `coerced_from` lists the other
-  types. `check` and `copy` show the warning `coerced_keys`.
+- A key with any other mix becomes `text`.
 - A key with both single values and lists becomes an array of the merged
   type, for example `text[]` for `text` and `text[]` values.
-- A list with mixed element types becomes `text[]`.
+- A list with mixed element types becomes `text[]`, a list of ints and
+  numbers too. An empty list counts as `text[]`.
+
+When the chosen type differs from a type that the source holds,
+`coerced_from` lists the source types other than the chosen one, and `check`
+and `copy` show the warning `coerced_keys`.
 
 `copy` converts each value to the property type:
 
@@ -147,8 +152,10 @@ Every other `source_key` is a metadata key. A property has these fields:
 | `int` | An int, or a number without a fractional part. |
 | `boolean` | A boolean. |
 
-Any other value is a reject with the reason "cannot convert ... without
-losing data". An array type converts each element the same way.
+Any other scalar is a reject with the reason "<key>: cannot convert ...
+without losing data". A list or a mapping for a property that is not an
+array type is a reject with the reason "<key>: cannot convert <type> value
+to <type>". An array type converts each element the same way.
 
 Weaviate stores an `int` property as a double. An int above 2**53 in
 magnitude is stored rounded, and `verify` compares the rounded value. An int
@@ -158,13 +165,14 @@ it depends on its CPU. To keep every digit of such values, set the type to
 
 ## Vector modes
 
-`inspect --vectors` sets the mode. The plan holds one entry per named vector.
+`inspect --vectors keep|embed|both` drafts the vectors. The plan holds one
+entry per named vector, and the `mode` of each entry is `keep` or `embed`.
 
-| Mode | Vectors in Weaviate | A record without a vector or a document |
+| `--vectors` | Vectors in Weaviate | A record without a vector or a document |
 |---|---|---|
-| `keep` (default) | `default`: the source vectors, with the source distance. When the source's embedding model has a Weaviate module, the plan sets it as the vectorizer, so Weaviate can embed queries. | No vector: a reject, "no vector". |
+| `keep` (default) | `default`: the source vectors, with the source distance. When the source's embedding model has a Weaviate module and you pass no `--vectorizer`, the plan sets that module as the vectorizer, so Weaviate can embed queries. | No vector: a reject, "no vector". |
 | `embed` | `default`: embedded by the Weaviate vectorizer from the `document` property. The source distance is not carried over. | No document: a reject, "no document to embed". |
-| `both` | `source`: the source vectors. `default`: embedded by the Weaviate vectorizer. | No document: written without the embedded vector. |
+| `both` | `source` (mode `keep`, no vectorizer): the source vectors. `default` (mode `embed`): embedded by the Weaviate vectorizer. | No document: written without the embedded vector. |
 
 A collection without documents keeps its source vectors in every mode, and
 the plan notes it.
@@ -172,8 +180,9 @@ the plan notes it.
 ## Index and quantizer
 
 `index.type` is `default`, `hnsw`, `flat`, `dynamic` or `hfresh`. With
-`default`, the server chooses. A quantizer, or the distance `l2-squared` or
-`dot`, needs a named index type; for those distances `inspect` sets `hnsw`.
+`default`, the server chooses. A quantizer, or any distance other than
+`cosine`, needs a named index type. When the source distance is `l2-squared`
+or `dot` and `--index` is `default`, `inspect` sets `hnsw` and adds a note.
 
 The rules below are those of the Weaviate version in
 [`tests/acceptance/weaviate-version`](../tests/acceptance/weaviate-version).
@@ -211,5 +220,8 @@ index. `copy` enables such a quantizer after the last page of each plan
 entry. A server without `ASYNC_INDEXING` then compresses the vectors at once.
 A server with `ASYNC_INDEXING=true` compresses a shard only once it holds
 `training_limit` vectors: 100000 for `sq` and `pq`, 10000 for `rq`, unless
-the plan sets another value. A smaller shard stays uncompressed, and `check`
-and `copy` warn with `quantizer_training`.
+the plan sets another value. A smaller shard stays uncompressed. `check` and
+`copy` warn with `quantizer_training` when the source collection of a plan
+entry has fewer records than that limit. They do not count the records per
+shard, and they warn on every server, because Weaviate does not report
+whether it runs with `ASYNC_INDEXING`.

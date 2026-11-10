@@ -15,8 +15,8 @@ uv pip install -e ".[test]" pre-commit
 .venv/bin/pre-commit install
 ```
 
-The `test` extra does not include `pre-commit`, so the second command
-installs both.
+The `test` extra does not include `pre-commit`, so the `uv pip install`
+command names both.
 
 ## Before you open a pull request
 

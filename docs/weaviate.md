@@ -13,13 +13,14 @@ Set these variables in the environment or in `.env`:
 |---|---|---|
 | `WEAVIATE_URL` | yes | The Weaviate server, for example `https://my-cluster.weaviate.cloud` or `http://localhost:8080`. |
 | `WEAVIATE_API_KEY` | no | The API key. Leave it unset for a server without authentication. |
-| `WEAVIATE_GRPC_URL` | no | The gRPC endpoint. Set it only for a server outside Weaviate Cloud. |
+| `WEAVIATE_GRPC_URL` | for a server outside Weaviate Cloud | The gRPC endpoint. Leave it unset for Weaviate Cloud. |
 
 ### Weaviate Cloud
 
 Set `WEAVIATE_URL` and `WEAVIATE_API_KEY`, and leave `WEAVIATE_GRPC_URL`
-unset. The tool then connects to port 443 of the `WEAVIATE_URL` host over
-TLS, so it refuses a `WEAVIATE_URL` with another port.
+unset. The tool then connects over TLS on port 443: REST to the
+`WEAVIATE_URL` host and gRPC to the host `grpc-<WEAVIATE_URL host>`. It
+refuses a `WEAVIATE_URL` with another port.
 
 A free (sandbox) cluster accepts only the index type `hfresh`. It refuses
 `hnsw`, `flat`, `dynamic` and their quantizer settings with a message that
@@ -36,11 +37,16 @@ WEAVIATE_GRPC_URL=http://localhost:50051
 
 ## Permissions
 
-`copy` reads the schema, creates collections and tenants, adds properties,
-updates quantizer settings and writes objects. `verify` reads objects. A key
-without the permission for one of these steps makes the command stop with
-`auth_failed`, exit 3. When the key may not create a collection, `copy`
-stops before it writes anything.
+`check` reads the module list and the schema. `copy` reads the module list,
+the schema and the tenants, creates collections and tenants, adds
+properties, updates quantizer settings and writes objects. `verify` reads
+the schema and the tenants, counts the objects and reads them. A key without
+the permission for one of these steps makes the command stop with
+`auth_failed`, exit 3.
+
+`copy` creates every target collection before it writes the first object.
+When the key may not create a collection, `copy` stops before it writes any
+object. A collection that it created earlier in the same run stays.
 
 ## Vectorizer keys
 
@@ -61,9 +67,13 @@ it to Weaviate as a request header and never prints it.
 | Others | `API_KEY_MAP` in [`settings.py`](../src/to_weaviate/settings.py) lists every variable. |
 
 When two variables name the same header, the first one in `API_KEY_MAP` that
-is set wins. The table lists them in that order. `check` stops with
-`missing_credential`, exit 3, when the key of a planned vectorizer is
-missing. A provider that refuses the key during
+is set wins. The table lists them in that order.
+
+`check` and `copy` stop with `missing_credential`, exit 3, before they
+connect, when a planned `text2vec-openai`, `text2vec-cohere`,
+`text2vec-jinaai`, `text2vec-voyageai`, `text2vec-mistral`,
+`text2vec-huggingface` or `text2vec-google` vectorizer has no key. They do
+not check the keys of other modules. A provider that refuses the key during
 `copy` stops it with `auth_failed`, exit 3. The message names the provider,
 and the hint names its variables.
 

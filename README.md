@@ -156,16 +156,17 @@ PASS Docs_cosine records: sampled 300, compared 300, rejects skipped 0, differin
 | `status` | Shows the progress of each collection from the migration directory. |
 
 Every command takes `--dir` and `--json`. With `--json`, stdout holds one
-JSON document. The exit code names the class of failure, with and without
-`--json`: 1 for rejects or a failed verification, 2 for a usage or plan
-error, 3 for credentials, 4 for an unreachable server or a source that is
-compacting, 5 for an internal error. [Commands](docs/commands.md#exit-codes) lists every error code.
+JSON document, unless the parser refuses an option value or you press
+Ctrl-C. The exit code names the class of failure, with and without
+`--json`: 1 for rejects or a failed verification, 2 for a usage, plan,
+state or directory error, 3 for credentials, 4 for an unreachable server or
+a source that is compacting, 5 for an internal error. [Commands](docs/commands.md#exit-codes) lists every error code.
 
 ## Documentation
 
 | Page | Contents |
 |---|---|
-| [Commands](docs/commands.md) | Every option, the migration directory, resuming, rejects, JSON output, error codes |
+| [Commands](docs/commands.md) | The options every source shares, the migration directory, resuming, rejects, JSON output, error codes |
 | [The plan file](docs/plan-file.md) | The fields of `plan.yaml`, the edits it allows, vector modes, index and quantizer settings |
 | [Weaviate target](docs/weaviate.md) | `WEAVIATE_*` settings, Weaviate Cloud and self-hosted servers, vectorizer keys |
 | [Sources](docs/sources/README.md) | One guide per source: settings, options, data mapping, limits |

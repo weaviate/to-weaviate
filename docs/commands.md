@@ -20,7 +20,7 @@ Every command takes these options:
 | Option | Effect |
 |---|---|
 | `--dir PATH` | The [migration directory](#migration-directory). Default: `./.to-weaviate`. |
-| `--json` | Print one JSON document on stdout. Progress lines and warnings go to stderr. See [JSON output](#json-output). |
+| `--json` | Print one JSON document on stdout. Progress lines and the `Warning:` lines of `copy` go to stderr; plan warnings are in the document under `warnings`. See [JSON output](#json-output). |
 
 `to-weaviate --version` prints the version.
 
@@ -84,7 +84,7 @@ exit 2, `invalid_plan`. A warning does not stop `copy`.
 
 | Option | Effect |
 |---|---|
-| `--collection NAME` | Copy only this plan entry. It matches the source or the target name. Repeatable. |
+| `--collection NAME` | Copy only the plan entries whose source or target name is NAME. A target name selects every entry that writes to that collection. Repeatable. |
 | `--parallelism N` | Reads per collection at the same time, 1 to 8. Default: 5. |
 | `--consistency ONE\|QUORUM\|ALL` | The write consistency level. |
 
@@ -130,9 +130,13 @@ Weaviate are written again unchanged.
 
 `copy` retries a transient error: a network error, a timeout, HTTP 429,
 500, 502, 503 or 504, and the matching gRPC statuses. It tries up to 7 times
-and waits 15.75 s to 31.5 s in total between the attempts. It also retries:
+and waits 15.75 s to 31.5 s in total between the attempts. A `Retry-After`
+header from the source raises each wait to its value, up to 30 s. It also
+retries:
 
-- a batch in which Weaviate refused every object;
+- a batch of more than one object in which Weaviate refused every object. A
+  batch of one refused object is a reject, unless the error is about a node
+  outage;
 - an object that Weaviate refused with an error about a node, a shard or a
   deadline, as it does while a node restarts.
 
@@ -205,19 +209,20 @@ pass `--dir`:
 | `plan.yaml` | `inspect`, then you | The migration plan |
 | `state.sqlite` | `copy` | Progress, read positions and the recorded targets |
 | `copy.lock` | `copy` | The lock of the running `copy` |
-| `events.jsonl` | `copy` | Progress events, at most one every 5 s per collection |
+| `events.jsonl` | `copy` | The events of `copy`: `collection_started`, `progress` (at most one every 5 s per collection), `compaction_wait`, `source_changed` and `collection_finished` |
 | `rejects.jsonl` | `copy` | One line per rejected record, with the reason |
 | `report.md`, `report.json` | `verify` | The verification report |
 
 When the disk is full, or the directory or a file in it is read-only, a
-command stops with `directory_unwritable`, exit 2, and names the file and
-the cause. `copy` resumes at its page once the directory can be written.
+command stops with `directory_unwritable`, exit 2. The message names the
+cause, and the file when the operating system reports it. `copy` resumes at its page once the directory can be written.
 
 ## JSON output
 
 With `--json`, stdout holds exactly one JSON document and every document has
-`status`: `success` or `error`. An error document also has `code`, `message`
-and `hint`:
+`status`: `success` or `error`. Two cases print no document: an option value
+that the parser refuses exits 2 with its message on stderr, and Ctrl-C stops
+the command. An error document also has `code`, `message` and `hint`:
 
 ```json
 {
