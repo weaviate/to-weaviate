@@ -210,9 +210,9 @@ def nodes() -> int:
     """The node count of the target.
 
     The count comes from the cluster unless NODES_VARIABLE sets it. CI sets
-    the variable to document the leg; endpoint_problems reports a value that
-    differs from the cluster. A value that is not a whole number of at least
-    1 raises ValueError. No acceptance module calls this at import time: the
+    the variable in each acceptance job, and endpoint_problems reports a
+    value that differs from the cluster. A value that is not a whole number
+    of at least 1 raises ValueError. No acceptance module calls this at import time: the
     setup of the first test reports the endpoint problems, a malformed
     NODES_VARIABLE included, before any test connects.
     """

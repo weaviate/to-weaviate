@@ -24,7 +24,7 @@ pytestmark = [
     pytest.mark.skipif(
         chroma_kind() == "distributed",
         reason="stops the compose Chroma, which does not run when "
-        "ACCEPTANCE_CHROMA is distributed (the cluster leg of CI)",
+        "ACCEPTANCE_CHROMA is distributed (the cluster setup of CI)",
     ),
 ]
 

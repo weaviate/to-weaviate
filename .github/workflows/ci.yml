@@ -36,94 +36,41 @@ jobs:
       - run: pip install -e ".[test]"
       - run: pytest tests/unit
 
-  acceptance:
-    name: acceptance (${{ matrix.name }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        # replication is the REPLICATION_MINIMUM_FACTOR of the leg. chroma is
-        # the Chroma of the leg: the compose container or the open-source
-        # distributed Chroma in the kind cluster.
-        include:
-          - {name: single, replicas: 1, workers: 1, replication: "1", chroma: single}
-          - {name: cluster, replicas: 3, workers: 3, replication: "3", chroma: distributed}
-    env:
-      WEAVIATE_URL: http://localhost:8099
-      WEAVIATE_GRPC_URL: http://localhost:50099
-      WEAVIATE_API_KEY: admin-key
-      CHROMA_URL: http://localhost:8001
-      TO_WEAVIATE_REQUIRE_ACCEPTANCE: "1"
-      # Every Weaviate Cloud instance runs with ASYNC_INDEXING, so both legs
-      # do. Read by the tests whose outcome depends on it.
-      WEAVIATE_ASYNC_INDEXING: "true"
-      # The cases of test_cluster.py run when it is at least 3.
-      ACCEPTANCE_NODES: ${{ matrix.replicas }}
-      # With distributed, the seed waits for compaction, and the compaction
-      # case of test_source_order.py runs.
-      ACCEPTANCE_CHROMA: ${{ matrix.chroma }}
-    steps:
-      - uses: actions/checkout@v4
-      - run: echo "WEAVIATE_VERSION=$(cat tests/acceptance/weaviate-version)" >> "$GITHUB_ENV"
-      # The action runs its own checkout, so it comes before any step that
-      # writes to the workspace.
-      - uses: weaviate/weaviate-local-k8s@v2
-        with:
-          weaviate-version: ${{ env.WEAVIATE_VERSION }}
-          workers: ${{ matrix.workers }}
-          replicas: ${{ matrix.replicas }}
-          weaviate-port: 8099
-          weaviate-grpc-port: 50099
-          rbac: true
-          modules: text2vec-transformers
-          expose-pods: false
-          # The chart passes each env entry to the Weaviate pods.
-          values-override: |
-            env:
-              ASYNC_INDEXING: "true"
-              REPLICATION_MINIMUM_FACTOR: "${{ matrix.replication }}"
-      # The kubectl-relay forwards of the action can stop forwarding gRPC
-      # after the SIGKILL resume test; the script replaces them.
-      - run: sh tests/acceptance/port-forward.sh
-      - if: matrix.chroma == 'single'
-        run: docker compose -f tests/acceptance/chroma/docker-compose.yml up -d --wait
-      # Deploys distributed Chroma in the kind cluster and forwards its
-      # frontend to port 8001.
-      - if: matrix.chroma == 'distributed'
-        run: sh tests/acceptance/chroma-k8s.sh up
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.13"}
-      - run: pip install -e ".[test]" && pytest tests/acceptance -v --junitxml=/tmp/acceptance-junit.xml
-      # A case can record measurements as test properties, which only the XML
-      # holds on a pass.
-      - if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: acceptance-junit-${{ matrix.name }}
-          path: /tmp/acceptance-junit.xml
-      # The logs have a line for each start and exit of a forward, for a
-      # test that failed with exit 4. The cluster leg also has the log of the
-      # Chroma forward.
-      - if: failure()
-        run: tail -n 200 /tmp/port-forward-*.log
-      # The restart counts, the compactor pod (an OOM kill shows there), and
-      # the last log lines of each pod of five Chroma services; the previous
-      # log too for a pod that restarted. The label app of each workload is
-      # its name in the chart, so sts/query-service gives both of its pods.
-      - if: failure() && matrix.chroma == 'distributed'
-        run: |
-          kubectl -n chroma get pods -o wide || true
-          kubectl -n chroma describe pod -l app=compaction-service || true
-          for workload in sts/compaction-service sts/rust-log-service \
-            deploy/rust-frontend-service sts/query-service deploy/sysdb; do
-            for pod in $(kubectl -n chroma get pods -l "app=${workload#*/}" -o name || true); do
-              echo "--- $workload: kubectl -n chroma logs $pod --tail=500"
-              kubectl -n chroma logs "$pod" --all-containers --tail=500 || true
-              restarts=$(kubectl -n chroma get "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}' || true)
-              if [ "${restarts:-0}" -gt 0 ]; then
-                echo "--- $workload: kubectl -n chroma logs $pod --previous --tail=500 ($restarts restarts)"
-                kubectl -n chroma logs "$pod" --all-containers --previous --tail=500 || true
-              fi
-            done
-          done
+  # Each setup is one call of acceptance.yml. The cluster setup needs a runner
+  # whose CPU has AVX-512 (the first step of acceptance.yml says why), and
+  # part of the ubuntu-latest pool lacks it. An attempt that runs on such a
+  # runner ends in seconds with cpu-unsupported true, and the next attempt
+  # runs on another runner, which the pool picks at random. GitHub Actions
+  # has no retry of a job and no choice of CPU within ubuntu-latest, so the
+  # attempts are a chain of jobs. An attempt that ran the tests is the last
+  # one, whatever its result.
+  acceptance-single:
+    name: acceptance (single)
+    uses: ./.github/workflows/acceptance.yml
+    with: {name: single, replicas: 1, workers: 1, replication: "1", chroma: single}
+
+  acceptance-cluster:
+    name: acceptance (cluster)
+    uses: ./.github/workflows/acceptance.yml
+    with: {name: cluster, replicas: 3, workers: 3, replication: "3", chroma: distributed, attempt: 1, attempts: 4}
+
+  acceptance-cluster-2:
+    name: acceptance (cluster, attempt 2)
+    needs: acceptance-cluster
+    if: needs.acceptance-cluster.outputs.cpu-unsupported == 'true'
+    uses: ./.github/workflows/acceptance.yml
+    with: {name: cluster, replicas: 3, workers: 3, replication: "3", chroma: distributed, attempt: 2, attempts: 4}
+
+  acceptance-cluster-3:
+    name: acceptance (cluster, attempt 3)
+    needs: acceptance-cluster-2
+    if: needs.acceptance-cluster-2.outputs.cpu-unsupported == 'true'
+    uses: ./.github/workflows/acceptance.yml
+    with: {name: cluster, replicas: 3, workers: 3, replication: "3", chroma: distributed, attempt: 3, attempts: 4}
+
+  acceptance-cluster-4:
+    name: acceptance (cluster, attempt 4)
+    needs: acceptance-cluster-3
+    if: needs.acceptance-cluster-3.outputs.cpu-unsupported == 'true'
+    uses: ./.github/workflows/acceptance.yml
+    with: {name: cluster, replicas: 3, workers: 3, replication: "3", chroma: distributed, attempt: 4, attempts: 4}

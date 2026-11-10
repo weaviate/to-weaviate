@@ -96,7 +96,7 @@ def test_get_pages_follow_the_insertion_order():
 
 @pytest.mark.skipif(
     chroma_kind() != "distributed",
-    reason="needs ACCEPTANCE_CHROMA=distributed (the cluster leg of CI), whose "
+    reason="needs ACCEPTANCE_CHROMA=distributed (the cluster setup of CI), whose "
     f"compaction numbers records again; it is {chroma_kind()}",
 )
 def test_copy_during_compaction(tmp_path, request):
