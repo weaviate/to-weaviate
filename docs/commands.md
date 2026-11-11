@@ -87,6 +87,7 @@ exit 2, `invalid_plan`. A warning does not stop `copy` or `sync`.
 | `--collection NAME` | Copy only the plan entries whose source or target name is NAME. A target name selects every entry that writes to that collection. Repeatable. |
 | `--parallelism N` | Reads per collection at the same time, 1 to 8. Default: 5. |
 | `--consistency ONE\|QUORUM\|ALL` | The write consistency level. |
+| `--yes` | Go on without asking when the target holds objects that `sync --prune` would delete. See [Existing collections](#existing-collections-and-the-recorded-target). |
 
 ### Resuming
 
@@ -159,12 +160,17 @@ On the first run of a directory into a collection or tenant that exists,
 `copy` and `sync` list the ids of the source and of the target once. When
 the target holds objects with a `source_id` that the source does not hold,
 they print `Warning: <source>: N objects have a source_id that <source> does
-not hold; sync --prune deletes them. ...` and add the warning
-`foreign_objects` to the JSON document. Such objects come from another
+not hold; sync --prune deletes them. ...`. Such objects come from another
 source, often another migration directory, or from records deleted from this
-source. The run goes on; copy into another collection or tenant unless the
-records were deleted on purpose. See
-[Stale objects and `--prune`](#stale-objects-and---prune).
+source. See [Stale objects and `--prune`](#stale-objects-and---prune).
+
+Before they create or write anything, `copy` and `sync` then ask
+`Go on with the copy? [y/N]` in a terminal. Without a terminal, for example
+when an agent or a script runs them, they do not ask. Unless the answer is
+`y`, or `--yes` was given, they stop with `foreign_objects`, exit 2, and
+write nothing. Copy into another collection or tenant instead, or run the
+same command with `--yes` when these objects may be deleted. A run that goes
+on lists the warning `foreign_objects` in its JSON document.
 
 `state.sqlite` records the target of each source collection: the Weaviate
 host and port, the collection and the tenant. Once records of a collection
@@ -189,6 +195,7 @@ of its own:
 | `--collection NAME` | As for `copy`. |
 | `--parallelism N` | As for `copy`. |
 | `--consistency ONE\|QUORUM\|ALL` | As for `copy`. The deletions of `--prune` use it too. |
+| `--yes` | As for `copy`. |
 | `--prune` | Delete the objects whose source record is gone. |
 | `--force` | With `--prune`, prune a collection with more than 10% stale objects. Without `--prune` it is a usage error. |
 
@@ -251,7 +258,7 @@ this tool, is neither counted nor deleted.
 directory wrote. Give each target collection, or each tenant, one migration
 directory and one source: the objects that another directory wrote there
 are stale to this one, and `--prune` deletes them. The first `copy` or
-`sync` of a directory into an existing collection warns `foreign_objects`
+`sync` of a directory into an existing collection asks before it goes on
 when it finds such objects.
 
 With `--prune`, after it wrote the new and changed records, `sync` reads the
@@ -425,7 +432,7 @@ The exit code is the same with and without `--json`.
 |---|---|---|
 | 0 | Success | |
 | 1 | Rejected records, a failed verification, or a collection with more than 10% stale objects that `sync --prune` left alone | `rejects`, `verification_failed`, `prune_limit` |
-| 2 | Usage error, invalid plan, a state of another target, a state file that cannot be read, or a directory that cannot be written | `usage`, `invalid_plan`, `plan_mismatch`, `target_rejected_schema`, `state_mismatch`, `invalid_state`, `directory_unwritable` |
+| 2 | Usage error, invalid plan, a state of another target, a state file that cannot be read, a directory that cannot be written, or a first run into a collection with objects that `sync --prune` would delete, not confirmed | `usage`, `invalid_plan`, `plan_mismatch`, `target_rejected_schema`, `state_mismatch`, `invalid_state`, `directory_unwritable`, `foreign_objects` |
 | 3 | Missing credential or authentication failure | `missing_credential`, `auth_failed` |
 | 4 | Source or target unreachable, a source collection that the source compacted during the read or did not finish compacting, a source still written to during `sync --prune`, or a deletion that Weaviate did only partly | `source_unreachable`, `target_unreachable`, `source_compacting`, `source_writing`, `delete_failed` |
 | 5 | Internal error | `internal_error` |

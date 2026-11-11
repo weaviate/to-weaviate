@@ -242,6 +242,10 @@ PRUNE_HINT = (
     "to the collection. To delete them, run to-weaviate sync --prune --force."
 )
 SYNC_BATCH_HINT = "Fix the cause and run to-weaviate sync again."
+FOREIGN_HINT = (
+    "Copy into another collection or tenant, or, when these objects may be "
+    "deleted, run the same command with --yes."
+)
 MISSING_TEXT = "missing in the collection; copy and sync add it"
 # A part of a text in single or double quotes; a quote after a backslash is
 # part of it, as in a Python repr.
@@ -1117,11 +1121,16 @@ def _writing(
     parallelism: int,
     consistency: Consistency | None,
     json_output: bool,
+    command: str,
+    yes: bool,
 ) -> Iterator[_Run]:
     """The checks before a copy or a sync, then the state under `copy.lock`.
 
     Raises the plan, source, provider-key, module and state errors, and
-    creates the target collections. The state is closed on exit.
+    creates the target collections. The state is closed on exit. When a first
+    run meets objects that `sync --prune` would delete, it goes on only with
+    `yes` or a yes at the prompt of a terminal; else it raises
+    `foreign_objects` before it creates or writes anything.
     """
     if not 1 <= parallelism <= MAX_PARALLELISM:
         raise CliError(
@@ -1170,13 +1179,26 @@ def _writing(
                 source_names,
                 directory,
             )
+            met: list[Finding] = []
             for entry in entries:
                 foreign = _foreign_objects(
                     source, reader, state, entry, inspected, directory
                 )
                 if foreign is not None:
                     _warning(entry.source.name)(foreign.message)
-                    warnings.append(foreign)
+                    met.append(foreign)
+            warnings.extend(met)
+            if met and not yes and not _confirmed(command):
+                shared = list(dict.fromkeys(f.collection for f in met))
+                place = ", ".join(shared)
+                verb = "holds" if len(shared) == 1 else "hold"
+                raise CliError(
+                    "foreign_objects",
+                    f"{place} {verb} objects that sync --prune would delete; "
+                    f"the {command} wrote nothing.",
+                    FOREIGN_HINT,
+                    fields=_findings_document([], warnings),
+                )
             added: list[dict[str, str]] = []
             for name, group in selected.items():
                 missing = schema.missing_properties(group)
@@ -1200,6 +1222,20 @@ def _writing(
             )
         finally:
             state.close()
+
+
+def _interactive() -> bool:
+    return sys.stdin.isatty()
+
+
+def _confirmed(command: str) -> bool:
+    """Whether the user says yes at a prompt; False without a terminal."""
+    if not _interactive():
+        return False
+    try:
+        return typer.confirm(f"Go on with the {command}?", default=False, err=True)
+    except typer.Abort:
+        return False
 
 
 def _foreign_objects(
@@ -1271,9 +1307,10 @@ def _copy(
     parallelism: int,
     consistency: Consistency | None,
     json_output: bool,
+    yes: bool = False,
 ) -> None:
     with _writing(
-        factories, directory, names, parallelism, consistency, json_output
+        factories, directory, names, parallelism, consistency, json_output, "copy", yes
     ) as run:
         rereads: dict[str, int] = {}
         for entry in run.entries:
@@ -1375,13 +1412,14 @@ def _sync(
     prune: bool,
     force: bool,
     json_output: bool,
+    yes: bool = False,
 ) -> None:
     if force and not prune:
         raise CliError(
             "usage", "--force needs --prune.", "Run to-weaviate sync --prune --force."
         )
     with _writing(
-        factories, directory, names, parallelism, consistency, json_output
+        factories, directory, names, parallelism, consistency, json_output, "sync", yes
     ) as run:
         deleter = factories.deleter(run.target_settings, consistency)
         results: dict[str, SyncResult] = {}
@@ -1580,6 +1618,14 @@ ConsistencyOption = Annotated[
     Consistency | None,
     typer.Option("--consistency", help="Write consistency level."),
 ]
+YesOption = Annotated[
+    bool,
+    typer.Option(
+        "--yes",
+        help="Go on without asking when the target holds objects that "
+        "sync --prune would delete.",
+    ),
+]
 SyncConsistencyOption = Annotated[
     Consistency | None,
     typer.Option(
@@ -1693,6 +1739,7 @@ def build_app(
         collection: NamesOption = None,
         parallelism: ParallelismOption = DEFAULT_PARALLELISM,
         consistency: ConsistencyOption = None,
+        yes: YesOption = False,
         directory: DirOption = DEFAULT_DIR,
         json_output: JsonOption = False,
     ) -> None:
@@ -1705,6 +1752,7 @@ def build_app(
                 parallelism,
                 consistency,
                 json_output,
+                yes,
             )
 
     @app.command("sync")
@@ -1726,6 +1774,7 @@ def build_app(
                 f"{PRUNE_LIMIT_PERCENT}% stale objects.",
             ),
         ] = False,
+        yes: YesOption = False,
         directory: DirOption = DEFAULT_DIR,
         json_output: JsonOption = False,
     ) -> None:
@@ -1743,6 +1792,7 @@ def build_app(
                 prune,
                 force,
                 json_output,
+                yes,
             )
 
     @app.command("status")

@@ -1057,6 +1057,7 @@ def test_error_exit_covers_every_code():
         "source_compacting": 4,
         "source_writing": 4,
         "delete_failed": 4,
+        "foreign_objects": 2,
         "internal_error": 5,
     }
 

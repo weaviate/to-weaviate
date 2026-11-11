@@ -27,6 +27,7 @@ from test_cli_commands import (
 )
 from typer.testing import Result
 
+from to_weaviate import cli
 from to_weaviate.cli import PRUNE_HINT
 from to_weaviate.engine.copy import REJECTS_HINT, plan_hash
 from to_weaviate.engine.sync import PLAN_CHANGED
@@ -467,7 +468,7 @@ FOREIGN_MESSAGE = (
 def test_a_first_run_into_a_collection_with_other_objects_warns(command):
     fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
     other_objects(fakes, ["other-1", "other-2", None])
-    r = invoke(fakes, command, "--json")
+    r = invoke(fakes, command, "--yes", "--json")
     assert r.exit_code == 0, r.output
     assert json.loads(r.stdout)["warnings"] == [
         {"code": "foreign_objects", "collection": "Docs", "message": FOREIGN_MESSAGE}
@@ -503,3 +504,60 @@ def test_objects_without_a_source_id_do_not_warn():
     other_objects(fakes, [None, None])
     r = invoke(fakes, "copy", "--json")
     assert r.exit_code == 0 and json.loads(r.stdout)["warnings"] == []
+
+
+FOREIGN_HINT = (
+    "Copy into another collection or tenant, or, when these objects may be "
+    "deleted, run the same command with --yes."
+)
+
+
+def stopped(r: Result, command: str) -> None:
+    # CliRunner writes the typed answer to stdout; a terminal shows it instead.
+    d = json.loads(r.stdout[r.stdout.index("{") :])
+    assert (r.exit_code, d["code"], d["message"], d["hint"]) == (
+        2,
+        "foreign_objects",
+        f"Docs holds objects that sync --prune would delete; the {command} wrote "
+        "nothing.",
+        FOREIGN_HINT,
+    )
+    assert d["warnings"][0]["code"] == "foreign_objects"
+
+
+@pytest.mark.parametrize("command", ["copy", "sync"])
+def test_a_first_run_with_other_objects_stops_without_a_terminal_or_yes(command):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    other_objects(fakes, ["other-1", "other-2"])
+    r = invoke(fakes, command, "--json")
+    stopped(r, command)
+    assert fakes.schema.ensured == [] and len(fakes.writer.objects) == 2
+    assert f"Warning: docs: {FOREIGN_MESSAGE}" in r.stderr.splitlines()
+
+
+@pytest.mark.parametrize("command", ["copy", "sync"])
+@pytest.mark.parametrize(
+    ("answer", "goes_on"), [("y\n", True), ("n\n", False), ("", False)]
+)
+def test_a_first_run_with_other_objects_asks_in_a_terminal(
+    monkeypatch, command, answer, goes_on
+):
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    other_objects(fakes, ["other-1", "other-2"])
+    r = invoke(fakes, command, "--json", input=answer)
+    assert f"Go on with the {command}? [y/N]" in r.stderr
+    if goes_on:
+        assert r.exit_code == 0, r.output
+        assert len(fakes.writer.objects) == 12
+    else:
+        stopped(r, command)
+        assert len(fakes.writer.objects) == 2
+
+
+def test_yes_changes_nothing_without_other_objects(monkeypatch):
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    r = invoke(fakes, "copy", "--yes", "--json")
+    assert r.exit_code == 0 and json.loads(r.stdout)["warnings"] == []
+    assert "Go on" not in r.stderr

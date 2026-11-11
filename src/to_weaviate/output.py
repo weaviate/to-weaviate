@@ -34,6 +34,9 @@ ERROR_EXIT: dict[str, int] = {
     "source_writing": 4,
     # The target deleted only some objects; sync --prune again deletes the rest.
     "delete_failed": 4,
+    # The target holds objects that sync --prune would delete, and nobody
+    # confirmed the run: the user decides, then runs it again with --yes.
+    "foreign_objects": 2,
     "internal_error": 5,
 }
 

@@ -718,6 +718,11 @@ def cli_records(n: int, year_text_at: int | None = None) -> list[Record]:
     ]
 
 
-def invoke(fakes: FakeFactories, *args: str, **env: str | None) -> Result:
-    """Run the app of `fakes` in `cli_env` with `env` applied over it."""
-    return CliRunner().invoke(fakes.app(), list(args), env=cli_env(**env))
+def invoke(
+    fakes: FakeFactories, *args: str, input: str | None = None, **env: str | None
+) -> Result:
+    """Run the app of `fakes` in `cli_env` with `env` applied over it.
+
+    `input` is what the command reads on stdin.
+    """
+    return CliRunner().invoke(fakes.app(), list(args), input=input, env=cli_env(**env))
