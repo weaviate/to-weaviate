@@ -431,6 +431,11 @@ class FakeReader:
     def _objects(self, entry: CollectionPlan) -> dict[str, TargetObject]:
         return self.writer.stored.get((entry.target.name, entry.target.tenant), {})
 
+    def active(self, entry: CollectionPlan) -> bool:
+        """False for a (name, tenant) in the store's `inactive` set."""
+        inactive = getattr(self.writer, "inactive", set())
+        return (entry.target.name, entry.target.tenant) not in inactive
+
     def exists(self, entry: CollectionPlan) -> bool:
         """A collection or a tenant exists once a write named it."""
         name, tenant = entry.target.name, entry.target.tenant

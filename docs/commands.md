@@ -157,7 +157,9 @@ planned property that the collection lacks and lists it under
 `plan_mismatch`, exit 2.
 
 On the first run of a directory into a collection or tenant that exists,
-`copy` and `sync` list the ids of the source and of the target once. When
+`copy` and `sync` list the ids of the source and of the target once. They
+skip a tenant that is not active: Weaviate reads none of its objects, and
+the first write stops with the tenant's error. When
 the target holds objects with a `source_id` that the source does not hold,
 they print `Warning: <source>: N objects have a source_id that <source> does
 not hold; sync --prune deletes them. ...`. Such objects come from another

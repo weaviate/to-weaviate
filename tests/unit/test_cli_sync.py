@@ -561,3 +561,17 @@ def test_yes_changes_nothing_without_other_objects(monkeypatch):
     r = invoke(fakes, "copy", "--yes", "--json")
     assert r.exit_code == 0 and json.loads(r.stdout)["warnings"] == []
     assert "Go on" not in r.stderr
+
+
+def test_a_first_run_into_an_inactive_tenant_lists_no_id(tmp_path):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    two_entries(tmp_path / DIR, ("Docs", "a"), ("Docs", "b"))
+    uuid = "00000000-0000-0000-0000-000000000001"
+    other = TargetObject(uuid, {"source_id": "other-1"}, {})
+    fakes.writer.stored[("Docs", "b")] = {uuid: other}
+    fakes.writer.inactive = {("Docs", "b")}  # type: ignore[attr-defined]
+    r = invoke(fakes, "copy", "--json")
+    # Weaviate refuses to read or write an inactive tenant; the write reports it.
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["warnings"] == []
+    assert "ids" not in fakes.source.calls

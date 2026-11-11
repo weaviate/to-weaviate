@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 import pytest
 from fakes import raise_grpc_failure
+from weaviate.collections.classes.tenants import Tenant, TenantActivityStatus
 from weaviate.exceptions import (
     UnexpectedStatusCodeError,
     WeaviateConnectionError,
@@ -102,11 +103,19 @@ class FakeCollection:
         )
         self.iterator_fail_at: int | None = None
         self.tenant_names: set[str] = set()
-        self.tenants = SimpleNamespace(exists=self._tenant_exists)
+        self.tenant_status: dict[str, TenantActivityStatus] = {}
+        self.tenants = SimpleNamespace(
+            exists=self._tenant_exists, get_by_name=self._tenant_by_name
+        )
 
     def _tenant_exists(self, tenant: str) -> bool:
         self.calls.append(("tenants.exists", {"tenant": tenant}))
         return tenant in self.tenant_names
+
+    def _tenant_by_name(self, tenant: str) -> Any:
+        self.calls.append(("tenants.get_by_name", {"tenant": tenant}))
+        status = self.tenant_status.get(tenant)
+        return None if status is None else Tenant(name=tenant, activity_status=status)
 
     def _call(self, name: str, kwargs: dict[str, Any]) -> None:
         self.calls.append((name, kwargs))
@@ -311,3 +320,26 @@ def test_other_grpc_failure_is_raised_at_once():
     with pytest.raises(WeaviateQueryError):
         reader(client).count(ENTRY)
     assert len(client.collection.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "active"),
+    [
+        (TenantActivityStatus.ACTIVE, True),
+        (TenantActivityStatus.INACTIVE, False),
+        (TenantActivityStatus.OFFLOADED, False),
+        (None, False),
+    ],
+)
+def test_active_reads_the_status_of_the_tenant(status, active):
+    client = FakeClient([])
+    if status is not None:
+        client.collection.tenant_status["t1"] = status
+    assert reader(client).active(make_entry(tenant="t1")) is active
+    assert client.collection.calls == [("tenants.get_by_name", {"tenant": "t1"})]
+
+
+def test_an_entry_without_a_tenant_is_active():
+    client = FakeClient([])
+    assert reader(client).active(ENTRY) is True
+    assert client.collection.calls == []

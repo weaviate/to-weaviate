@@ -60,7 +60,7 @@ An arrow means "calls". Every layer imports the types of `plan.py` and
 | `target/connect.py` | Weaviate Cloud or custom connection, from the settings |
 | `target/schema.py` | Creates collections from the plan, compares an existing collection with it, updates quantizers, classifies transient errors |
 | `target/writer.py` | Record to Weaviate object or reject; chunks of at most 4 MiB by estimated size, an object above that alone, with retries |
-| `target/reader.py` | Reads objects back for `verify`; lists the uuid and `source_id` of every object for `verify` and `sync` |
+| `target/reader.py` | Reads objects back for `verify`; lists the uuid and `source_id` of every object for `verify`, `sync` and the first `copy` into an existing collection; tells whether a tenant is active |
 | `target/deleter.py` | Deletes objects by uuid for `sync --prune`, 100 per request, with retries; raises `DeleteFailed` when a request deleted only some |
 
 ## How each command runs
@@ -84,7 +84,8 @@ property that an existing collection lacks. `check` writes nothing.
 1. `cli.py` runs the plan findings of `check`, the source check and the
    provider-key check. It then takes `copy.lock` and checks the enabled
    modules and the recorded targets in `state.sqlite`. For an entry without
-   progress whose collection or tenant exists, `engine/verify.foreign_count`
+   progress whose collection or tenant exists and is active
+   (`TargetReader.active`), `engine/verify.foreign_count`
    lists the ids once. When objects with a `source_id` that the source does
    not hold are there, `cli.py` warns, asks in a terminal, and stops with
    `foreign_objects` unless the answer is yes or `--yes` was given.

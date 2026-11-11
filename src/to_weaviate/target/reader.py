@@ -5,6 +5,7 @@ from typing import Any, Protocol, TypeVar, cast
 import weaviate
 from weaviate.classes.query import Filter
 from weaviate.collections import Collection
+from weaviate.collections.classes.tenants import TenantActivityStatus
 
 from to_weaviate.plan import CollectionPlan
 from to_weaviate.retry import with_retry
@@ -15,10 +16,16 @@ T = TypeVar("T")
 
 FETCH_BATCH = 100
 SOURCE_ID = "source_id"
+# HOT is the name of ACTIVE before Weaviate 1.26.
+ACTIVE = (TenantActivityStatus.ACTIVE, TenantActivityStatus.HOT)
 
 
 class TargetReader(Protocol):
     def exists(self, entry: CollectionPlan) -> bool: ...
+
+    def active(self, entry: CollectionPlan) -> bool:
+        """True without a tenant, or when the tenant exists and is active."""
+        ...
 
     def count(self, entry: CollectionPlan) -> int: ...
 
@@ -76,6 +83,18 @@ class WeaviateReader:
             return True
         tenants = self._client.collections.get(name).tenants
         return self._call(lambda: tenants.exists(tenant))
+
+    def active(self, entry: CollectionPlan) -> bool:
+        """True without a tenant, or when the tenant exists and is active.
+
+        Weaviate reads and writes the objects of an active tenant only.
+        """
+        tenant = entry.target.tenant
+        if not tenant:
+            return True
+        tenants = self._client.collections.get(entry.target.name).tenants
+        found = self._call(lambda: tenants.get_by_name(tenant))
+        return found is not None and found.activity_status in ACTIVE
 
     def count(self, entry: CollectionPlan) -> int:
         collection = self._collection(entry)

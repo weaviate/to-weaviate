@@ -1249,10 +1249,12 @@ def _foreign_objects(
     """A warning when the first run of `entry` meets objects `--prune` would delete.
 
     Only a first run into an existing collection or tenant lists the ids: the
-    objects of later runs are this directory's own.
+    objects of later runs are this directory's own. A tenant that is not
+    active is skipped: Weaviate reads none of its objects, and the first
+    write reports the tenant.
     """
     ref = entry.source.ref
-    if state.has_progress(ref) or not reader.exists(entry):
+    if state.has_progress(ref) or not reader.exists(entry) or not reader.active(entry):
         return None
     count = foreign_count(source, reader, entry, inspected[ref], directory)
     if not count:
