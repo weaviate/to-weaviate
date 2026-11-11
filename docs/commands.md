@@ -155,6 +155,17 @@ planned property that the collection lacks and lists it under
 `added_properties` in its JSON document. Any other difference stops it with
 `plan_mismatch`, exit 2.
 
+On the first run of a directory into a collection or tenant that exists,
+`copy` and `sync` list the ids of the source and of the target once. When
+the target holds objects with a `source_id` that the source does not hold,
+they print `Warning: <source>: N objects have a source_id that <source> does
+not hold; sync --prune deletes them. ...` and add the warning
+`foreign_objects` to the JSON document. Such objects come from another
+source, often another migration directory, or from records deleted from this
+source. The run goes on; copy into another collection or tenant unless the
+records were deleted on purpose. See
+[Stale objects and `--prune`](#stale-objects-and---prune).
+
 `state.sqlite` records the target of each source collection: the Weaviate
 host and port, the collection and the tenant. Once records of a collection
 are copied, `copy` and `sync` stop with `state_mismatch`, exit 2, when
@@ -239,7 +250,9 @@ this tool, is neither counted nor deleted.
 `--prune` treats every object with a `source_id` as one that this migration
 directory wrote. Give each target collection, or each tenant, one migration
 directory and one source: the objects that another directory wrote there
-are stale to this one, and `--prune` deletes them.
+are stale to this one, and `--prune` deletes them. The first `copy` or
+`sync` of a directory into an existing collection warns `foreign_objects`
+when it finds such objects.
 
 With `--prune`, after it wrote the new and changed records, `sync` reads the
 stale records from the source by id. A record that the source holds was
@@ -325,7 +338,7 @@ pass `--dir`:
 | `events.jsonl` | `copy`, `sync` | The events of `copy` and `sync`: `collection_started`, `progress` (at most one every 5 s per collection), `compaction_wait`, `source_changed`, `collection_finished`, `plan_changed` and `sync_finished` |
 | `rejects.jsonl` | `copy`, `sync` | One line per rejected record and run that met it, with the reason |
 | `report.md`, `report.json` | `verify` | The verification report |
-| `verify-…/`, `sync-…/` | `verify`, `sync` | The source and target ids while the command lists them; removed when it ends |
+| `verify-…/`, `sync-…/`, `ids-…/` | `verify`, `sync`, `copy` | The source and target ids while the command lists them; removed when it ends |
 
 When the disk is full, or the directory or a file in it is read-only, a
 command stops with `directory_unwritable`, exit 2. The message names the

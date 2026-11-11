@@ -77,6 +77,7 @@ from to_weaviate.engine.verify import (
     Check,
     check_line,
     diff_ids,
+    foreign_count,
     missing_target,
     remove_report,
     target_label,
@@ -1169,6 +1170,13 @@ def _writing(
                 source_names,
                 directory,
             )
+            for entry in entries:
+                foreign = _foreign_objects(
+                    source, reader, state, entry, inspected, directory
+                )
+                if foreign is not None:
+                    _warning(entry.source.name)(foreign.message)
+                    warnings.append(foreign)
             added: list[dict[str, str]] = []
             for name, group in selected.items():
                 missing = schema.missing_properties(group)
@@ -1192,6 +1200,36 @@ def _writing(
             )
         finally:
             state.close()
+
+
+def _foreign_objects(
+    source: Source,
+    reader: TargetReader,
+    state: State,
+    entry: CollectionPlan,
+    inspected: dict[str, SourceCollection],
+    directory: Path,
+) -> Finding | None:
+    """A warning when the first run of `entry` meets objects `--prune` would delete.
+
+    Only a first run into an existing collection or tenant lists the ids: the
+    objects of later runs are this directory's own.
+    """
+    ref = entry.source.ref
+    if state.has_progress(ref) or not reader.exists(entry):
+        return None
+    count = foreign_count(source, reader, entry, inspected[ref], directory)
+    if not count:
+        return None
+    name = entry.source.name
+    verb = "has" if count == 1 else "have"
+    return Finding(
+        "foreign_objects",
+        entry.target.name,
+        f"{_plural(count, 'object')} {verb} a source_id that {name} does not hold; "
+        "sync --prune deletes them. Unless their records were deleted from "
+        f"{name}, copy into another collection or tenant.",
+    )
 
 
 def _begin_entry(run: _Run, entry: CollectionPlan) -> bool:

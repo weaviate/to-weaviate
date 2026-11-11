@@ -1,5 +1,6 @@
 import json
 import re
+import shutil
 from dataclasses import replace
 
 import pytest
@@ -34,6 +35,7 @@ from to_weaviate.ids import to_uuid
 from to_weaviate.plan import DroppedKey, load_plan
 from to_weaviate.state import State
 from to_weaviate.target.deleter import DeleteFailed
+from to_weaviate.target.writer import TargetObject
 
 
 @pytest.fixture(autouse=True)
@@ -443,3 +445,61 @@ def test_sync_events_hold_plan_changed_and_sync_finished(tmp_path):
     assert last["event"] == "sync_finished"
     counted = (last["copied"], last["unchanged"], last["stale"], last["deleted"])
     assert counted == (9, 0, 1, 1)
+
+
+def other_objects(fakes: FakeFactories, source_ids: list[str | None]) -> None:
+    """Objects in Docs that this directory did not write."""
+    place = fakes.writer.stored.setdefault(("Docs", None), {})
+    for i, source_id in enumerate(source_ids):
+        uuid = f"00000000-0000-0000-0000-{i + 1:012d}"
+        properties = {} if source_id is None else {"source_id": source_id}
+        place[uuid] = TargetObject(uuid, properties, {})
+
+
+FOREIGN_MESSAGE = (
+    "2 objects have a source_id that docs does not hold; sync --prune deletes "
+    "them. Unless their records were deleted from docs, copy into another "
+    "collection or tenant."
+)
+
+
+@pytest.mark.parametrize("command", ["copy", "sync"])
+def test_a_first_run_into_a_collection_with_other_objects_warns(command):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    other_objects(fakes, ["other-1", "other-2", None])
+    r = invoke(fakes, command, "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["warnings"] == [
+        {"code": "foreign_objects", "collection": "Docs", "message": FOREIGN_MESSAGE}
+    ]
+    assert f"Warning: docs: {FOREIGN_MESSAGE}" in r.stderr.splitlines()
+    # The next run has progress, so it warns no more; a copy lists no id.
+    calls = len(fakes.source.calls)
+    r = invoke(fakes, command, "--json")
+    assert json.loads(r.stdout)["warnings"] == []
+    if command == "copy":
+        assert "ids" not in fakes.source.calls[calls:]
+
+
+def test_a_first_copy_into_a_new_collection_lists_no_id():
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0 and json.loads(r.stdout)["warnings"] == []
+    assert "ids" not in fakes.source.calls
+
+
+def test_a_copy_again_into_the_same_collection_from_a_new_directory_does_not_warn(
+    tmp_path,
+):
+    fakes = copied(FakeFactories(FakeSource(cli_records(10))))
+    shutil.rmtree(tmp_path / DIR)
+    fakes = inspected(fakes)
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0 and json.loads(r.stdout)["warnings"] == []
+
+
+def test_objects_without_a_source_id_do_not_warn():
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    other_objects(fakes, [None, None])
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0 and json.loads(r.stdout)["warnings"] == []

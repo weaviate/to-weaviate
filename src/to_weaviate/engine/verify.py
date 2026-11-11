@@ -221,6 +221,22 @@ def stale_count(db: sqlite3.Connection) -> int:
     return _count(db, _STALE)
 
 
+def foreign_count(
+    source: Source,
+    reader: TargetReader,
+    entry: CollectionPlan,
+    collection: SourceCollection,
+    workdir: Path,
+) -> int:
+    """The objects of the entry's target that `sync --prune` would delete now.
+
+    These are objects with a source_id that the source does not hold: objects
+    of another source, or of records deleted from this one.
+    """
+    with id_tables(source, reader, entry, collection, workdir, "ids-") as db:
+        return stale_count(db)
+
+
 def stale_batches(db: sqlite3.Connection) -> Iterator[list[tuple[str, str]]]:
     """(uuid, source_id) of the stale objects, in batches of ID_BATCH."""
     cursor = db.execute(f"SELECT t.uuid, t.source_id {_STALE} ORDER BY t.uuid")

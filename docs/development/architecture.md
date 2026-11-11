@@ -83,7 +83,10 @@ property that an existing collection lacks. `check` writes nothing.
 
 1. `cli.py` runs the plan findings of `check`, the source check and the
    provider-key check. It then takes `copy.lock` and checks the enabled
-   modules and the recorded targets in `state.sqlite`.
+   modules and the recorded targets in `state.sqlite`. For an entry without
+   progress whose collection or tenant exists, `engine/verify.foreign_count`
+   lists the ids once and `cli.py` warns `foreign_objects` when objects with
+   a `source_id` that the source does not hold are there.
 2. `target/schema.ensure_collection` creates each target collection, or
    compares the existing one with the plan and adds missing properties.
 3. For each plan entry, `engine/copy.copy_collection`:
