@@ -86,3 +86,66 @@ things for a migration:
   index (`needs_async_indexing`).
 - A trained quantizer compresses a shard only once the shard holds
   `training_limit` vectors. See [trained quantizers](plan-file.md#trained-quantizers).
+
+## Compression
+
+Weaviate Cloud compresses the vectors of a new collection by default. That
+includes the vectors that a migration keeps from the source (mode `keep`).
+This is the intended setup. Compression lowers the memory that the cluster
+needs, and with it the cost. Weaviate
+[rescores](https://docs.weaviate.io/weaviate/concepts/vector-quantization)
+the results of a search with the original vectors, so the results stay close
+to those of an uncompressed search. The
+[RQ guide](https://docs.weaviate.io/weaviate/configuration/compression/rq-compression)
+describes the recall of each bit width.
+
+The tool leaves this choice to the server. `inspect` drafts the index type
+`default` and the quantizer `default`, unless you pass `--index` or
+`--quantizer`. `copy` sends no index settings for the index type `default`
+and no quantizer settings for the quantizer `default`. The server then
+applies its default quantization. A server you run yourself has one only
+when its `DEFAULT_QUANTIZATION` variable is set.
+
+### Keep the vectors uncompressed
+
+Set the quantizer of each vector to `none`. `none` needs the index type
+`hnsw`, `flat` or `dynamic`. `inspect --index hnsw --quantizer none` drafts
+every vector that way. In `plan.yaml`, a vector with `none` looks like this:
+
+```yaml
+    vectors:
+    - name: default
+      mode: keep
+      vectorizer: null
+      distance: cosine
+      index:
+        type: hnsw
+        quantizer:
+          type: none
+```
+
+`copy` sends `none` as `skipDefaultQuantization: true`, and the server does
+not apply its default to that vector.
+
+- `hfresh` does not take `none`. It always compresses, with 1-bit `rq`. A
+  free cluster accepts only `hfresh`, so it cannot keep the vectors
+  uncompressed.
+- A server can limit the compression types it accepts
+  (`ALLOWED_COMPRESSION_TYPES`). When the list leaves out `none`, the server
+  refuses the collection, and `copy` stops with `target_rejected_schema`.
+  `check` does not see this limit.
+
+### Compression cannot be turned off
+
+Weaviate cannot turn compression off on an existing collection. To undo it,
+copy the source again into a new collection: draft a plan with `none` in a
+new migration directory (`--dir`), give the target a name that does not
+exist yet, and run `copy`.
+
+A plan with `none` for a collection that the server already compressed does
+not match that collection. `check` reports `plan_mismatch`, and `copy` stops
+with `plan_mismatch`, exit 2, before it writes an object.
+
+`verify` is not affected by compression. It compares the vectors that
+Weaviate returns, and Weaviate returns the original vectors, which it stores
+next to the compressed ones.
