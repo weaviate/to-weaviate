@@ -135,9 +135,10 @@ def sync_collection(
         raise_if_compacted(source, collection, compaction)
         if prune and not before == listed == after:
             raise SourceWriting(collection.name, before, listed, after)
-        rejected = state.rejected_ids(ref)
         for batch in missing_source_ids(db):
-            ids = [i for i in batch if i not in rejected and to_uuid(i) not in rejected]
+            uuids = {i: to_uuid(i) for i in batch}
+            rejected = state.rejected_among(ref, [*batch, *uuids.values()])
+            ids = [i for i in batch if i not in rejected and uuids[i] not in rejected]
             if not ids:
                 continue
             # The pass counted a record with a stored hash as unchanged.

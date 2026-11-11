@@ -541,3 +541,33 @@ def test_emits_sync_finished(src, state, events, tmp_path):
         "stale": 1,
         "deleted": 1,
     }
+
+
+def test_a_write_that_fails_after_weaviate_stored_it_is_written_again(
+    src, state, events, tmp_path
+):
+    writer = copied(src, state, events)
+    original = src.records[5]
+    src.records[5] = replace(original, document="changed")
+    # The fake stores the page, then reports a failure, as a lost response does.
+    writer.fail_on_call = writer.calls + 1
+    with pytest.raises(RuntimeError, match="fake write failure"):
+        sync(src, writer, state, events, tmp_path, parallelism=1)
+    assert writer.objects[to_uuid("id-5")].properties["document"] == "changed"
+    writer.fail_on_call = None
+    src.records[5] = original
+    result, _ = sync(src, writer, state, events, tmp_path)
+    assert result.copied == 1
+    assert writer.objects[to_uuid("id-5")].properties["document"] == "doc 5"
+
+
+def test_an_object_whose_source_id_names_a_record_of_the_source_is_not_stale(
+    src, state, events, tmp_path
+):
+    writer = copied(src, state, events)
+    other = TargetObject(
+        "00000000-0000-0000-0000-0000000000a1", {"source_id": "id-1"}, {}
+    )
+    writer.write(ENTRY, [other])
+    result, deleter = sync(src, writer, state, events, tmp_path)
+    assert result.stale == 0

@@ -398,12 +398,23 @@ def test_delete_hashes_returns_the_number_deleted(tmp_path):
     assert state.delete_hashes(REF, ["a", "c"]) == 1
 
 
-def test_rejected_ids_lists_the_stored_rejects_of_a_ref(tmp_path):
+def test_rejected_among_names_the_given_ids_with_a_stored_reject(tmp_path):
     state = make_state(tmp_path)
     state.init_collection(REF, parts("a"), 10)
     state.add_rejects(REF, [Reject("r1", "bad"), Reject("r2", "bad")])
     state.add_rejects("other", [Reject("r3", "bad")])
-    assert state.rejected_ids(REF) == {"r1", "r2"}
+    assert state.rejected_among(REF, ["r1", "r3", "x"]) == {"r1"}
+    many = [f"x{i}" for i in range(2500)] + ["r2"]
+    assert state.rejected_among(REF, many) == {"r2"}
+
+
+def test_invalidate_hashes_changes_the_stored_hashes_only(tmp_path):
+    state = make_state(tmp_path)
+    state.record_hashes(REF, [("a", b"1")])
+    state.invalidate_hashes(REF, ["a", "b"])
+    assert state.unchanged(REF, [("a", b"1"), ("b", b"")]) == set()
+    # The row stays, so the target guard still sees progress.
+    assert state.has_progress(REF)
 
 
 def test_state_file_without_targets_opens_and_stores_a_target(tmp_path):

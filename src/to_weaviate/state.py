@@ -467,13 +467,39 @@ class State:
                 deleted += cursor.rowcount
         return deleted
 
-    def rejected_ids(self, ref: str) -> set[str]:
-        """The source ids, or uuids, of the stored rejects of `ref`."""
+    def rejected_among(self, ref: str, ids: list[str]) -> set[str]:
+        """The ids of `ids` that a stored reject of `ref` names.
+
+        A reject names the source id, or the uuid when the plan has no
+        source_id property.
+        """
+        found: set[str] = set()
         with self._lock:
-            rows = self._db.execute(
-                "SELECT source_id FROM rejects WHERE ref = ?", (ref,)
-            ).fetchall()
-        return {source_id for (source_id,) in rows}
+            for i in range(0, len(ids), BATCH_SIZE):
+                batch = ids[i : i + BATCH_SIZE]
+                marks = ",".join("?" * len(batch))
+                rows = self._db.execute(
+                    f"SELECT source_id FROM rejects WHERE ref = ? "
+                    f"AND source_id IN ({marks})",
+                    (ref, *batch),
+                )
+                found.update(source_id for (source_id,) in rows)
+        return found
+
+    def invalidate_hashes(self, ref: str, source_ids: list[str]) -> None:
+        """Replace the stored hashes of `source_ids` by one that matches nothing.
+
+        The rows stay, so `has_progress` does not change.
+        """
+        with self._transaction():
+            for i in range(0, len(source_ids), BATCH_SIZE):
+                batch = source_ids[i : i + BATCH_SIZE]
+                marks = ",".join("?" * len(batch))
+                self._db.execute(
+                    f"UPDATE hashes SET hash = X'' WHERE ref = ? "
+                    f"AND source_id IN ({marks})",
+                    (ref, *batch),
+                )
 
     def record_hashes(self, ref: str, hashes: list[tuple[str, bytes]]) -> None:
         with self._transaction():

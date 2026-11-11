@@ -575,3 +575,15 @@ def test_a_first_run_into_an_inactive_tenant_lists_no_id(tmp_path):
     assert r.exit_code == 0, r.output
     assert json.loads(r.stdout)["warnings"] == []
     assert "ids" not in fakes.source.calls
+
+
+def test_a_first_run_into_a_collection_without_source_id_lists_no_id():
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    other_objects(fakes, [None])
+    # Weaviate refuses a query for a property the collection does not have.
+    fakes.schema.properties["Docs"] = {"document"}
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert "ids" not in fakes.source.calls
+    added = json.loads(r.stdout)["added_properties"]
+    assert {"collection": "Docs", "property": "source_id"} in added

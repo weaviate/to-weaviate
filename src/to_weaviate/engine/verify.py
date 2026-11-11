@@ -63,8 +63,12 @@ _MISSING = (
     "FROM source s WHERE NOT EXISTS (SELECT 1 FROM target t WHERE t.uuid = s.uuid)"
 )
 _EXTRA = "FROM target t WHERE NOT EXISTS (SELECT 1 FROM source s WHERE s.uuid = t.uuid)"
-# An object without source_id was not written by the tool.
-_STALE = f"{_EXTRA} AND t.source_id IS NOT NULL"
+# An object without source_id was not written by the tool, and one whose
+# source_id names a listed record has a live record, whatever its uuid.
+_STALE = (
+    f"{_EXTRA} AND t.source_id IS NOT NULL "
+    "AND NOT EXISTS (SELECT 1 FROM source s WHERE s.source_id = t.source_id)"
+)
 
 
 @dataclass(frozen=True)

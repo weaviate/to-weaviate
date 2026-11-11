@@ -246,6 +246,9 @@ variables.
   relies on that order to resume and to find new records.
 - `ids` and `ids_at` read ids in the same order, for `verify` and for the
   copy engine's search for its place after deletions.
+- `get` uses `/get` with up to 300 ids, for `sync`. A server can return fewer
+  rows than asked, so `get` asks again for the ids a response left out,
+  until a response holds none of them.
 - `wait_compacted` polls `/indexing_status` until `num_unindexed_ops` is 0
   and returns the collection's `version` and `log_position`.
   `compaction_state` reads them again after the last page, and the engine

@@ -140,7 +140,7 @@ from to_weaviate.state import (
 )
 from to_weaviate.target.connect import connect
 from to_weaviate.target.deleter import DeleteFailed, Deleter, WeaviateDeleter
-from to_weaviate.target.reader import TargetReader, WeaviateReader
+from to_weaviate.target.reader import SOURCE_ID, TargetReader, WeaviateReader
 from to_weaviate.target.schema import (
     USERINFO_TEXT,
     PlanMismatch,
@@ -1179,8 +1179,16 @@ def _writing(
                 source_names,
                 directory,
             )
+            missing = {
+                name: schema.missing_properties(group)
+                for name, group in selected.items()
+            }
             met: list[Finding] = []
             for entry in entries:
+                if SOURCE_ID in missing[entry.target.name]:
+                    # No object holds it yet, and Weaviate refuses a query
+                    # for a property the collection does not have.
+                    continue
                 foreign = _foreign_objects(
                     source, reader, state, entry, inspected, directory
                 )
@@ -1201,9 +1209,8 @@ def _writing(
                 )
             added: list[dict[str, str]] = []
             for name, group in selected.items():
-                missing = schema.missing_properties(group)
                 schema.ensure(group)
-                for prop in missing:
+                for prop in missing[name]:
                     _info(json_output, f"Added the property {prop} to {name}")
                     added.append({"collection": name, "property": prop})
             yield _Run(

@@ -355,14 +355,30 @@ class ChromaSource:
     def get(
         self, collection: SourceCollection, ids: list[str], with_vectors: bool
     ) -> list[Record]:
+        """The records of `ids` that Chroma holds.
+
+        A server can return fewer rows than asked, so the ids a response left
+        out are asked for again, until a response holds none of them.
+        """
         include = [*READ_INCLUDE, "embeddings"] if with_vectors else READ_INCLUDE
         records: list[Record] = []
         for start in range(0, len(ids), CHROMA_MAX_PAGE):
-            batch = ids[start : start + CHROMA_MAX_PAGE]
-            response = self._get(
-                collection, limit=len(batch), offset=0, include=include, ids=batch
-            )
-            records.extend(_records(response))
+            missing = ids[start : start + CHROMA_MAX_PAGE]
+            while missing:
+                response = self._get(
+                    collection,
+                    limit=len(missing),
+                    offset=0,
+                    include=include,
+                    ids=missing,
+                )
+                wanted = set(missing)
+                found = [r for r in _records(response) if r.id in wanted]
+                if not found:
+                    break
+                records.extend(found)
+                got = {r.id for r in found}
+                missing = [i for i in missing if i not in got]
         return records
 
     def ids_at(

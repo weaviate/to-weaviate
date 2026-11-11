@@ -381,6 +381,10 @@ def write_records(
     `plan` is the `plan_hash` of `entry`. With `skip_unchanged`, a record
     whose stored hash matches is not written. Returns the number of records
     written and the number skipped.
+
+    Before the write, the stored hashes of the records it sends match nothing
+    any more: Weaviate can store a write and still report it as failed, and a
+    record changed back to its old content must then be written again.
     """
     rejects: list[Reject] = []
     converted: list[tuple[Record, TargetObject]] = []
@@ -397,6 +401,7 @@ def write_records(
         converted = [(r, o) for r, o in converted if r.id not in same]
     write_rejects: list[Reject] = []
     if converted:
+        state.invalidate_hashes(ref, [r.id for r, _ in converted])
         write_rejects = writer.write(entry, [o for _, o in converted])
     rejects.extend(write_rejects)
     if rejects:

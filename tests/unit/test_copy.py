@@ -140,12 +140,14 @@ def test_resumes_after_failure(src, state, events):
     writer = FakeWriter(fail_on_call=3)
     with pytest.raises(RuntimeError, match="call 3$"):
         copy_collection(src, writer, state, events, ENTRY, C, 2)
+    # The other worker can finish a page after the failure; it stays copied.
+    checkpointed = state.progress()[0].copied
     writer.fail_on_call = None
     result = copy_collection(src, writer, state, events, ENTRY, C, 2)
     assert len(writer.objects) == 1000 and max(writer.writes_per_uuid.values()) <= 2
     # Only the page of the failed call is written again.
     assert sum(writer.writes_per_uuid.values()) == 1100
-    assert result == CopyResult(copied=1000, rejects=0, written=800)
+    assert result == CopyResult(copied=1000, rejects=0, written=1000 - checkpointed)
 
 
 def test_second_run_reads_nothing(src, state, events):

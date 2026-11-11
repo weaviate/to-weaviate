@@ -49,6 +49,7 @@ class FakeClient:
         self.count_calls = 0
         self.page_cap: int | None = None
         self.ignore_offset = False
+        self.ignore_ids = False  # a server that ignores the ids of a get
         self.statuses: list[dict] | None = None
         self.states: list[dict] = [{"version": 0, "log_position": 0}]
         self.compaction_calls: list[str] = []
@@ -85,7 +86,7 @@ class FakeClient:
     ):
         self.calls.append(Call(limit, offset, list(include), where, ids))
         rows = self.records
-        if ids is not None:
+        if ids is not None and not self.ignore_ids:
             rows = [r for r in rows if r["id"] in ids]
         if where is not None:
             ((key, cond),) = where.items()
@@ -399,7 +400,8 @@ def test_get_reads_the_records_with_the_ids_a_page_at_a_time(
     by_id = {r.id: r for r in records}
     assert (by_id["id2"].vector, by_id["id2"].document) == ([2.0, 1.0], "doc 2")
     assert by_id["id2"].metadata == {"year": 2002, "tags": ["a", "b"]}
-    assert [len(c.ids or []) for c in fake_client.calls] == [CHROMA_MAX_PAGE, 26]
+    # The last request asks again for the one id the source does not hold.
+    assert [len(c.ids or []) for c in fake_client.calls] == [CHROMA_MAX_PAGE, 26, 1]
     assert all(c.offset == 0 and c.limit == len(c.ids or []) for c in fake_client.calls)
 
 
@@ -704,3 +706,24 @@ def test_compaction_state_of_a_collection_created_again_names_inspect_force(
     with pytest.raises(ChromaError) as gone:
         source.compaction_state(inspected)
     assert (gone.value.status, gone.value.hint) == (200, COLLECTION_GONE_HINT)
+
+
+def test_get_asks_again_for_the_ids_that_a_short_page_left_out(
+    source, fake_client, inspected
+):
+    fake_client.page_cap = 100
+    fake_client.calls.clear()
+    wanted = [f"id{i}" for i in range(300)]
+    records = source.get(inspected, wanted, False)
+    assert sorted(r.id for r in records) == sorted(wanted)
+    assert [len(c.ids or []) for c in fake_client.calls] == [300, 200, 100]
+
+
+def test_get_stops_when_the_server_returns_no_id_it_was_asked_for(
+    source, fake_client, inspected
+):
+    fake_client.ignore_ids = True
+    fake_client.calls.clear()
+    records = source.get(inspected, ["id1", "gone"], False)
+    assert [r.id for r in records] == ["id1"]
+    assert len(fake_client.calls) == 2
