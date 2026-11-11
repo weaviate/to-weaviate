@@ -180,9 +180,13 @@ the plan notes it.
 ## Index and quantizer
 
 `index.type` is `default`, `hnsw`, `flat`, `dynamic` or `hfresh`. With
-`default`, the server chooses. A quantizer, or any distance other than
-`cosine`, needs a named index type. When the source distance is `l2-squared`
-or `dot` and `--index` is `default`, `inspect` sets `hnsw` and adds a note.
+`default`, the server chooses. The quantizer `default` also leaves the
+choice to the server, and Weaviate Cloud then compresses the vectors. The
+quantizer `none` keeps them uncompressed. See
+[compression](weaviate.md#compression). A quantizer other than `default`, or
+any distance other than `cosine`, needs a named index type. When the source
+distance is `l2-squared` or `dot` and `--index` is `default`, `inspect` sets
+`hnsw` and adds a note.
 
 The rules below are those of the Weaviate version in
 [`tests/acceptance/weaviate-version`](../tests/acceptance/weaviate-version).
