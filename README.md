@@ -54,8 +54,9 @@ uvx to-weaviate --help
 ```
 
 Each [GitHub release](https://github.com/weaviate/to-weaviate/releases) also
-carries the wheel and the sdist. `pip install` accepts the wheel's URL, for a
-machine that installs from GitHub rather than PyPI.
+carries the wheel and the sdist, the exact files of that version, to pin or
+to mirror. `pip install` accepts the wheel's URL; the dependencies still come
+from PyPI.
 
 ## How a migration works
 

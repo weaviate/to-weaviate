@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
 
 permissions:
   contents: read
@@ -56,9 +56,16 @@ jobs:
         with:
           name: dist
           path: dist/
-      # The release carries the wheel and the sdist, so a version installs
-      # from GitHub without PyPI. --verify-tag refuses to create the tag.
-      - run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+      # The release carries the wheel and the sdist, the exact files of the
+      # version; their dependencies still come from PyPI. A release that
+      # exists (made by hand, or a rerun) gets the files instead of an error.
+      # --verify-tag refuses to create the tag.
+      - run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+          fi
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
