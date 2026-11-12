@@ -24,6 +24,7 @@ class Call:
     offset: int
     include: list[str]
     where: dict | None
+    ids: list[str] | None = None
 
 
 def _next(items):
@@ -48,6 +49,7 @@ class FakeClient:
         self.count_calls = 0
         self.page_cap: int | None = None
         self.ignore_offset = False
+        self.ignore_ids = False  # a server that ignores the ids of a get
         self.statuses: list[dict] | None = None
         self.states: list[dict] = [{"version": 0, "log_position": 0}]
         self.compaction_calls: list[str] = []
@@ -71,10 +73,21 @@ class FakeClient:
         return {**self.collection, **_next(self.states)}
 
     def get(
-        self, tenant, database, collection_id, *, limit, offset, include, where=None
+        self,
+        tenant,
+        database,
+        collection_id,
+        *,
+        limit,
+        offset,
+        include,
+        where=None,
+        ids=None,
     ):
-        self.calls.append(Call(limit, offset, list(include), where))
+        self.calls.append(Call(limit, offset, list(include), where, ids))
         rows = self.records
+        if ids is not None and not self.ignore_ids:
+            rows = [r for r in rows if r["id"] in ids]
         if where is not None:
             ((key, cond),) = where.items()
             rows = [r for r in rows if (r["metadata"] or {}).get(key) == cond["$eq"]]
@@ -377,6 +390,34 @@ def test_ids_at_reads_ids_without_a_payload(source, fake_client, inspected):
     assert source.page_size == CHROMA_MAX_PAGE
 
 
+def test_get_reads_the_records_with_the_ids_a_page_at_a_time(
+    source, fake_client, inspected
+):
+    fake_client.calls.clear()
+    wanted = [f"id{i}" for i in range(0, 650, 2)] + ["gone"]
+    records = source.get(inspected, wanted, True)
+    assert sorted(r.id for r in records) == sorted(wanted[:-1])
+    by_id = {r.id: r for r in records}
+    assert (by_id["id2"].vector, by_id["id2"].document) == ([2.0, 1.0], "doc 2")
+    assert by_id["id2"].metadata == {"year": 2002, "tags": ["a", "b"]}
+    # The last request asks again for the one id the source does not hold.
+    assert [len(c.ids or []) for c in fake_client.calls] == [CHROMA_MAX_PAGE, 26, 1]
+    assert all(c.offset == 0 and c.limit == len(c.ids or []) for c in fake_client.calls)
+
+
+def test_get_without_vectors_reads_no_embeddings(source, fake_client, inspected):
+    fake_client.calls.clear()
+    records = source.get(inspected, ["id1"], False)
+    assert [r.id for r in records] == ["id1"] and records[0].vector is None
+    assert "embeddings" not in fake_client.calls[0].include
+
+
+def test_get_of_no_id_sends_nothing(source, fake_client, inspected):
+    fake_client.calls.clear()
+    assert source.get(inspected, [], True) == []
+    assert fake_client.calls == []
+
+
 def test_count(source, inspected):
     assert source.count(inspected) == 650
 
@@ -665,3 +706,24 @@ def test_compaction_state_of_a_collection_created_again_names_inspect_force(
     with pytest.raises(ChromaError) as gone:
         source.compaction_state(inspected)
     assert (gone.value.status, gone.value.hint) == (200, COLLECTION_GONE_HINT)
+
+
+def test_get_asks_again_for_the_ids_that_a_short_page_left_out(
+    source, fake_client, inspected
+):
+    fake_client.page_cap = 100
+    fake_client.calls.clear()
+    wanted = [f"id{i}" for i in range(300)]
+    records = source.get(inspected, wanted, False)
+    assert sorted(r.id for r in records) == sorted(wanted)
+    assert [len(c.ids or []) for c in fake_client.calls] == [300, 200, 100]
+
+
+def test_get_stops_when_the_server_returns_no_id_it_was_asked_for(
+    source, fake_client, inspected
+):
+    fake_client.ignore_ids = True
+    fake_client.calls.clear()
+    records = source.get(inspected, ["id1", "gone"], False)
+    assert [r.id for r in records] == ["id1"]
+    assert len(fake_client.calls) == 2

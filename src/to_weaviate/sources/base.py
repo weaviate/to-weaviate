@@ -133,6 +133,12 @@ class Source(Protocol):
 
     def ids(self, collection: SourceCollection) -> Iterator[str]: ...
 
+    def get(
+        self, collection: SourceCollection, ids: list[str], with_vectors: bool
+    ) -> list[Record]:
+        """The records of `ids` that the source holds, in any order."""
+        ...
+
     def ids_at(
         self, collection: SourceCollection, offset: int, limit: int
     ) -> list[str]:

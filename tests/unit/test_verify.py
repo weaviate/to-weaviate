@@ -10,16 +10,24 @@ from fakes import FakeFactories, FakeReader, FakeSource, FakeWriter, cli_records
 
 from to_weaviate import plan as p
 from to_weaviate.engine.verify import (
+    ID_BATCH,
     Check,
     IdDiff,
     check_line,
     diff_ids,
+    id_tables,
+    missing_source_ids,
     missing_target,
+    owned_total,
+    source_listed,
+    stale_batches,
+    stale_count,
     verify_counts,
     verify_ids,
     verify_records,
     write_report,
 )
+from to_weaviate.ids import to_uuid
 from to_weaviate.plan import load_plan, save_plan
 from to_weaviate.sources.base import Record, Sample, SourceCollection
 from to_weaviate.sources.chroma.client import ChromaError
@@ -137,7 +145,8 @@ def test_count_mismatch_names_copy():
     check = verify_counts(source, FakeReader(writer), ENTRY, collection_of(source))
     assert (check.name, check.collection, check.passed) == ("count", "Docs", False)
     assert "source count 10" in check.detail and "target count 9" in check.detail
-    assert "to-weaviate copy" in check.detail and "sync" not in check.detail
+    assert "to-weaviate copy again" in check.detail
+    assert "sync --prune" not in check.detail
 
 
 def test_target_below_source_says_to_copy_again():
@@ -145,23 +154,22 @@ def test_target_below_source_says_to_copy_again():
     check = verify_counts(source, FakeReader(writer), ENTRY, collection_of(source))
     assert check.detail == (
         "source count 10, target count 9; run to-weaviate copy again. If the "
-        "counts still differ, records were skipped or rejected: read "
-        "rejects.jsonl. Rejects are final for this directory. After fixing the "
-        "cause, copy plan.yaml and inspect.json to a new --dir and run "
-        "to-weaviate copy there; objects already in Weaviate are written again "
-        "unchanged."
+        "counts still differ, records were skipped or rejected: run to-weaviate "
+        "sync, and read rejects.jsonl. A reject stays until its cause is fixed; "
+        "then to-weaviate sync writes the record. Objects already in Weaviate "
+        "are written only when they changed."
     )
 
 
-def test_target_above_source_says_no_command_removes_the_extra_objects():
+def test_target_above_source_points_to_the_ids_check():
     source, writer = migrated(make_records(10), ENTRY)
     writer.write(ENTRY, converted(make_records(2, prefix="ghost"), ENTRY))
     check = verify_counts(source, FakeReader(writer), ENTRY, collection_of(source))
     assert not check.passed
     assert check.detail == (
-        "source count 10, target count 12; the target holds objects whose "
-        "source records were deleted. This version has no command that removes "
-        "them."
+        "source count 10, target count 12; the target holds objects that are "
+        "not in the source; the ids check of a verify without --quick says which "
+        "and how to remove them."
     )
 
 
@@ -201,6 +209,56 @@ def test_id_diff_is_scoped_to_the_tenant(tmp_path):
     assert (diff.missing, diff.extra) == (0, 0)
 
 
+FOREIGN = TargetObject("00000000-0000-0000-0000-00000000f00d", {"year": 1}, {})
+
+
+def test_id_tables_lists_stale_objects_with_a_source_id_only(tmp_path):
+    source, writer = migrated(make_records(10), ENTRY)
+    writer.write(ENTRY, [FOREIGN])
+    del source.records[8:]
+    reader = FakeReader(writer)
+    with id_tables(source, reader, ENTRY, collection_of(source), tmp_path) as db:
+        assert (source_listed(db), owned_total(db), stale_count(db)) == (8, 10, 2)
+        stale = [pair for batch in stale_batches(db) for pair in batch]
+    assert stale == sorted([(to_uuid("id-8"), "id-8"), (to_uuid("id-9"), "id-9")])
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_id_tables_batches_the_stale_and_the_missing_ids(tmp_path):
+    source, writer = migrated(make_records(2500), ENTRY)
+    absent = source.records[:1200]
+    del source.records[:1200]
+    source.records.extend(make_records(1100, prefix="new"))
+    reader = FakeReader(writer)
+    with id_tables(source, reader, ENTRY, collection_of(source), tmp_path) as db:
+        stale = list(stale_batches(db))
+        missing = list(missing_source_ids(db))
+    assert [len(b) for b in stale] == [ID_BATCH, 200]
+    assert {i for _, i in sum(stale, [])} == {r.id for r in absent}
+    assert [len(b) for b in missing] == [ID_BATCH, 100]
+    assert set(sum(missing, [])) == {f"new-{i}" for i in range(1100)}
+
+
+def test_id_tables_names_its_scratch_directory(tmp_path):
+    source, writer = migrated(make_records(10), ENTRY)
+    reader = FakeReader(writer)
+    with id_tables(
+        source, reader, ENTRY, collection_of(source), tmp_path, prefix="sync-"
+    ):
+        assert [d.name[:5] for d in tmp_path.iterdir()] == ["sync-"]
+
+
+def test_id_diff_counts_an_object_without_source_id_as_extra_and_names_its_uuid(
+    tmp_path,
+):
+    source, writer = migrated(make_records(10), ENTRY)
+    writer.write(ENTRY, [FOREIGN])
+    assert list(FakeReader(writer).source_ids(ENTRY))[-1] == (FOREIGN.uuid, None)
+    diff = diff_ids(source, FakeReader(writer), ENTRY, collection_of(source), tmp_path)
+    assert (diff.missing, diff.extra, diff.foreign) == (0, 1, 1)
+    assert diff.extra_sample == [FOREIGN.uuid]
+
+
 class LostReader(FakeReader):
     def source_ids(self, entry):
         yield "00000000-0000-0000-0000-000000000001", "a"
@@ -225,14 +283,18 @@ def test_verify_ids_passes_only_without_differences():
 
 COPY_AGAIN = (
     "run to-weaviate copy again. If ids are still missing, records were "
-    "skipped or rejected: read rejects.jsonl. Rejects are final for this "
-    "directory. After fixing the cause, copy plan.yaml and inspect.json to a "
-    "new --dir and run to-weaviate copy there; objects already in Weaviate are "
-    "written again unchanged."
+    "skipped or rejected: run to-weaviate sync, and read rejects.jsonl. A "
+    "reject stays until its cause is fixed; then to-weaviate sync writes the "
+    "record. Objects already in Weaviate are written only when they changed."
 )
-NO_REMOVE = (
-    "the target holds objects whose source records were deleted. This version "
-    "has no command that removes them."
+PRUNE_STALE = (
+    "the target holds objects whose source records were deleted; stop the "
+    "writes to the source and run to-weaviate sync --prune to delete them."
+)
+FOREIGN_TEXT = (
+    "the target holds objects without a source_id, which this tool did not "
+    "write; sync --prune leaves them, so delete them in Weaviate if they do not "
+    "belong to the collection."
 )
 
 
@@ -244,14 +306,25 @@ NO_REMOVE = (
             IdDiff(1, 0, ["a"], []),
             f'missing 1, extra 0; missing ids ["a"]; {COPY_AGAIN}',
         ),
-        (IdDiff(0, 1, [], ["b"]), f'missing 0, extra 1; extra ids ["b"]; {NO_REMOVE}'),
+        (
+            IdDiff(0, 1, [], ["b"]),
+            f'missing 0, extra 1; extra ids ["b"]; {PRUNE_STALE}',
+        ),
         (
             IdDiff(1, 1, ["a"], ["b"]),
             f'missing 1, extra 1; missing ids ["a"]; extra ids ["b"]; {COPY_AGAIN}; '
-            f"{NO_REMOVE}",
+            f"{PRUNE_STALE}",
+        ),
+        (
+            IdDiff(0, 1, [], ["u"], foreign=1),
+            f'missing 0, extra 1; extra ids ["u"]; {FOREIGN_TEXT}',
+        ),
+        (
+            IdDiff(0, 3, [], ["b", "u"], foreign=1),
+            f'missing 0, extra 3; extra ids ["b", "u"]; {PRUNE_STALE}; {FOREIGN_TEXT}',
         ),
     ],
-    ids=["none", "missing", "extra", "both"],
+    ids=["none", "missing", "extra", "both", "foreign", "stale-and-foreign"],
 )
 def test_id_diff_detail_names_the_fix(diff, detail):
     assert verify_ids(diff, ENTRY).detail == detail

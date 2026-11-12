@@ -57,7 +57,10 @@ def test_copy_resumes_after_the_process_is_killed(seeded, tmp_path):
         # and the first one goes on.
         second = run(["copy"], tmp_path)
         assert second.exit_code == 2 and second.data["code"] == "usage", second
-        assert second.data["message"] == f"Another to-weaviate copy uses {tmp_path}."
+        assert (
+            second.data["message"]
+            == f"Another to-weaviate copy or sync uses {tmp_path}."
+        )
         while process.poll() is None and _progress(tmp_path)["copied"] == copied:
             assert time.monotonic() < deadline, "the first copy made no progress"
             time.sleep(POLL_SECONDS)

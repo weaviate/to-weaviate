@@ -49,6 +49,10 @@ CREATE TABLE IF NOT EXISTS targets (
 CREATE TABLE IF NOT EXISTS quantizer_updates (
     ref TEXT PRIMARY KEY
 );
+CREATE TABLE IF NOT EXISTS plans (
+    ref TEXT PRIMARY KEY,
+    hash BLOB NOT NULL
+);
 """
 
 
@@ -124,8 +128,8 @@ class State:
     """Copy progress in sqlite. Every method commits before it returns.
 
     Collections and partitions are listed in insertion (rowid) order. A file
-    written before the `targets` or the `quantizer_updates` table existed gets
-    the table when it is opened, with no row for any ref. A file written before
+    written before the `targets`, `quantizer_updates` or `plans` table existed
+    gets the table when it is opened, with no row for any ref. A file written before
     the `last_id` or the `previous_id` column existed gets the column, NULL in
     every row. A file that sqlite cannot read raises StateUnreadable when it is
     opened, and a file that another process keeps locked raises StateInUse.
@@ -183,13 +187,17 @@ class State:
             self._db.close()
 
     def init_collection(
-        self, ref: str, partitions: list[Partition], total: int
+        self, ref: str, partitions: list[Partition], total: int, fresh: bool = False
     ) -> None:
         """Store `ref` with `total`, and `partitions` when it has none.
 
-        A stored total that is higher stays.
+        A stored total that is higher stays. With `fresh`, the stored
+        partitions and rejects of `ref` go first, in the same transaction.
         """
         with self._transaction():
+            if fresh:
+                self._db.execute("DELETE FROM partitions WHERE ref = ?", (ref,))
+                self._db.execute("DELETE FROM rejects WHERE ref = ?", (ref,))
             self._db.execute(
                 "INSERT INTO collections (ref, total) VALUES (?, ?) "
                 "ON CONFLICT(ref) DO UPDATE SET total = MAX(total, excluded.total)",
@@ -326,6 +334,12 @@ class State:
                 (total, ref),
             )
 
+    def set_total(self, ref: str, total: int) -> None:
+        with self._transaction():
+            self._db.execute(
+                "UPDATE collections SET total = ? WHERE ref = ?", (total, ref)
+            )
+
     def add_rejects(self, ref: str, rejects: list[Reject]) -> None:
         """Store rejects and append the new ones to rejects.jsonl.
 
@@ -382,12 +396,13 @@ class State:
             self._db.execute("DELETE FROM quantizer_updates WHERE ref = ?", (ref,))
 
     def has_progress(self, ref: str) -> bool:
-        """True when a record of `ref` was copied or a partition of it finished."""
+        """True when `ref` has a copied record, a finished partition or a hash."""
         with self._lock:
             (found,) = self._db.execute(
                 "SELECT EXISTS (SELECT 1 FROM partitions WHERE ref = ? AND "
-                "(finished = 1 OR copied > 0))",
-                (ref,),
+                "(finished = 1 OR copied > 0)) "
+                "OR EXISTS (SELECT 1 FROM hashes WHERE ref = ?)",
+                (ref, ref),
             ).fetchone()
         return bool(found)
 
@@ -412,6 +427,79 @@ class State:
         with self._transaction():
             self._db.execute("DELETE FROM partitions WHERE ref = ?", (ref,))
             self._db.execute("DELETE FROM rejects WHERE ref = ?", (ref,))
+
+    def set_plan_hash(self, ref: str, digest: bytes) -> bool:
+        """Store the hash of the plan entry of `ref`.
+
+        Returns True when another hash was stored. The record hashes stay:
+        each one holds the plan hash it was written under, so none of them
+        matches under another plan.
+        """
+        with self._transaction():
+            row = self._db.execute(
+                "SELECT hash FROM plans WHERE ref = ?", (ref,)
+            ).fetchone()
+            self._db.execute(
+                "INSERT INTO plans (ref, hash) VALUES (?, ?) "
+                "ON CONFLICT(ref) DO UPDATE SET hash = excluded.hash",
+                (ref, digest),
+            )
+        return row is not None and bytes(row[0]) != digest
+
+    def store_plan_hash(self, ref: str, digest: bytes) -> None:
+        """Store `digest` when `ref` has no plan hash yet."""
+        with self._transaction():
+            self._db.execute(
+                "INSERT OR IGNORE INTO plans (ref, hash) VALUES (?, ?)", (ref, digest)
+            )
+
+    def delete_hashes(self, ref: str, source_ids: list[str]) -> int:
+        """Delete the hashes of `source_ids`; returns how many were stored."""
+        deleted = 0
+        with self._transaction():
+            for i in range(0, len(source_ids), BATCH_SIZE):
+                batch = source_ids[i : i + BATCH_SIZE]
+                marks = ",".join("?" * len(batch))
+                cursor = self._db.execute(
+                    f"DELETE FROM hashes WHERE ref = ? AND source_id IN ({marks})",
+                    (ref, *batch),
+                )
+                deleted += cursor.rowcount
+        return deleted
+
+    def rejected_among(self, ref: str, ids: list[str]) -> set[str]:
+        """The ids of `ids` that a stored reject of `ref` names.
+
+        A reject names the source id, or the uuid when the plan has no
+        source_id property.
+        """
+        found: set[str] = set()
+        with self._lock:
+            for i in range(0, len(ids), BATCH_SIZE):
+                batch = ids[i : i + BATCH_SIZE]
+                marks = ",".join("?" * len(batch))
+                rows = self._db.execute(
+                    f"SELECT source_id FROM rejects WHERE ref = ? "
+                    f"AND source_id IN ({marks})",
+                    (ref, *batch),
+                )
+                found.update(source_id for (source_id,) in rows)
+        return found
+
+    def invalidate_hashes(self, ref: str, source_ids: list[str]) -> None:
+        """Replace the stored hashes of `source_ids` by one that matches nothing.
+
+        The rows stay, so `has_progress` does not change.
+        """
+        with self._transaction():
+            for i in range(0, len(source_ids), BATCH_SIZE):
+                batch = source_ids[i : i + BATCH_SIZE]
+                marks = ",".join("?" * len(batch))
+                self._db.execute(
+                    f"UPDATE hashes SET hash = X'' WHERE ref = ? "
+                    f"AND source_id IN ({marks})",
+                    (ref, *batch),
+                )
 
     def record_hashes(self, ref: str, hashes: list[tuple[str, bytes]]) -> None:
         with self._transaction():

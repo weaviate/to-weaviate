@@ -37,6 +37,8 @@ from e2e import (
     weaviate_count,
     weaviate_delete_object,
     weaviate_exists,
+    weaviate_fetch,
+    weaviate_insert,
     weaviate_insert_object,
     weaviate_modules,
     weaviate_near_text,
@@ -78,6 +80,8 @@ __all__ = [
     "weaviate_count",
     "weaviate_delete_object",
     "weaviate_exists",
+    "weaviate_fetch",
+    "weaviate_insert",
     "weaviate_insert_object",
     "weaviate_modules",
     "weaviate_near_text",
@@ -128,6 +132,7 @@ SUITE_COLLECTIONS = [
     "Class",
     "Bulk",
     "Burst",
+    "Sync",
 ]
 
 

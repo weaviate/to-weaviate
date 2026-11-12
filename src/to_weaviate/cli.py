@@ -62,15 +62,22 @@ from to_weaviate.engine.check import (
     userinfo_only,
 )
 from to_weaviate.engine.copy import (
-    REJECTS_ARE_FINAL,
+    REJECTS_HINT,
     copy_collection,
     raise_if_compacted,
+)
+from to_weaviate.engine.sync import (
+    PRUNE_LIMIT_PERCENT,
+    SourceWriting,
+    SyncResult,
+    sync_collection,
 )
 from to_weaviate.engine.verify import (
     REPORT_MD,
     Check,
     check_line,
     diff_ids,
+    foreign_count,
     missing_target,
     remove_report,
     target_label,
@@ -132,7 +139,8 @@ from to_weaviate.state import (
     unwritable_reason,
 )
 from to_weaviate.target.connect import connect
-from to_weaviate.target.reader import TargetReader, WeaviateReader
+from to_weaviate.target.deleter import DeleteFailed, Deleter, WeaviateDeleter
+from to_weaviate.target.reader import SOURCE_ID, TargetReader, WeaviateReader
 from to_weaviate.target.schema import (
     USERINFO_TEXT,
     PlanMismatch,
@@ -153,6 +161,7 @@ SourceFactory = Callable[[ChromaSettings], Source]
 WriterFactory = Callable[[WeaviateSettings, str | None], Writer]
 ReaderFactory = Callable[[WeaviateSettings], TargetReader]
 SchemaFactory = Callable[[WeaviateSettings], Schema]
+DeleterFactory = Callable[[WeaviateSettings, str | None], Deleter]
 
 VectorsMode = Literal["keep", "embed", "both"]
 IndexType = Literal["default", "hnsw", "flat", "dynamic", "hfresh"]
@@ -226,7 +235,18 @@ ADD_PROPERTY_HINT = (
     "Weaviate refused to add the property; read its message and edit plan.yaml."
 )
 BATCH_HINT = "Fix the cause and run to-weaviate copy again. It resumes at this page."
-MISSING_TEXT = "missing in the collection; copy will add it"
+PRUNE_HINT = (
+    f"More than {PRUNE_LIMIT_PERCENT}% of the objects with a source_id have no "
+    "source record. Check that the records were deleted on purpose and that no "
+    "other migration directory or application writes objects with a source_id "
+    "to the collection. To delete them, run to-weaviate sync --prune --force."
+)
+SYNC_BATCH_HINT = "Fix the cause and run to-weaviate sync again."
+FOREIGN_HINT = (
+    "Copy into another collection or tenant, or, when these objects may be "
+    "deleted, run the same command with --yes."
+)
+MISSING_TEXT = "missing in the collection; copy and sync add it"
 # A part of a text in single or double quotes; a quote after a backslash is
 # part of it, as in a Python repr.
 _QUOTED = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
@@ -238,6 +258,7 @@ class _Factories:
     writer: WriterFactory
     reader: ReaderFactory
     schema: SchemaFactory
+    deleter: DeleterFactory
 
 
 def _short(text: str) -> str:
@@ -1029,7 +1050,7 @@ def _copy_lock(directory: Path) -> Iterator[None]:
     except Locked as exc:
         raise CliError(
             "usage",
-            f"Another to-weaviate copy uses {directory}.",
+            f"Another to-weaviate copy or sync uses {directory}.",
             "Wait for it to end, or use another --dir.",
         ) from exc
 
@@ -1074,14 +1095,43 @@ def _select(entries: list[CollectionPlan], names: list[str]) -> list[CollectionP
     return [e for e in entries if e.source.name in names or e.target.name in names]
 
 
-def _copy(
+@dataclass(frozen=True)
+class _Run:
+    """What a copy or a sync works on, once the plan and the target are checked."""
+
+    inspected: dict[str, SourceCollection]
+    entries: list[CollectionPlan]
+    warnings: list[Finding]
+    target_settings: WeaviateSettings
+    source: Source
+    writer: Writer
+    reader: TargetReader
+    schema: Schema
+    state: State
+    events: Events
+    targets: dict[str, Target]
+    added: list[dict[str, str]]
+
+
+@contextmanager
+def _writing(
     factories: _Factories,
     directory: Path,
     names: list[str],
     parallelism: int,
     consistency: Consistency | None,
     json_output: bool,
-) -> None:
+    command: str,
+    yes: bool,
+) -> Iterator[_Run]:
+    """The checks before a copy or a sync, then the state under `copy.lock`.
+
+    Raises the plan, source, provider-key, module and state errors, and
+    creates the target collections. The state is closed on exit. When a first
+    run meets objects that `sync --prune` would delete, it goes on only with
+    `yes` or a yes at the prompt of a terminal; else it raises
+    `foreign_objects` before it creates or writes anything.
+    """
     if not 1 <= parallelism <= MAX_PARALLELISM:
         raise CliError(
             "usage",
@@ -1129,75 +1179,343 @@ def _copy(
                 source_names,
                 directory,
             )
+            missing = {
+                name: schema.missing_properties(group)
+                for name, group in selected.items()
+            }
+            met: list[Finding] = []
+            for entry in entries:
+                if SOURCE_ID in missing[entry.target.name]:
+                    # No object holds it yet, and Weaviate refuses a query
+                    # for a property the collection does not have.
+                    continue
+                foreign = _foreign_objects(
+                    source, reader, state, entry, inspected, directory
+                )
+                if foreign is not None:
+                    _warning(entry.source.name)(foreign.message)
+                    met.append(foreign)
+            warnings.extend(met)
+            if met and not yes and not _confirmed(command):
+                shared = list(dict.fromkeys(f.collection for f in met))
+                place = ", ".join(shared)
+                verb = "holds" if len(shared) == 1 else "hold"
+                raise CliError(
+                    "foreign_objects",
+                    f"{place} {verb} objects that sync --prune would delete; "
+                    f"the {command} wrote nothing.",
+                    FOREIGN_HINT,
+                    fields=_findings_document([], warnings),
+                )
             added: list[dict[str, str]] = []
             for name, group in selected.items():
-                missing = schema.missing_properties(group)
                 schema.ensure(group)
-                for prop in missing:
+                for prop in missing[name]:
                     _info(json_output, f"Added the property {prop} to {name}")
                     added.append({"collection": name, "property": prop})
-            events = Events(directory / EVENTS_FILE)
-            rereads: dict[str, int] = {}
-            for entry in entries:
-                ref = entry.source.ref
-                state.set_target(ref, targets[ref])
-                trained = _needs_quantizer_update(entry)
-                if trained:
-                    state.expect_quantizer_update(ref)
-                else:
-                    # A row from a run with an earlier plan would keep the
-                    # entry not done.
-                    state.quantizers_updated(ref)
-                _info(
-                    json_output, f"Copying {entry.source.name} to {entry.target.name}"
-                )
-                result = copy_collection(
-                    source,
-                    writer,
-                    state,
-                    events,
-                    entry,
-                    inspected[ref],
-                    parallelism,
-                    warn=_warning(entry.source.name),
-                    waiting=_waiting(json_output, entry.source.name),
-                )
-                if result.reread_from is not None:
-                    rereads[ref] = result.reread_from
-                if trained:
-                    _info(
-                        json_output,
-                        f"Enabling the trained quantizers of {entry.target.name}",
-                    )
-                    schema.enable_trained_quantizers(entry)
-                    state.quantizers_updated(ref)
-                _info(
-                    json_output,
-                    f"Copied {entry.source.name}: {_plural(result.copied, 'record')}, "
-                    f"{_plural(result.rejects, 'reject')}",
-                )
-            progress = {p.ref: p for p in state.progress()}
+            yield _Run(
+                inspected,
+                entries,
+                warnings,
+                target_settings,
+                source,
+                writer,
+                reader,
+                schema,
+                state,
+                Events(directory / EVENTS_FILE),
+                targets,
+                added,
+            )
         finally:
             state.close()
-    rows = _rows(entries, progress)
+
+
+def _interactive() -> bool:
+    return sys.stdin.isatty()
+
+
+def _confirmed(command: str) -> bool:
+    """Whether the user says yes at a prompt; False without a terminal."""
+    if not _interactive():
+        return False
+    try:
+        return typer.confirm(f"Go on with the {command}?", default=False, err=True)
+    except typer.Abort:
+        return False
+
+
+def _foreign_objects(
+    source: Source,
+    reader: TargetReader,
+    state: State,
+    entry: CollectionPlan,
+    inspected: dict[str, SourceCollection],
+    directory: Path,
+) -> Finding | None:
+    """A warning when the first run of `entry` meets objects `--prune` would delete.
+
+    Only a first run into an existing collection or tenant lists the ids: the
+    objects of later runs are this directory's own. A tenant that is not
+    active is skipped: Weaviate reads none of its objects, and the first
+    write reports the tenant.
+    """
+    ref = entry.source.ref
+    if state.has_progress(ref) or not reader.exists(entry) or not reader.active(entry):
+        return None
+    count = foreign_count(source, reader, entry, inspected[ref], directory)
+    if not count:
+        return None
+    name = entry.source.name
+    verb = "has" if count == 1 else "have"
+    return Finding(
+        "foreign_objects",
+        entry.target.name,
+        f"{_plural(count, 'object')} {verb} a source_id that {name} does not hold; "
+        "sync --prune deletes them. Unless their records were deleted from "
+        f"{name}, copy into another collection or tenant.",
+    )
+
+
+def _begin_entry(run: _Run, entry: CollectionPlan) -> bool:
+    """Record the target of `entry`; True when its quantizers need an update."""
+    ref = entry.source.ref
+    run.state.set_target(ref, run.targets[ref])
+    trained = _needs_quantizer_update(entry)
+    if trained:
+        run.state.expect_quantizer_update(ref)
+    else:
+        # A row from a run with an earlier plan would keep the entry not done.
+        run.state.quantizers_updated(ref)
+    return trained
+
+
+def _enable_quantizers(run: _Run, entry: CollectionPlan, json_output: bool) -> None:
+    _info(json_output, f"Enabling the trained quantizers of {entry.target.name}")
+    run.schema.enable_trained_quantizers(entry)
+    run.state.quantizers_updated(entry.source.ref)
+
+
+def _rejects_error(
+    rejects: int, directory: Path, document: dict[str, Any], text: str
+) -> CliError:
+    return CliError(
+        "rejects",
+        f"{_plural(rejects, 'record')} rejected.",
+        f"See {directory / REJECTS_FILE} for each record and the reason. "
+        f"{REJECTS_HINT}",
+        fields=document,
+        text=text,
+    )
+
+
+def _copy(
+    factories: _Factories,
+    directory: Path,
+    names: list[str],
+    parallelism: int,
+    consistency: Consistency | None,
+    json_output: bool,
+    yes: bool = False,
+) -> None:
+    with _writing(
+        factories, directory, names, parallelism, consistency, json_output, "copy", yes
+    ) as run:
+        rereads: dict[str, int] = {}
+        for entry in run.entries:
+            ref = entry.source.ref
+            trained = _begin_entry(run, entry)
+            _info(json_output, f"Copying {entry.source.name} to {entry.target.name}")
+            result = copy_collection(
+                run.source,
+                run.writer,
+                run.state,
+                run.events,
+                entry,
+                run.inspected[ref],
+                parallelism,
+                warn=_warning(entry.source.name),
+                waiting=_waiting(json_output, entry.source.name),
+            )
+            if result.reread_from is not None:
+                rereads[ref] = result.reread_from
+            if trained:
+                _enable_quantizers(run, entry, json_output)
+            _info(
+                json_output,
+                f"Copied {entry.source.name}: {_plural(result.copied, 'record')}, "
+                f"{_plural(result.rejects, 'reject')}",
+            )
+        progress = {p.ref: p for p in run.state.progress()}
+    rows = _rows(run.entries, progress)
     for row in rows:
         if row["ref"] in rereads:
             row["reread_from"] = rereads[row["ref"]]
-    document, text = _progress_output(entries, rows)
-    document["added_properties"] = added
-    document["warnings"] = _findings_document([], warnings)["warnings"]
-    text = "\n".join([*_findings_text([], warnings), text])
+    document, text = _progress_output(run.entries, rows)
+    document["added_properties"] = run.added
+    document["warnings"] = _findings_document([], run.warnings)["warnings"]
+    text = "\n".join([*_findings_text([], run.warnings), text])
     rejects = sum(row["rejects"] for row in rows)
     if rejects:
-        raise CliError(
-            "rejects",
-            f"{_plural(rejects, 'record')} rejected.",
-            f"See {directory / REJECTS_FILE} for each record and the reason. "
-            f"{REJECTS_ARE_FINAL}",
-            fields=document,
-            text=text,
-        )
+        raise _rejects_error(rejects, directory, document, text)
     _emit_success(json_output, {"status": "success", **document}, text)
+
+
+def _sync_output(
+    entries: list[CollectionPlan], results: dict[str, SyncResult], prune: bool
+) -> tuple[dict[str, Any], str]:
+    rows = []
+    lines = []
+    for entry in entries:
+        result = results[entry.source.ref]
+        place = target_label(entry.target.name, entry.target.tenant)
+        rows.append(
+            {
+                "ref": entry.source.ref,
+                "source": entry.source.name,
+                "target": entry.target.name,
+                "tenant": entry.target.tenant,
+                **{
+                    key: getattr(result, key)
+                    for key in (
+                        "copied",
+                        "unchanged",
+                        "rejects",
+                        "stale",
+                        "deleted",
+                        "plan_changed",
+                        "prune_refused",
+                    )
+                },
+            }
+        )
+        refused = ", prune refused" if result.prune_refused else ""
+        lines.append(
+            f"{entry.source.name} -> {place}: copied {result.copied}, unchanged "
+            f"{result.unchanged}, rejects {result.rejects}, stale {result.stale}, "
+            f"deleted {result.deleted}{refused}"
+        )
+    totals = {
+        key: sum(getattr(r, key) for r in results.values())
+        for key in ("copied", "unchanged", "rejects", "stale", "deleted")
+    }
+    lines.append(
+        f"Total: copied {totals['copied']}, unchanged {totals['unchanged']}, "
+        f"rejects {totals['rejects']}, stale {totals['stale']}, "
+        f"deleted {totals['deleted']}"
+    )
+    if not prune and totals["stale"]:
+        lines.append(
+            "Run to-weaviate sync --prune to delete the "
+            f"{_plural(totals['stale'], 'stale object')}."
+        )
+    return {"prune": prune, "collections": rows}, "\n".join(lines)
+
+
+def _sync(
+    factories: _Factories,
+    directory: Path,
+    names: list[str],
+    parallelism: int,
+    consistency: Consistency | None,
+    prune: bool,
+    force: bool,
+    json_output: bool,
+    yes: bool = False,
+) -> None:
+    if force and not prune:
+        raise CliError(
+            "usage", "--force needs --prune.", "Run to-weaviate sync --prune --force."
+        )
+    with _writing(
+        factories, directory, names, parallelism, consistency, json_output, "sync", yes
+    ) as run:
+        deleter = factories.deleter(run.target_settings, consistency)
+        results: dict[str, SyncResult] = {}
+        for entry in run.entries:
+            ref = entry.source.ref
+            trained = _begin_entry(run, entry)
+            place = target_label(entry.target.name, entry.target.tenant)
+            _info(json_output, f"Syncing {entry.source.name} to {place}")
+            try:
+                result = sync_collection(
+                    run.source,
+                    run.writer,
+                    run.reader,
+                    deleter,
+                    run.state,
+                    run.events,
+                    entry,
+                    run.inspected[ref],
+                    parallelism,
+                    prune,
+                    force,
+                    directory,
+                    warn=_warning(entry.source.name),
+                    waiting=_waiting(json_output, entry.source.name),
+                )
+            except (SourceWriting, DeleteFailed, BatchRefused) as exc:
+                raise _sync_error(exc, entry, force) from exc
+            if trained:
+                _enable_quantizers(run, entry, json_output)
+            _info(
+                json_output,
+                f"Synced {entry.source.name} to {place}: "
+                f"{_plural(result.copied, 'record')} written, {result.unchanged} "
+                f"unchanged, {_plural(result.rejects, 'reject')}, {result.stale} "
+                f"stale, {result.deleted} deleted",
+            )
+            results[ref] = result
+    document, text = _sync_output(run.entries, results, prune)
+    document["added_properties"] = run.added
+    document["warnings"] = _findings_document([], run.warnings)["warnings"]
+    text = "\n".join([*_findings_text([], run.warnings), text])
+    refused = [
+        target_label(e.target.name, e.target.tenant)
+        for e in run.entries
+        if results[e.source.ref].prune_refused
+    ]
+    limit = (
+        f"Stale objects above {PRUNE_LIMIT_PERCENT}% in {', '.join(refused)}; "
+        "nothing was deleted there."
+    )
+    rejects = sum(r.rejects for r in results.values())
+    if rejects:
+        error = _rejects_error(rejects, directory, document, text)
+        if refused:
+            error.message = f"{error.message} {limit}"
+            error.hint = f"{error.hint} {PRUNE_HINT}"
+        raise error
+    if refused:
+        raise CliError("prune_limit", limit, PRUNE_HINT, fields=document, text=text)
+    _emit_success(json_output, {"status": "success", **document}, text)
+
+
+def _sync_error(
+    exc: SourceWriting | DeleteFailed | BatchRefused, entry: CollectionPlan, force: bool
+) -> CliError:
+    command = (
+        "to-weaviate sync --prune --force" if force else "to-weaviate sync --prune"
+    )
+    if isinstance(exc, SourceWriting):
+        return CliError(
+            "source_writing",
+            f"{exc.collection} changed while sync listed its ids: "
+            f"{_plural(exc.before, 'record')} before, {exc.listed} listed, "
+            f"{exc.after} after.",
+            f"Stop the writes to the source, then run {command} again.",
+            fields={"collection": exc.collection},
+        )
+    if isinstance(exc, DeleteFailed):
+        place = target_label(entry.target.name, entry.target.tenant)
+        return CliError(
+            "delete_failed",
+            f"Weaviate did not delete {exc.failed} of "
+            f"{_plural(exc.matched, 'object')} of {entry.source.name} in {place}.",
+            f"Run {command} again.",
+            fields={"collection": entry.source.name},
+        )
+    return CliError("target_unreachable", str(exc), SYNC_BATCH_HINT)
 
 
 def _status(directory: Path, json_output: bool) -> None:
@@ -1297,6 +1615,32 @@ NamesOption = Annotated[
     list[str] | None,
     typer.Option("--collection", metavar="NAME", help="Collection name. Repeatable."),
 ]
+ParallelismOption = Annotated[
+    int,
+    typer.Option(
+        "--parallelism",
+        metavar="N",
+        help=f"Reads per collection, 1 to {MAX_PARALLELISM}.",
+    ),
+]
+ConsistencyOption = Annotated[
+    Consistency | None,
+    typer.Option("--consistency", help="Write consistency level."),
+]
+YesOption = Annotated[
+    bool,
+    typer.Option(
+        "--yes",
+        help="Go on without asking when the target holds objects that "
+        "sync --prune would delete.",
+    ),
+]
+SyncConsistencyOption = Annotated[
+    Consistency | None,
+    typer.Option(
+        "--consistency", help="Consistency level of the writes and the deletions."
+    ),
+]
 
 
 def build_app(
@@ -1304,9 +1648,10 @@ def build_app(
     writer_factory: WriterFactory,
     reader_factory: ReaderFactory,
     schema_factory: SchemaFactory,
+    deleter_factory: DeleterFactory,
 ) -> typer.Typer:
     factories = _Factories(
-        source_factory, writer_factory, reader_factory, schema_factory
+        source_factory, writer_factory, reader_factory, schema_factory, deleter_factory
     )
     # Locals can hold values read from the environment, so tracebacks omit them.
     app = typer.Typer(
@@ -1401,18 +1746,9 @@ def build_app(
     @app.command("copy")
     def copy(
         collection: NamesOption = None,
-        parallelism: Annotated[
-            int,
-            typer.Option(
-                "--parallelism",
-                metavar="N",
-                help=f"Reads per collection, 1 to {MAX_PARALLELISM}.",
-            ),
-        ] = DEFAULT_PARALLELISM,
-        consistency: Annotated[
-            Consistency | None,
-            typer.Option("--consistency", help="Write consistency level."),
-        ] = None,
+        parallelism: ParallelismOption = DEFAULT_PARALLELISM,
+        consistency: ConsistencyOption = None,
+        yes: YesOption = False,
         directory: DirOption = DEFAULT_DIR,
         json_output: JsonOption = False,
     ) -> None:
@@ -1425,6 +1761,47 @@ def build_app(
                 parallelism,
                 consistency,
                 json_output,
+                yes,
+            )
+
+    @app.command("sync")
+    def sync(
+        collection: NamesOption = None,
+        parallelism: ParallelismOption = DEFAULT_PARALLELISM,
+        consistency: SyncConsistencyOption = None,
+        prune: Annotated[
+            bool,
+            typer.Option(
+                "--prune", help="Delete the objects whose source record is gone."
+            ),
+        ] = False,
+        force: Annotated[
+            bool,
+            typer.Option(
+                "--force",
+                help=f"With --prune, prune a collection with more than "
+                f"{PRUNE_LIMIT_PERCENT}% stale objects.",
+            ),
+        ] = False,
+        yes: YesOption = False,
+        directory: DirOption = DEFAULT_DIR,
+        json_output: JsonOption = False,
+    ) -> None:
+        """Read the source again and write the new and changed records.
+
+        --prune deletes the objects whose source record is gone.
+        """
+        with _handled(json_output):
+            _sync(
+                factories,
+                directory,
+                collection or [],
+                parallelism,
+                consistency,
+                prune,
+                force,
+                json_output,
+                yes,
             )
 
     @app.command("status")
@@ -1464,7 +1841,7 @@ _client: weaviate.WeaviateClient | None = None
 
 
 def _weaviate_client(settings: WeaviateSettings) -> weaviate.WeaviateClient:
-    """One client per process, shared by the writer, reader and schema."""
+    """One client per process, shared by the writer, reader, schema and deleter."""
     global _client
     if _client is None:
         _client = connect(settings)
@@ -1491,4 +1868,14 @@ def _weaviate_schema(settings: WeaviateSettings) -> Schema:
     return WeaviateSchema(_weaviate_client(settings))
 
 
-app = build_app(_chroma_source, _weaviate_writer, _weaviate_reader, _weaviate_schema)
+def _weaviate_deleter(settings: WeaviateSettings, consistency: str | None) -> Deleter:
+    return WeaviateDeleter(_weaviate_client(settings), consistency)
+
+
+app = build_app(
+    _chroma_source,
+    _weaviate_writer,
+    _weaviate_reader,
+    _weaviate_schema,
+    _weaviate_deleter,
+)

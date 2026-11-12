@@ -7,7 +7,13 @@ import pytest
 from fakes import FakeSource, FakeWriter
 
 from to_weaviate import plan as p
-from to_weaviate.engine.copy import CopyResult, content_hash, copy_collection
+from to_weaviate.engine.copy import (
+    CopyResult,
+    content_hash,
+    copy_collection,
+    plan_hash,
+    record_hash,
+)
 from to_weaviate.events import Events
 from to_weaviate.ids import to_uuid
 from to_weaviate.sources.base import (
@@ -48,6 +54,17 @@ ENTRY = p.CollectionPlan(
         ],
     ),
 )
+# ENTRY without the property n.
+DROPPED = ENTRY.model_copy(
+    update={
+        "target": ENTRY.target.model_copy(
+            update={
+                "properties": ENTRY.target.properties[:-1],
+                "dropped": [p.DroppedKey(source_key="n", reason="test")],
+            }
+        )
+    }
+)
 BASE = Record("a", [0.1, 0.2], "dóc", "file://x", {"k": 1, "j": "v"})
 
 
@@ -71,7 +88,13 @@ def events(tmp_path):
 
 
 def hashes(records: list[Record]) -> list[tuple[str, bytes]]:
-    return [(r.id, content_hash(r)) for r in records]
+    return [(r.id, record_hash(plan_hash(ENTRY), r)) for r in records]
+
+
+def test_record_hash_is_blake2b_of_the_plan_hash_and_the_content_hash():
+    plan = plan_hash(ENTRY)
+    expected = hashlib.blake2b(plan + content_hash(BASE), digest_size=16).digest()
+    assert record_hash(plan, BASE) == expected
 
 
 def test_content_hash_is_blake2b_of_the_json_parts():
@@ -117,12 +140,14 @@ def test_resumes_after_failure(src, state, events):
     writer = FakeWriter(fail_on_call=3)
     with pytest.raises(RuntimeError, match="call 3$"):
         copy_collection(src, writer, state, events, ENTRY, C, 2)
+    # The other worker can finish a page after the failure; it stays copied.
+    checkpointed = state.progress()[0].copied
     writer.fail_on_call = None
     result = copy_collection(src, writer, state, events, ENTRY, C, 2)
     assert len(writer.objects) == 1000 and max(writer.writes_per_uuid.values()) <= 2
     # Only the page of the failed call is written again.
     assert sum(writer.writes_per_uuid.values()) == 1100
-    assert result == CopyResult(copied=1000, rejects=0)
+    assert result == CopyResult(copied=1000, rejects=0, written=1000 - checkpointed)
 
 
 def test_second_run_reads_nothing(src, state, events):
@@ -130,7 +155,8 @@ def test_second_run_reads_nothing(src, state, events):
     reads = src.read_calls
     second = copy_collection(src, FakeWriter(), state, events, ENTRY, C, 2)
     assert src.read_calls == reads
-    assert second == first == CopyResult(copied=1000, rejects=0)
+    assert first == CopyResult(copied=1000, rejects=0, written=1000)
+    assert second == CopyResult(copied=1000, rejects=0)
 
 
 def test_rejects_are_recorded(src, state, events):
@@ -147,7 +173,7 @@ def test_conversion_rejects_are_recorded(state, events):
     records[10] = replace(records[10], vector=None)
     writer = FakeWriter()
     result = copy_collection(FakeSource(records), writer, state, events, ENTRY, C, 2)
-    assert result == CopyResult(copied=999, rejects=1)
+    assert result == CopyResult(copied=999, rejects=1, written=999)
     assert to_uuid("id-10") not in writer.objects
 
 
@@ -157,7 +183,7 @@ def test_vector_value_that_is_not_a_number_is_a_reject(state, events, tmp_path, 
     records[10] = replace(records[10], vector=[1.0, value])
     writer = FakeWriter()
     result = copy_collection(FakeSource(records), writer, state, events, ENTRY, C, 2)
-    assert result == CopyResult(copied=999, rejects=1)
+    assert result == CopyResult(copied=999, rejects=1, written=999)
     assert to_uuid("id-10") not in writer.objects
     reject = json.loads((tmp_path / "rejects.jsonl").read_text())
     assert (reject["source_id"], reject["reason"]) == (
@@ -181,7 +207,8 @@ def test_run_after_a_tail_reads_nothing_when_the_source_did_not_grow(
     reads = src.read_calls
     second = copy_collection(src, FakeWriter(), state, events, ENTRY, C, 2)
     assert src.read_calls == reads
-    assert second == first == CopyResult(copied=1050, rejects=0)
+    assert first == CopyResult(copied=1050, rejects=0, written=1050)
+    assert second == CopyResult(copied=1050, rejects=0)
 
 
 def test_each_run_copies_the_records_added_since_the_last_run(src, state, events):
@@ -192,7 +219,7 @@ def test_each_run_copies_the_records_added_since_the_last_run(src, state, events
     copy_collection(src, writer, state, events, ENTRY, C, 2)
     src.records.extend(make_records(50, start=1100))
     result = copy_collection(src, writer, state, events, ENTRY, C, 2)
-    assert result == CopyResult(copied=1150, rejects=0)
+    assert result == CopyResult(copied=1150, rejects=0, written=50)
     assert len(writer.objects) == 1150
     assert set(writer.writes_per_uuid.values()) == {1}
     assert state.progress()[0].total == 1150
@@ -425,7 +452,7 @@ def test_a_copy_in_progress_in_an_older_state_resumes_without_a_reread(
     writer = FakeWriter()
     result = copy_collection(src, writer, state, events, ENTRY, C, 2)
     assert src.read_calls == 3 and len(writer.objects) == 300
-    assert result == CopyResult(copied=1000, rejects=0)
+    assert result == CopyResult(copied=1000, rejects=0, written=300)
     assert _warnings(tmp_path) == []
 
 
@@ -469,6 +496,72 @@ def test_skip_unchanged_writes_only_changed_records(src, state, events):
     copy_collection(src, writer, state, events, ENTRY, C, 2, skip_unchanged=True)
     assert list(writer.objects) == [to_uuid("id-5")]
     assert writer.objects[to_uuid("id-5")].properties["document"] == "changed"
+
+
+def test_skip_unchanged_counts_the_skipped_records_as_copied(src, state, events):
+    copy_collection(src, FakeWriter(), state, events, ENTRY, C, 2)
+    src.records[5] = replace(src.records[5], document="changed")
+    result = copy_collection(
+        src, FakeWriter(), state, events, ENTRY, C, 2, skip_unchanged=True, fresh=True
+    )
+    assert (result.copied, result.written) == (1000, 1)
+    # status reads this count, so a sync leaves every record counted.
+    assert state.progress()[0].copied == 1000
+
+
+def test_a_copy_skips_no_record(src, state, events):
+    result = copy_collection(src, FakeWriter(), state, events, ENTRY, C, 2)
+    assert result.written == 1000
+
+
+def test_record_hashes_follow_the_plan_entry(src, state, events):
+    copy_collection(src, FakeWriter(), state, events, ENTRY, C, 2)
+    assert state.unchanged(C.ref, hashes(src.records[:2])) == {"id-0", "id-1"}
+    other = [(r.id, record_hash(plan_hash(DROPPED), r)) for r in src.records[:2]]
+    assert state.unchanged(C.ref, other) == set()
+
+
+def test_a_copy_keeps_the_plan_hash_that_is_stored(src, state, events):
+    copy_collection(src, FakeWriter(), state, events, ENTRY, C, 2)
+    copy_collection(src, FakeWriter(), state, events, DROPPED, C, 2)
+    assert state.set_plan_hash(C.ref, plan_hash(ENTRY)) is False
+
+
+def test_plan_hash_ignores_the_reason_of_a_dropped_key():
+    def dropping(reason: str) -> p.CollectionPlan:
+        return DROPPED.model_copy(
+            update={
+                "target": DROPPED.target.model_copy(
+                    update={"dropped": [p.DroppedKey(source_key="n", reason=reason)]}
+                )
+            }
+        )
+
+    assert plan_hash(dropping("one reason")) == plan_hash(dropping("another"))
+
+
+def test_plan_hash_ignores_a_field_set_to_its_default():
+    explicit = ENTRY.target.model_copy(update={"tenant": None, "dropped": []})
+    assert plan_hash(ENTRY.model_copy(update={"target": explicit})) == plan_hash(ENTRY)
+
+
+def test_plan_hash_follows_the_target_and_not_the_source():
+    other_source = ENTRY.model_copy(
+        update={"source": ENTRY.source.model_copy(update={"count": 5})}
+    )
+    assert plan_hash(other_source) == plan_hash(ENTRY)
+    assert len(plan_hash(ENTRY)) == 16
+    dropped = ENTRY.model_copy(
+        update={
+            "target": ENTRY.target.model_copy(
+                update={
+                    "properties": ENTRY.target.properties[:-1],
+                    "dropped": [p.DroppedKey(source_key="n", reason="test")],
+                }
+            )
+        }
+    )
+    assert plan_hash(dropped) != plan_hash(ENTRY)
 
 
 def test_emits_collection_started_and_finished(src, state, events, tmp_path):

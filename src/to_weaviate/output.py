@@ -30,6 +30,13 @@ ERROR_EXIT: dict[str, int] = {
     # the report or rejects.jsonl that exit 1 points at. Not 2: no input must
     # change.
     "source_compacting": 4,
+    # The source is still written to; sync --prune after the writes stop works.
+    "source_writing": 4,
+    # The target deleted only some objects; sync --prune again deletes the rest.
+    "delete_failed": 4,
+    # The target holds objects that sync --prune would delete, and nobody
+    # confirmed the run: the user decides, then runs it again with --yes.
+    "foreign_objects": 2,
     "internal_error": 5,
 }
 

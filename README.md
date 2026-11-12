@@ -9,7 +9,7 @@
 metadata, resumes where it stopped, and checks the copy against the source.
 It only reads from the source.
 
-![to-weaviate inspect reads a Chroma collection of 5,000 records with 1536-dimension vectors, the start of plan.yaml shows the source and target, then check, copy and verify run and verify prints PASS for the count, ids and records checks](docs/demo/demo.gif)
+![to-weaviate inspect reads a Chroma collection of 5,000 records with 1536-dimension vectors, the start of plan.yaml shows the source and target, then check and copy run, sync --prune writes the 10 records that changed since the copy and deletes the 5 whose source record is gone, and verify prints PASS for the count, ids and records checks](docs/demo/demo.gif)
 
 The Weaviate team maintains it.
 
@@ -25,11 +25,13 @@ To ask for another source, [open an issue](https://github.com/weaviate/to-weavia
 
 - **Read-only on the source.** No command writes to it or deletes from it.
 - **A plan you review first.** `inspect` drafts `plan.yaml`; nothing reaches
-  Weaviate until you run `copy`.
+  Weaviate until you run `copy` or `sync`.
 - **Your vectors or new ones.** Keep the source vectors, or let a Weaviate
   vectorizer embed the text.
 - **Resumable.** A rerun of `copy` continues at the page where the last run
   stopped, and copies the records added since.
+- **A final sync.** `sync` writes the records that changed since the copy;
+  `sync --prune` deletes the objects whose source record is gone.
 - **No duplicates.** Each object's UUID comes from its source id.
 - **Verified.** `verify` compares counts, ids, and a sample of records with
   their vectors.
@@ -55,15 +57,22 @@ uvx --from git+https://github.com/weaviate/to-weaviate to-weaviate --help
 
 ```mermaid
 flowchart LR
-    inspect["inspect #60;source#62;"] --> review["review plan.yaml"] --> check --> copy --> verify
+    inspect["inspect #60;source#62;"] --> review["review plan.yaml"] --> check --> copy --> sync["sync --prune"] --> verify
     copy -. "run again to resume" .-> copy
 ```
 
 1. `to-weaviate inspect <source>` reads the source and writes a draft `plan.yaml`.
 2. You review the plan and edit names, types or vector settings.
 3. `to-weaviate check` validates the plan against Weaviate. It creates nothing.
-4. `to-weaviate copy` creates the collections and copies the records.
-5. `to-weaviate verify` compares Weaviate with the source and writes `report.md`.
+4. `to-weaviate copy` creates the collections and copies the records. Some
+   sources need the writes to them paused while `copy` and `sync` run; the
+   "Writes during a copy" section of each [source guide](docs/sources/README.md)
+   says which.
+5. Stop the writes to the source and run `to-weaviate sync --prune`. It
+   writes the records that changed since the copy and deletes the objects
+   whose source record is gone.
+6. `to-weaviate verify` compares Weaviate with the source and writes
+   `report.md`. Then switch your application to Weaviate.
 
 `to-weaviate status` shows the copy progress at any time and needs no
 credentials. Every command uses one migration directory, `./.to-weaviate`
@@ -136,7 +145,7 @@ collections:
 
 ### Configure Weaviate
 
-`check`, `copy` and `verify` also need the Weaviate settings. For a Weaviate
+`check`, `copy`, `sync` and `verify` also need the Weaviate settings. For a Weaviate
 server on your machine, add:
 
 ```dotenv
@@ -152,7 +161,7 @@ Weaviate Cloud cluster, set `WEAVIATE_URL` to the cluster URL and
 `WEAVIATE_GRPC_URL` unset. [Weaviate target](docs/weaviate.md) has the
 details.
 
-### Check, copy and verify
+### Check and copy
 
 ```console
 $ to-weaviate check
@@ -164,6 +173,25 @@ Copying support-articles to Support_articles
 Copied support-articles: 5000 records, 0 rejects
 support-articles -> Support_articles: copied 5000 of 5000, rejects 0, done
 Total: 5000 records
+```
+
+Some sources need the writes to them paused while `copy` and `sync` run; the
+"Writes during a copy" section of each [source guide](docs/sources/README.md)
+says which.
+
+### Sync, verify and switch
+
+Stop the writes to the source. `sync --prune` then writes the records that
+are new or changed since the copy and deletes the objects whose source
+record is gone. Here the source gained 5 records, 5 changed and 5 were
+deleted after the copy:
+
+```console
+$ to-weaviate sync --prune
+Syncing support-articles to Support_articles
+Synced support-articles to Support_articles: 10 records written, 4990 unchanged, 0 rejects, 5 stale, 5 deleted
+support-articles -> Support_articles: copied 10, unchanged 4990, rejects 0, stale 5, deleted 5
+Total: copied 10, unchanged 4990, rejects 0, stale 5, deleted 5
 
 $ to-weaviate verify
 Verifying support-articles in Support_articles
@@ -172,8 +200,11 @@ PASS Support_articles ids: missing 0, extra 0
 PASS Support_articles records: sampled 300, compared 300, rejects skipped 0, differing 0
 ```
 
-With both servers on the machine that ran the tool, `copy` took 4.8 s and
-`verify` took 1.4 s.
+Now switch your application to Weaviate. Do not run `sync` against this
+target afterwards: the source no longer holds the current data.
+
+With both servers on the machine that ran the tool, `copy` took 4.3 s,
+`sync --prune` 4.2 s and `verify` 1.0 s.
 
 ## Commands
 
@@ -182,6 +213,7 @@ With both servers on the machine that ran the tool, `copy` took 4.8 s and
 | `inspect <source>` | Reads the source collections and writes `inspect.json` and a draft `plan.yaml`. |
 | `check` | Validates `plan.yaml` against Weaviate: names, types, vectorizer modules, provider keys, existing collections. Creates nothing. |
 | `copy` | Creates the collections and copies the records. Run it again to resume or to copy new records. |
+| `sync` | Writes the records that are new or changed since the copy. With `--prune`, deletes the objects whose source record is gone. |
 | `verify` | Compares counts, ids and a sample of records, and writes `report.md` and `report.json`. |
 | `status` | Shows the progress of each collection from the migration directory. |
 
@@ -192,10 +224,10 @@ JSON document. The exit code names the class of failure, with and without
 | Exit code | Meaning |
 |---|---|
 | 0 | Success |
-| 1 | Rejected records or a failed verification |
-| 2 | A usage, plan, state or directory error |
+| 1 | Rejected records, a failed verification, or stale objects above 10% that `sync --prune` left alone |
+| 2 | A usage, plan, state or directory error, or an unconfirmed first run into a collection that holds objects `sync --prune` would delete |
 | 3 | A missing or refused credential |
-| 4 | An unreachable server, or a source that is compacting |
+| 4 | An unreachable server, a source that is compacting or still written to, or a deletion Weaviate did only partly |
 | 5 | An internal error |
 
 [Commands](docs/commands.md#exit-codes) lists every error code.
@@ -204,7 +236,7 @@ JSON document. The exit code names the class of failure, with and without
 
 | Page | Contents |
 |---|---|
-| [Commands](docs/commands.md) | The options every source shares, the migration directory, resuming, rejects, JSON output, error codes |
+| [Commands](docs/commands.md) | The options every source shares, the migration directory, resuming, sync and the cutover, rejects, JSON output, error codes |
 | [The plan file](docs/plan-file.md) | The fields of `plan.yaml`, the edits it allows, vector modes, index and quantizer settings |
 | [Weaviate target](docs/weaviate.md) | `WEAVIATE_*` settings, Weaviate Cloud and self-hosted servers, vectorizer keys |
 | [Sources](docs/sources/README.md) | One guide per source: settings, options, data mapping, limits |

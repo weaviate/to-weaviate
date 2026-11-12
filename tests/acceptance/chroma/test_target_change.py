@@ -41,5 +41,5 @@ def test_a_changed_target_and_a_held_lock_stop_copy(seeded, tmp_path):
     with exclusive_lock(tmp_path / "copy.lock"):
         r = run(["copy"], tmp_path)
     assert r.exit_code == 2 and r.data["code"] == "usage", r
-    assert r.data["message"] == f"Another to-weaviate copy uses {tmp_path}."
+    assert r.data["message"] == f"Another to-weaviate copy or sync uses {tmp_path}."
     assert _copied(tmp_path) == 10

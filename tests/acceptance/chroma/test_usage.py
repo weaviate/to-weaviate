@@ -1,6 +1,5 @@
 import json
 import os
-import shutil
 
 from chroma.seed import (
     add_to_tiny_l2,
@@ -79,35 +78,32 @@ def test_text_mode_prints_lines_and_the_error_on_stderr(seeded, tmp_path):
     ]
 
 
-def test_a_rejected_record_is_copied_from_a_new_directory(seeded, tmp_path):
-    first, second = tmp_path / "first", tmp_path / "second"
-    first.mkdir()
-    second.mkdir()
-    r = run(TINY, first)
+def test_a_rejected_record_is_written_by_sync_once_the_plan_is_fixed(seeded, tmp_path):
+    r = run(TINY, tmp_path)
     assert r.exit_code == 0, r
     added = extra_tiny_l2_ids(10, 1)
     try:
         # A record added after the inspection holds a key that plan.yaml lacks.
         add_to_tiny_l2(10, 1, {"note": "added later"})
-        r = run(["copy"], first)
+        r = run(["copy"], tmp_path)
         assert r.exit_code == 1 and r.data["code"] == "rejects", r
-        assert "Rejects are final for this directory." in r.data["hint"], r
-        plan = read_plan(first)
+        assert "then to-weaviate sync writes the record" in r.data["hint"], r
+        plan = read_plan(tmp_path)
         plan["collections"][0]["target"]["properties"].append(NOTE)
-        write_plan(first, plan)
+        write_plan(tmp_path, plan)
         # The run adds the property and reads no page again.
-        r = run(["copy"], first)
+        r = run(["copy"], tmp_path)
         assert r.exit_code == 1 and r.data["collections"][0]["rejects"] == 1, r
         assert r.data["added_properties"] == [
             {"collection": "Tiny_l2", "property": "note"}
         ], r
-        # The path that the hint gives.
-        for name in ("plan.yaml", "inspect.json"):
-            shutil.copy(first / name, second / name)
-        r = run(["copy"], second)
+        # The path that the hint gives. The plan entry changed, so every
+        # record is written again.
+        r = run(["sync"], tmp_path)
         assert r.exit_code == 0 and r.data["status"] == "success", r
-        assert r.data["collections"][0]["copied"] == 11, r
-        r = run(["verify"], second)
+        row = r.data["collections"][0]
+        assert (row["copied"], row["rejects"], row["plan_changed"]) == (11, 0, True), r
+        r = run(["verify"], tmp_path)
         assert r.exit_code == 0 and r.data["status"] == "success", r
         found = weaviate_by_source_id("Tiny_l2", added[0])
         assert found is not None and found.properties["note"] == "added later"

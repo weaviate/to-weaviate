@@ -5,6 +5,7 @@ from typing import Any, Protocol, TypeVar, cast
 import weaviate
 from weaviate.classes.query import Filter
 from weaviate.collections import Collection
+from weaviate.collections.classes.tenants import TenantActivityStatus
 
 from to_weaviate.plan import CollectionPlan
 from to_weaviate.retry import with_retry
@@ -15,10 +16,16 @@ T = TypeVar("T")
 
 FETCH_BATCH = 100
 SOURCE_ID = "source_id"
+# HOT is the name of ACTIVE before Weaviate 1.26.
+ACTIVE = (TenantActivityStatus.ACTIVE, TenantActivityStatus.HOT)
 
 
 class TargetReader(Protocol):
     def exists(self, entry: CollectionPlan) -> bool: ...
+
+    def active(self, entry: CollectionPlan) -> bool:
+        """True without a tenant, or when the tenant exists and is active."""
+        ...
 
     def count(self, entry: CollectionPlan) -> int: ...
 
@@ -36,13 +43,17 @@ class TargetReader(Protocol):
 
     def source_ids(
         self, entry: CollectionPlan
-    ) -> Iterator[tuple[str, str]]: ...  # (uuid, source_id)
+    ) -> Iterator[tuple[str, str | None]]: ...  # (uuid, source_id); None when unset
 
 
-def _source_id(obj: Any) -> str:
-    """The object's source_id, or its uuid when the property is not set."""
+def _source_id(obj: Any) -> str | None:
+    """The object's source_id, or None when the property is not set."""
     value = obj.properties.get(SOURCE_ID)
-    return str(obj.uuid) if value is None else str(value)
+    return None if value is None else str(value)
+
+
+def _source_id_or_uuid(obj: Any) -> str:
+    return _source_id(obj) or str(obj.uuid)
 
 
 class WeaviateReader:
@@ -72,6 +83,18 @@ class WeaviateReader:
             return True
         tenants = self._client.collections.get(name).tenants
         return self._call(lambda: tenants.exists(tenant))
+
+    def active(self, entry: CollectionPlan) -> bool:
+        """True without a tenant, or when the tenant exists and is active.
+
+        Weaviate reads and writes the objects of an active tenant only.
+        """
+        tenant = entry.target.tenant
+        if not tenant:
+            return True
+        tenants = self._client.collections.get(entry.target.name).tenants
+        found = self._call(lambda: tenants.get_by_name(tenant))
+        return found is not None and found.activity_status in ACTIVE
 
     def count(self, entry: CollectionPlan) -> int:
         collection = self._collection(entry)
@@ -117,7 +140,7 @@ class WeaviateReader:
                 return_properties=[SOURCE_ID],
             )
         )
-        return [_source_id(obj) for obj in response.objects]
+        return [_source_id_or_uuid(obj) for obj in response.objects]
 
     def filter_equal(
         self, entry: CollectionPlan, prop: str, value: Any, limit: int
@@ -130,9 +153,9 @@ class WeaviateReader:
                 return_properties=[SOURCE_ID],
             )
         )
-        return [_source_id(obj) for obj in response.objects]
+        return [_source_id_or_uuid(obj) for obj in response.objects]
 
-    def source_ids(self, entry: CollectionPlan) -> Iterator[tuple[str, str]]:
+    def source_ids(self, entry: CollectionPlan) -> Iterator[tuple[str, str | None]]:
         # The client's iterator keeps its cursor when a page request raises,
         # so a retried next() asks for the same page again.
         objects = iter(self._collection(entry).iterator(return_properties=[SOURCE_ID]))

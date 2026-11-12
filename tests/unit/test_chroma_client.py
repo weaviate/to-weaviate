@@ -109,6 +109,23 @@ def test_get_posts_body_and_returns_json():
         "include": ["documents"],
     }
 
+
+def test_get_posts_the_ids_when_given():
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={"ids": ["a"]})
+
+    client, _ = make(handler)
+    client.get("t", "d", "c", limit=2, offset=0, include=[], ids=["a", "b"])
+    assert json.loads(seen[0].content) == {
+        "limit": 2,
+        "offset": 0,
+        "include": [],
+        "ids": ["a", "b"],
+    }
+
     client.get("t", "d", "c", limit=1, offset=0, include=[], where={"k": "v"})
     assert json.loads(seen[1].content)["where"] == {"k": "v"}
 

@@ -22,7 +22,7 @@ from weaviate.classes.query import Filter
 from weaviate.classes.tenants import Tenant, TenantActivityStatus
 from weaviate.collections import Collection
 from weaviate.collections.classes.config import CollectionConfig
-from weaviate.collections.classes.internal import Object
+from weaviate.collections.classes.internal import Object, ObjectSingleReturn
 
 from to_weaviate.output import ERROR_EXIT, secret_values
 from to_weaviate.settings import weaviate_settings
@@ -432,6 +432,27 @@ def weaviate_object(name: str) -> Object[Any, Any]:
     objects = _weaviate().collections.use(name).query.fetch_objects(limit=1).objects
     assert objects, f"{name} has no objects"
     return objects[0]
+
+
+def weaviate_fetch(
+    name: str, uuid: Any, tenant: str | None = None
+) -> ObjectSingleReturn[Any, Any] | None:
+    """The object `uuid` of `name`, or of its `tenant`; None when there is none."""
+    return _collection(name, tenant).query.fetch_object_by_id(uuid)
+
+
+def weaviate_insert(
+    name: str,
+    properties: dict[str, Any],
+    vector: list[float],
+    tenant: str | None = None,
+    target_vector: str = "default",
+) -> str:
+    """Insert an object with a new uuid into `name` or its `tenant`; return the uuid."""
+    inserted = _collection(name, tenant).data.insert(
+        properties=properties, vector={target_vector: vector}
+    )
+    return str(inserted)
 
 
 def weaviate_delete_object(name: str, uuid: Any) -> None:

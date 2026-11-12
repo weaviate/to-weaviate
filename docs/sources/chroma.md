@@ -15,7 +15,7 @@ the plan keeps the source vector. It never writes to Chroma.
 | Deployment | Notes |
 |---|---|
 | Chroma Cloud | The default `CHROMA_URL`. Needs `CHROMA_API_KEY`. |
-| Distributed Chroma | The open-source cluster. `copy` and `verify` wait for its compaction; see [Compaction](#compaction). |
+| Distributed Chroma | The open-source cluster. `copy`, `sync` and `verify` wait for its compaction; see [Compaction](#compaction). |
 | Single-node Chroma | A `chroma run` server or the `chromadb/chroma` container. |
 | A Chroma directory on disk | Serve it with `chroma run`, then read it as a single-node server. |
 
@@ -167,27 +167,38 @@ hold a token.
 Distributed Chroma and Chroma Cloud keep new writes in a log until a
 compaction moves them into the collection. A compaction of more than 5,000
 records gives them new positions, so a read by position during it skips
-records. To prevent that, `copy` and `verify` do two things on these
+records. To prevent that, `copy`, `sync` and `verify` do two things on these
 deployments:
 
 - Before the first page of each collection, they ask Chroma every 5 s how
   many writes are left to compact, until none is left. They give up at the
   first answer after 600 s that still counts one. Each time the number changes
   they print `Waiting for Chroma to compact <name>: <N> of <M> operations not
-  compacted`, and `copy` writes the event `compaction_wait`.
+  compacted`, and `copy` and `sync` write the event `compaction_wait`.
 - After the last read, they check whether Chroma compacted the collection
   during the read. When it did, they stop with `source_compacting`, exit 4.
-  The next `copy` reads that collection again from the start, and `verify`
-  writes no report.
+  The next `copy` or `sync` reads that collection again from the start, and
+  `verify` writes no report.
 
 A collection that receives writes all the time does not reach zero within
-600 s, so `copy` stops with `source_compacting` before its first page. Stop
-the writes to the source before you copy, and run `verify` after the copy.
+600 s, so `copy` and `sync` stop with `source_compacting` before their first
+page. Pause the writes to the source while they run.
 
 Single-node Chroma has no compaction. The tool sends one `indexing_status`
 request and does not wait.
 A Chroma server older than 1.4.1 has no `indexing_status` route, and the
 tool reads it without the wait, as a single-node server.
+
+## Writes during a copy
+
+On Chroma Cloud and distributed Chroma, pause the writes while `copy` and
+`sync` run: a collection that keeps receiving writes stops them with
+`source_compacting` (see [Compaction](#compaction)). Writes made between two
+runs are copied by the next `sync`.
+
+On single-node Chroma and a Chroma directory on disk, the application can
+keep writing while `copy` and `sync` run. Stop the writes before the last
+`sync --prune`.
 
 ## Limits
 
@@ -198,7 +209,10 @@ tool reads it without the wait, as a single-node server.
   attempts. A `Retry-After` header raises each wait to its value, up to 30 s
   per wait, so these retries can take longer.
 - A record deleted from Chroma during a copy can make `copy` skip another
-  record. See [`verify`](../commands.md#verify).
+  record; the next `sync` writes it. See [`verify`](../commands.md#verify).
+  The same deletion during the id listing of `sync --prune` makes the
+  listing skip a record; `sync` reads each stale record by id before it
+  deletes the object, so that object stays.
 - Sparse vectors are not migrated.
 
 ## Implementation
@@ -232,6 +246,9 @@ variables.
   relies on that order to resume and to find new records.
 - `ids` and `ids_at` read ids in the same order, for `verify` and for the
   copy engine's search for its place after deletions.
+- `get` uses `/get` with up to 300 ids, for `sync`. A server can return fewer
+  rows than asked, so `get` asks again for the ids a response left out,
+  until a response holds none of them.
 - `wait_compacted` polls `/indexing_status` until `num_unindexed_ops` is 0
   and returns the collection's `version` and `log_position`.
   `compaction_state` reads them again after the last page, and the engine

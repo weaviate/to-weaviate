@@ -104,6 +104,15 @@ and the properties `source_id`, `uri` and the other metadata keys.
 - Change the `mode` of a vector (`keep` or `embed`), the vectorizer, the
   index type or the quantizer.
 
+After a `copy`, an edit that Weaviate takes on the existing collection, such
+as a renamed, added or dropped property, makes the next
+[`sync`](commands.md#sync) write every record of that entry again. Some
+edits stop `sync` instead: a renamed target or tenant stops it with
+`state_mismatch`, and a changed property type, tokenization, index flag,
+vector mode, vectorizer, index or quantizer stops it with `plan_mismatch`.
+The reason of a dropped key does not reach the objects, so a new reason
+writes nothing.
+
 ## Properties
 
 `inspect` drafts one property per source field. Three come from the record

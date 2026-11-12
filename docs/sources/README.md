@@ -22,7 +22,9 @@ least these sections:
 4. **Examples**: the settings and commands for each deployment.
 5. **How the data maps to Weaviate**: ids, vectors, text, metadata, distances
    and embedding models.
-6. **Limits**: what the tool does not migrate, and source behavior that
+6. **Writes during a copy**: whether the application can keep writing to
+   the source while `copy` and `sync` run.
+7. **Limits**: what the tool does not migrate, and source behavior that
    affects a copy.
-7. **Implementation**: for developers. The modules, how the source reads
+8. **Implementation**: for developers. The modules, how the source reads
    pages, and how its tests run.

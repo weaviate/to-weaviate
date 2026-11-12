@@ -1692,7 +1692,7 @@ def test_status_prints_the_stored_target(tmp_path):
     assert "SENTINEL" not in text.output + js.output
 
 
-LOCK_MESSAGE = "Another to-weaviate copy uses .to-weaviate."
+LOCK_MESSAGE = "Another to-weaviate copy or sync uses .to-weaviate."
 LOCK_HINT = "Wait for it to end, or use another --dir."
 
 
@@ -2363,7 +2363,7 @@ def test_an_object_that_weaviate_refuses_is_a_reject_with_its_message(tmp_path):
     )
 
 
-def test_the_rejects_hint_says_how_to_copy_a_rejected_record_again():
+def test_the_rejects_hint_says_to_sync_once_the_cause_is_fixed():
     writer = FakeWriter(reject_ids={"id-3"})
     fakes = inspected(FakeFactories(FakeSource(cli_records(10)), writer=writer))
     r = invoke(fakes, "copy", "--json")
@@ -2371,10 +2371,10 @@ def test_the_rejects_hint_says_how_to_copy_a_rejected_record_again():
     d = json.loads(r.stdout)
     assert (d["code"], d["hint"]) == (
         "rejects",
-        "See .to-weaviate/rejects.jsonl for each record and the reason. Rejects "
-        "are final for this directory. After fixing the cause, copy plan.yaml "
-        "and inspect.json to a new --dir and run to-weaviate copy there; "
-        "objects already in Weaviate are written again unchanged.",
+        "See .to-weaviate/rejects.jsonl for each record and the reason. A "
+        "reject stays until its cause is fixed; then to-weaviate sync writes "
+        "the record. Objects already in Weaviate are written only when they "
+        "changed.",
     )
 
 
@@ -2738,7 +2738,7 @@ def test_copy_adds_a_planned_property_that_the_collection_lacks(tmp_path):
         {
             "code": "missing_property",
             "collection": "Docs",
-            "message": "property lang: missing in the collection; copy will add it",
+            "message": "property lang: missing in the collection; copy and sync add it",
         }
     ]
     r = invoke(fakes, "copy", "--json")
@@ -2749,10 +2749,8 @@ def test_copy_adds_a_planned_property_that_the_collection_lacks(tmp_path):
     ]
     # The five records were rejected by the run before and are not read again.
     assert r.exit_code == 1 and json.loads(r.stdout)["code"] == "rejects", r.output
-    # A copy in a new directory writes them with the new property.
-    other = ["--dir", "other"]
-    assert invoke(fakes, "inspect", "chroma", *other).exit_code == 0
-    r = invoke(fakes, "copy", "--json", *other)
+    # A sync writes them with the new property.
+    r = invoke(fakes, "sync", "--json")
     assert r.exit_code == 0, r.output
     assert json.loads(r.stdout)["added_properties"] == []
     assert fakes.writer.objects[to_uuid("id-12")].properties["lang"] == "en"
