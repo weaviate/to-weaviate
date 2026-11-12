@@ -43,4 +43,5 @@ explains how to run the acceptance tests on your machine.
 - [Adding a source](docs/development/adding-a-source.md): the steps for a new
   source database.
 - [Testing](docs/development/testing.md): test levels, local servers and CI.
-- [Releasing](docs/development/releasing.md): how a version reaches PyPI.
+- [Releasing](docs/development/releasing.md): how a version reaches GitHub
+  Releases and PyPI.

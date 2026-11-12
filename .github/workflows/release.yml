@@ -45,8 +45,27 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  publish:
+  github-release:
     needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      # The release carries the wheel and the sdist, so a version installs
+      # from GitHub without PyPI. --verify-tag refuses to create the tag.
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+
+  # Runs last: a PyPI version cannot be replaced, a GitHub release can.
+  publish:
+    needs: github-release
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: pypi

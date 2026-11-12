@@ -44,14 +44,18 @@ To ask for another source, [open an issue](https://github.com/weaviate/to-weavia
 You need Python 3.10 or newer.
 
 ```bash
-pip install git+https://github.com/weaviate/to-weaviate
+pip install to-weaviate
 ```
 
 To run it without installing, use [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uvx --from git+https://github.com/weaviate/to-weaviate to-weaviate --help
+uvx to-weaviate --help
 ```
+
+Each [GitHub release](https://github.com/weaviate/to-weaviate/releases) also
+carries the wheel and the sdist. `pip install` accepts the wheel's URL, for a
+machine that installs from GitHub rather than PyPI.
 
 ## How a migration works
 
