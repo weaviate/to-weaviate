@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
 
 permissions:
   contents: read
@@ -45,8 +45,34 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  publish:
+  github-release:
     needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      # The release carries the wheel and the sdist, the exact files of the
+      # version; their dependencies still come from PyPI. A release that
+      # exists (made by hand, or a rerun) gets the files instead of an error.
+      # --verify-tag refuses to create the tag.
+      - run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+
+  # Runs last: a PyPI version cannot be replaced, a GitHub release can.
+  publish:
+    needs: github-release
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: pypi
