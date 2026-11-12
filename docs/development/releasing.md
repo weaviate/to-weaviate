@@ -46,7 +46,7 @@ PyPI is final. When the three jobs pass, `uvx to-weaviate --version` prints
 ## One-time setup
 
 Someone with admin access to the GitHub repository and a PyPI account set
-up two things once:
+up three things once:
 
 - On PyPI, a trusted publisher for the project `to-weaviate`: repository
   `weaviate/to-weaviate`, workflow `release.yml`, environment `pypi`. It was
@@ -57,3 +57,7 @@ up two things once:
 - On GitHub, the environment `pypi`: deployments only from tags that match
   `v*`, and `weaviate/core` as required reviewers. GitHub refuses the
   `publish` job of any other ref.
+- On GitHub, the tag ruleset "Release tags": only organization admins,
+  repository admins and `weaviate/core` can create, move or delete a tag
+  that matches `v*`. The GitHub release is public before the `publish`
+  approval, so this is what limits who can release.
