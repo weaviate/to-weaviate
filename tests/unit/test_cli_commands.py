@@ -2860,3 +2860,169 @@ def test_a_refused_property_addition_names_the_plan_in_its_hint():
         "Weaviate refused to add the property lang: conflict for property lang",
         "Weaviate refused to add the property; read its message and edit plan.yaml.",
     )
+
+
+def _replicated(schema: FakeSchema, factor: Any = "auto") -> FakeFactories:
+    """Fakes with a drafted plan whose entry has `replication_factor: factor`."""
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10)), schema=schema))
+    plan = load_plan(DIR / "plan.yaml")
+    first = plan.collections[0]
+    target = first.target.model_copy(update={"replication_factor": factor})
+    entry = first.model_copy(update={"target": target})
+    save_plan(plan.model_copy(update={"collections": [entry]}), DIR / "plan.yaml")
+    return fakes
+
+
+@pytest.mark.parametrize(
+    ("nodes", "factor", "line"),
+    [
+        (1, 1, "Created Docs with replication factor 1 (1 node)"),
+        (2, 2, "Created Docs with replication factor 2 (2 nodes)"),
+        (3, 3, "Created Docs with replication factor 3 (3 nodes)"),
+        (5, 3, "Created Docs with replication factor 3 (5 nodes)"),
+    ],
+)
+def test_copy_reports_the_factor_that_auto_chose(nodes, factor, line):
+    fakes = _replicated(FakeSchema(node_count=nodes))
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert line in r.stderr.splitlines()
+    assert json.loads(r.stdout)["created_collections"] == [
+        {
+            "collection": "Docs",
+            "replication_factor": factor,
+            "chosen_by": "nodes",
+            "nodes": nodes,
+        }
+    ]
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert "Created Docs" not in r.stderr
+    assert json.loads(r.stdout)["created_collections"] == []
+
+
+def test_copy_prints_the_chosen_factor_without_json():
+    r = invoke(_replicated(FakeSchema(node_count=3)), "copy")
+    assert r.exit_code == 0, r.output
+    assert "Created Docs with replication factor 3 (3 nodes)" in r.stdout.splitlines()
+
+
+def test_copy_reports_the_planned_factor():
+    r = invoke(_replicated(FakeSchema(node_count=3), 2), "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert "Created Docs with replication factor 2" in r.stderr.splitlines()
+    assert json.loads(r.stdout)["created_collections"] == [
+        {
+            "collection": "Docs",
+            "replication_factor": 2,
+            "chosen_by": "plan",
+            "nodes": None,
+        }
+    ]
+
+
+def test_copy_reports_the_server_factor_when_the_key_may_not_read_the_nodes():
+    fakes = _replicated(FakeSchema(node_count=None, server_factor=2))
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert (
+        "Created Docs without a replication factor, because the API key may not "
+        "read the nodes of the cluster; the server chose replication factor 2"
+    ) in r.stderr.splitlines()
+    assert json.loads(r.stdout)["created_collections"] == [
+        {
+            "collection": "Docs",
+            "replication_factor": 2,
+            "chosen_by": "server",
+            "nodes": None,
+        }
+    ]
+
+
+def test_copy_reports_the_server_factor_when_the_factor_of_auto_is_refused():
+    schema = FakeSchema(node_count=3, server_factor=5, refuse_factor="minimum is 5")
+    r = invoke(_replicated(schema), "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert (
+        "Created Docs without a replication factor, because Weaviate refused "
+        "replication factor 3: minimum is 5; the server chose replication factor 5"
+    ) in r.stderr.splitlines()
+    assert json.loads(r.stdout)["created_collections"] == [
+        {
+            "collection": "Docs",
+            "replication_factor": 5,
+            "chosen_by": "server",
+            "nodes": 3,
+        }
+    ]
+
+
+def test_sync_reports_a_collection_that_it_creates():
+    r = invoke(_replicated(FakeSchema(node_count=3)), "sync", "--json")
+    assert r.exit_code == 0, r.output
+    assert "Created Docs with replication factor 3 (3 nodes)" in r.stderr.splitlines()
+    assert [
+        c["replication_factor"] for c in json.loads(r.stdout)["created_collections"]
+    ] == [3]
+
+
+def _check(fakes: FakeFactories) -> tuple[int, dict[str, Any]]:
+    r = invoke(fakes, "check", "--json")
+    return r.exit_code, json.loads(r.stdout)
+
+
+def test_check_refuses_a_factor_above_the_node_count():
+    code, d = _check(_replicated(FakeSchema(node_count=2), 3))
+    assert code == 2 and (d["status"], d["code"]) == ("error", "invalid_plan")
+    assert d["errors"] == [
+        {
+            "code": "too_few_nodes",
+            "collection": "Docs",
+            "message": "replication_factor 3 needs 3 nodes and the cluster has 2; "
+            "lower replication_factor or set it to auto",
+        }
+    ]
+
+
+def test_check_accepts_a_factor_up_to_the_node_count():
+    code, d = _check(_replicated(FakeSchema(node_count=3), 3))
+    assert code == 0 and d["warnings"] == []
+
+
+def test_check_warns_when_it_cannot_compare_a_factor_with_the_nodes():
+    code, d = _check(_replicated(FakeSchema(node_count=None), 3))
+    assert code == 0, d
+    assert [(w["code"], w["collection"]) for w in d["warnings"]] == [
+        ("unknown_node_count", "Docs")
+    ]
+
+
+@pytest.mark.parametrize("nodes", [None, 1, 3])
+def test_check_has_no_replication_finding_for_auto_and_a_new_collection(nodes):
+    code, d = _check(_replicated(FakeSchema(node_count=nodes)))
+    assert code == 0 and d["warnings"] == []
+
+
+def test_check_warns_about_an_existing_collection_with_factor_1_on_more_nodes():
+    schema = FakeSchema(existing={"Docs": []}, node_count=3, factors={"Docs": 1})
+    code, d = _check(_replicated(schema))
+    assert code == 0, d
+    assert [(w["code"], w["collection"]) for w in d["warnings"]] == [
+        ("not_replicated", "Docs")
+    ]
+
+
+@pytest.mark.parametrize(("nodes", "stored"), [(1, 1), (None, 1), (3, 2), (3, 3)])
+def test_check_accepts_an_existing_collection_under_auto(nodes, stored):
+    schema = FakeSchema(
+        existing={"Docs": []}, node_count=nodes, factors={"Docs": stored}
+    )
+    code, d = _check(_replicated(schema))
+    assert code == 0 and d["warnings"] == []
+
+
+def test_inspect_writes_the_replication_factor_and_reads_no_target():
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    plan = yaml.safe_load((DIR / "plan.yaml").read_text())
+    assert plan["collections"][0]["target"]["replication_factor"] == "auto"
+    assert fakes.schema_calls == 0

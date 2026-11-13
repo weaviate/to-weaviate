@@ -44,10 +44,12 @@ def plan_hash(entry: CollectionPlan) -> bytes:
     """Hash of the target part of a plan entry, which decides each object.
 
     Fields at their default and the reasons of dropped keys are left out, so
-    a field that a later version adds with a default changes no hash. State
-    stores these hashes, so the encoding must not change.
+    a field that a later version adds with a default changes no hash. The
+    replication factor is left out: it changes no object. State stores these
+    hashes, so the encoding must not change.
     """
     target = entry.target.model_dump(mode="json", exclude_defaults=True)
+    target.pop("replication_factor", None)
     for dropped in target.get("dropped", []):
         dropped.pop("reason", None)
     payload = json.dumps(

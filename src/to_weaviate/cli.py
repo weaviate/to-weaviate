@@ -58,6 +58,7 @@ from to_weaviate.engine.check import (
     module_findings,
     plan_findings,
     provider_keys,
+    replication_findings,
     target_groups,
     userinfo_only,
 )
@@ -143,11 +144,13 @@ from to_weaviate.target.deleter import DeleteFailed, Deleter, WeaviateDeleter
 from to_weaviate.target.reader import SOURCE_ID, TargetReader, WeaviateReader
 from to_weaviate.target.schema import (
     USERINFO_TEXT,
+    Created,
     PlanMismatch,
     PropertyRejected,
     Schema,
     SchemaRejected,
     WeaviateSchema,
+    auto_factor,
     nearest_grpc_status,
 )
 from to_weaviate.target.writer import (
@@ -899,13 +902,18 @@ def _check(factories: _Factories, directory: Path, json_output: bool) -> None:
     _info(json_output, f"Checking the target at {without_userinfo(settings.url)}")
     schema = factories.schema(settings)
     errors.extend(module_findings(plan, schema.modules()))
-    for name, group in target_groups(plan.collections).items():
+    groups = target_groups(plan.collections)
+    for name, group in groups.items():
         for difference in schema.differences(group) or []:
             errors.append(Finding("plan_mismatch", name, difference))
         warnings.extend(
             Finding("missing_property", name, f"property {prop}: {MISSING_TEXT}")
             for prop in schema.missing_properties(group)
         )
+    factors = {name: schema.replication_factor(group) for name, group in groups.items()}
+    found = replication_findings(groups, schema.nodes(), factors)
+    errors.extend(found[0])
+    warnings.extend(found[1])
     if errors:
         raise _plan_errors(errors, warnings)
     lines = _findings_text(errors, warnings)
@@ -1111,6 +1119,7 @@ class _Run:
     events: Events
     targets: dict[str, Target]
     added: list[dict[str, str]]
+    created: list[dict[str, Any]]
 
 
 @contextmanager
@@ -1208,8 +1217,21 @@ def _writing(
                     fields=_findings_document([], warnings),
                 )
             added: list[dict[str, str]] = []
+            created: list[dict[str, Any]] = []
+
+            def report(made: Created) -> None:
+                _info(json_output, _created_text(made))
+                created.append(
+                    {
+                        "collection": made.name,
+                        "replication_factor": made.factor,
+                        "chosen_by": made.chosen_by,
+                        "nodes": made.nodes,
+                    }
+                )
+
             for name, group in selected.items():
-                schema.ensure(group)
+                schema.ensure(group, report)
                 for prop in missing[name]:
                     _info(json_output, f"Added the property {prop} to {name}")
                     added.append({"collection": name, "property": prop})
@@ -1226,9 +1248,29 @@ def _writing(
                 Events(directory / EVENTS_FILE),
                 targets,
                 added,
+                created,
             )
         finally:
             state.close()
+
+
+def _created_text(made: Created) -> str:
+    if made.chosen_by == "plan":
+        return f"Created {made.name} with replication factor {made.factor}"
+    if made.chosen_by == "nodes":
+        nodes = _plural(made.nodes or 0, "node")
+        return f"Created {made.name} with replication factor {made.factor} ({nodes})"
+    if made.nodes is None:
+        reason = "the API key may not read the nodes of the cluster"
+    else:
+        reason = (
+            f"Weaviate refused replication factor {auto_factor(made.nodes)}: "
+            f"{made.refused}"
+        )
+    return (
+        f"Created {made.name} without a replication factor, because {reason}; "
+        f"the server chose replication factor {made.factor}"
+    )
 
 
 def _interactive() -> bool:
@@ -1353,6 +1395,7 @@ def _copy(
             row["reread_from"] = rereads[row["ref"]]
     document, text = _progress_output(run.entries, rows)
     document["added_properties"] = run.added
+    document["created_collections"] = run.created
     document["warnings"] = _findings_document([], run.warnings)["warnings"]
     text = "\n".join([*_findings_text([], run.warnings), text])
     rejects = sum(row["rejects"] for row in rows)
@@ -1468,6 +1511,7 @@ def _sync(
             results[ref] = result
     document, text = _sync_output(run.entries, results, prune)
     document["added_properties"] = run.added
+    document["created_collections"] = run.created
     document["warnings"] = _findings_document([], run.warnings)["warnings"]
     text = "\n".join([*_findings_text([], run.warnings), text])
     refused = [

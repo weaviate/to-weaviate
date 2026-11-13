@@ -545,6 +545,15 @@ def test_plan_hash_ignores_a_field_set_to_its_default():
     assert plan_hash(ENTRY.model_copy(update={"target": explicit})) == plan_hash(ENTRY)
 
 
+@pytest.mark.parametrize("factor", ["auto", 1, 3])
+def test_plan_hash_ignores_the_replication_factor(factor):
+    document = ENTRY.target.model_dump(mode="json")
+    document.pop("replication_factor", None)
+    without = ENTRY.model_copy(update={"target": p.TargetPlan.model_validate(document)})
+    target = ENTRY.target.model_copy(update={"replication_factor": factor})
+    assert plan_hash(ENTRY.model_copy(update={"target": target})) == plan_hash(without)
+
+
 def test_plan_hash_follows_the_target_and_not_the_source():
     other_source = ENTRY.model_copy(
         update={"source": ENTRY.source.model_copy(update={"count": 5})}
