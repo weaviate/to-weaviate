@@ -53,8 +53,8 @@ COLLECTIONS = (
 )
 # Collections whose names need a change for Weaviate, made in this order.
 RENAMED_COLLECTIONS = ("Mixed-Case", "mixed-case", "1-leading-digit", "class")
-# Values at the limits of their type. Its records with the int 2**63 - 1 are
-# rejects by design, so it is not in COLLECTIONS.
+# Values at the limits of their type. It is not in COLLECTIONS: one test
+# copies it with a plan that makes its ints above 2**53 rejects.
 EDGE = "edge"
 # The large collection. seed makes it, but it is not in COLLECTIONS, so the
 # test that copies every collection does not copy it.
@@ -237,8 +237,8 @@ def resume(rng: random.Random) -> list[Record]:
 
 
 # Values at the limits of their type. Chroma returns -0.0 as 0.0. Weaviate
-# 1.40.4 returns an int above 2**53 rounded to a double. copy rejects
-# 2**63 - 1, whose double is 2**63.
+# 1.40.4 keeps an int as a double, so an int above 2**53 is text in the
+# drafted plan and a reject for an int property.
 INT_EDGES = (0, -1, 2**53 + 1, 2**63 - 1, -(2**63))
 FLOAT_EDGES = (1e308, -1e308, -0.0, 5e-324, 0.1)
 FLAGS = (True, False, "true", "false")

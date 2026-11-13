@@ -13,6 +13,7 @@ from to_weaviate.engine.verify import (
     ID_BATCH,
     Check,
     IdDiff,
+    _same,
     check_line,
     diff_ids,
     id_tables,
@@ -367,23 +368,26 @@ def test_float_property_is_compared_with_isclose():
     assert check.passed, check.detail
 
 
-# (source int, int that the target returns, same). Weaviate 1.40.4 returns an
-# int above 2**53 rounded to a double. copy rejects an int whose double is
-# 2**63, so verify never compares one.
+# (source int, value that the target returns, same). The target keeps an int as
+# a double and can return it as a float.
 STORED_INTS = [
-    (2**53 + 1, 2**53, True),
-    (2**63 - 1024, 2**63 - 1024, True),
-    (-(2**63), -(2**63), True),
-    ([2**53 + 1, 3], [2**53, 3], True),
-    (2**53 + 1, 2**53 + 4, False),
+    (2**53, 2**53, True),
+    (-(2**53), -(2**53), True),
+    (5, 5.0, True),
+    (2**53, 2.0**53, True),
+    ([2**53, 3], [2.0**53, 3], True),
+    (2**53 - 1, 2**53, False),
+    (2**53 - 1, 2.0**53, False),
+    (-(2**53) + 1, -(2**53), False),
+    ([2**53 - 1, 3], [2**53, 3], False),
+    (5, 5.5, False),
+    (1, True, False),
     (2003, 2004, False),
 ]
 
 
 @pytest.mark.parametrize(("source", "stored", "same"), STORED_INTS)
-def test_an_int_is_compared_with_the_double_that_the_target_stores(
-    source, stored, same
-):
+def test_an_int_is_compared_exactly(source, stored, same):
     records = [replace(r, metadata={"year": source}) for r in make_records(3)]
     entry = make_entry()
     if isinstance(source, list):
@@ -397,6 +401,25 @@ def test_an_int_is_compared_with_the_double_that_the_target_stores(
     )
     check = records_check(records, entry, objects)
     assert check.passed is same, check.detail
+
+
+@pytest.mark.parametrize(
+    ("expected", "found", "same"),
+    [
+        (2**60 + 1, 2**60, False),
+        (2**60 + 1, 2.0**60, False),
+        (2**63 - 1, 2.0**63, False),
+        (2**60, 2.0**60, True),
+        (True, 1, False),
+        (True, True, True),
+        (0.1, 0.1 * (1 + 1e-12), True),
+        (3.0, 3, True),
+    ],
+)
+def test_a_stored_value_is_the_same_only_when_no_int_digit_changed(
+    expected, found, same
+):
+    assert _same(expected, found) is same
 
 
 def test_vector_within_tolerance_passes():
@@ -482,6 +505,71 @@ def test_rejects_are_counted_and_not_compared():
     check = records_check([*records, odd], ENTRY, converted(records, ENTRY))
     assert check.passed, check.detail
     assert "sampled 11, compared 10, rejects skipped 1" in check.detail
+
+
+LARGE = 2**53 + 1
+LARGE_REJECT = (
+    f"year: int {LARGE} is above 2**53 in magnitude and Weaviate would store it "
+    "rounded; set the property type to text, or text[] for a list"
+)
+
+
+def _with_a_large_year(count: int, at: set[int]) -> tuple[list[Record], list[Record]]:
+    """Records whose year is LARGE at the indexes `at`, and as 0.1.0 wrote them."""
+    rounded = [replace(r, metadata={"year": 2**53}) for r in make_records(count)]
+    source = [
+        replace(r, metadata={"year": LARGE}) if i in at else r
+        for i, r in enumerate(rounded)
+    ]
+    return source, rounded
+
+
+def test_a_reject_whose_object_is_in_the_target_is_a_difference():
+    source, rounded = _with_a_large_year(3, {1})
+    check = records_check(source, ENTRY, converted(rounded, ENTRY))
+    assert not check.passed
+    assert check.detail == (
+        "sampled 3, compared 2, rejects skipped 0, differing 1: "
+        f'"id-1": is a reject under this plan ({LARGE_REJECT}), and the target '
+        "holds an object for it; the target holds objects for records that this "
+        "plan rejects. Fix the cause of each reject, then run to-weaviate sync. "
+        "An existing collection keeps its property types, and a changed type "
+        "stops sync with plan_mismatch: to change one, copy with another --dir "
+        "into a target name that does not exist, or delete the collection first."
+    )
+
+
+def test_a_reject_without_an_object_in_the_target_is_skipped():
+    source, rounded = _with_a_large_year(3, {1})
+    stored = converted([r for r in rounded if r.id != "id-1"], ENTRY)
+    check = records_check(source, ENTRY, stored)
+    assert check.passed, check.detail
+    assert check.detail == "sampled 3, compared 2, rejects skipped 1, differing 0"
+
+
+def test_rejects_in_the_target_are_listed_when_every_sampled_record_is_a_reject():
+    source, rounded = _with_a_large_year(2, {0, 1})
+    check = records_check(source, ENTRY, converted(rounded[:1], ENTRY))
+    assert not check.passed
+    assert check.detail.startswith(
+        "sampled 2, compared 0, rejects skipped 1, differing 1: "
+        '"id-0": is a reject under this plan ('
+    )
+    assert "every sampled record" not in check.detail
+
+
+def test_one_fetch_reads_the_compared_records_and_the_rejects():
+    source_records, rounded = _with_a_large_year(3, {1})
+    source, writer = FakeSource(source_records), FakeWriter()
+    writer.write(ENTRY, converted(rounded, ENTRY))
+    reader = FakeReader(writer)
+    asked: list[list[str]] = []
+    fetch = reader.fetch
+    reader.fetch = lambda entry, uuids: asked.append(uuids) or fetch(entry, uuids)  # type: ignore[method-assign]
+    verify_records(source, reader, ENTRY, collection_of(source), 3, random.Random(0))
+    assert [sorted(uuids) for uuids in asked] == [
+        sorted(to_uuid(r.id) for r in source_records)
+    ]
 
 
 class EmptySampleSource(FakeSource):

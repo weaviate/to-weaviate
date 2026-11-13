@@ -1,3 +1,4 @@
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -673,3 +674,57 @@ def test_a_property_name_with_an_upper_case_first_letter_names_the_stored_name()
             "letter in lower case, as position; use that name",
         )
     ]
+
+
+def sampled(types: dict[str, int]) -> dict[str, SourceCollection]:
+    inspected = inspected_as(["title"], [])
+    fields = [FieldStats("title", types)]
+    return {"r": replace(inspected["r"], fields=fields)}
+
+
+@pytest.mark.parametrize(
+    ("kind", "types"),
+    [
+        ("int", {"int": 3, "large_int": 2}),
+        ("number", {"large_int": 2}),
+        ("int[]", {"large_int[]": 2}),
+        ("number[]", {"int[]": 3, "large_int": 2}),
+    ],
+)
+def test_an_int_property_for_a_key_with_ints_above_2_to_the_53_is_a_warning(
+    kind, types
+):
+    typed = prop("title").model_copy(update={"type": kind})
+    plan = plan_of(with_target(entry([keep()]), properties=[ID_PROPERTY, typed]))
+    errors, warnings = plan_findings(plan, sampled(types), voyage_mapper)
+    assert errors == []
+    assert warnings == [
+        Finding(
+            "large_ints",
+            "Docs",
+            "key title has ints above 2**53 in magnitude in the inspected sample "
+            f"and type {kind} cannot hold them exactly; copy rejects each record "
+            "that has one. Set the type to text, or text[] for a list. An "
+            "existing collection keeps its property types: to change one, copy "
+            "with another --dir into a target name that does not exist, or "
+            "delete the collection first.",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kind", "types", "inspected"),
+    [
+        ("text", {"large_int": 2}, True),
+        ("text[]", {"large_int[]": 2}, True),
+        ("int", {"int": 5}, True),
+        ("int", {"large_int": 2}, False),
+    ],
+)
+def test_other_types_and_samples_give_no_large_int_warning(kind, types, inspected):
+    typed = prop("title").model_copy(update={"type": kind})
+    plan = plan_of(with_target(entry([keep()]), properties=[ID_PROPERTY, typed]))
+    errors, warnings = plan_findings(
+        plan, sampled(types) if inspected else None, voyage_mapper
+    )
+    assert errors == [] and warnings == []

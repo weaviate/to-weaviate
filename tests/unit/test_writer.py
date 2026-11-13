@@ -701,38 +701,53 @@ def _int_record(value: Any) -> Record:
     return Record("edge-3", [0.1], "doc", None, {"int_edge": value, "year": 2020})
 
 
-INT_REJECT = (
-    "int_edge: int 9223372036854775807 cannot be stored: Weaviate keeps ints as "
-    "doubles and refuses this value; type the property text"
-)
-
-
-@pytest.mark.parametrize(
-    ("kind", "value"), [("int", 2**63 - 1), ("int[]", [3, 2**63 - 1])]
-)
-def test_an_int_whose_double_is_2_to_the_63_is_a_reject(kind, value):
-    assert to_object(_int_record(value), _int_entry(kind)) == Reject(
-        "edge-3", INT_REJECT
+def _int_reject(value: int) -> str:
+    return (
+        f"int_edge: int {value} is above 2**53 in magnitude and Weaviate would "
+        "store it rounded; set the property type to text, or text[] for a list"
     )
 
 
 @pytest.mark.parametrize(
-    ("kind", "value"),
+    ("kind", "value", "named"),
     [
-        ("int", 2**63 - 1024),
-        ("int", 2**63 - 513),
-        ("int", -(2**63)),
-        ("int[]", [-(2**63), 2**53 + 1]),
-        ("number", 2**63 - 1),
+        ("int", 2**53 + 1, 2**53 + 1),
+        ("int", -(2**53) - 1, -(2**53) - 1),
+        ("int", 2**63 - 1, 2**63 - 1),
+        ("int", -(2**63), -(2**63)),
+        ("number", 2**53 + 1, 2**53 + 1),
+        ("number", 2**63 - 1, 2**63 - 1),
+        ("int[]", [3, 2**63 - 1], 2**63 - 1),
+        ("int[]", [-(2**63), 2**53 + 1], -(2**63)),
+        ("number[]", [3, 2**53 + 1], 2**53 + 1),
     ],
 )
-def test_an_int_below_the_double_2_to_the_63_is_stored(kind, value):
+def test_an_int_above_2_to_the_53_is_a_reject(kind, value, named):
+    assert to_object(_int_record(value), _int_entry(kind)) == Reject(
+        "edge-3", _int_reject(named)
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "value", "stored"),
+    [
+        ("int", 2**53, 2**53),
+        ("int", -(2**53), -(2**53)),
+        ("int[]", [-(2**53), 2**53], [-(2**53), 2**53]),
+        ("number", 2**53, 2.0**53),
+        ("number", 1e300, 1e300),
+        ("text", 2**53 + 1, "9007199254740993"),
+        ("text", 2**63 - 1, "9223372036854775807"),
+        ("text[]", [3, -(2**63)], ["3", "-9223372036854775808"]),
+    ],
+)
+def test_a_value_that_the_property_type_holds_exactly_is_stored(kind, value, stored):
     obj = to_object(_int_record(value), _int_entry(kind))
     assert isinstance(obj, TargetObject)
-    expected = float(value) if kind == "number" else value
     assert obj.properties == {
         "source_id": "edge-3",
         "document": "doc",
         "year": "2020",
-        "int_edge": expected,
+        "int_edge": stored,
     }
+    assert type(obj.properties["int_edge"]) is type(stored)

@@ -16,7 +16,7 @@ from to_weaviate.ids import to_uuid
 from to_weaviate.plan import CollectionPlan
 from to_weaviate.sources.base import Source, SourceCollection
 from to_weaviate.target.reader import TargetReader
-from to_weaviate.target.writer import TargetObject, to_object
+from to_weaviate.target.writer import Reject, TargetObject, to_object
 
 T = TypeVar("T")
 
@@ -49,6 +49,13 @@ COUNT_ABOVE_SOURCE = (
     "verify without --quick says which and how to remove them."
 )
 NOTHING_COMPARED = "no record was compared; run to-weaviate verify again"
+REJECTS_IN_TARGET = (
+    "the target holds objects for records that this plan rejects. Fix the "
+    "cause of each reject, then run to-weaviate sync. An existing collection "
+    "keeps its property types, and a changed type stops sync with "
+    "plan_mismatch: to change one, copy with another --dir into a target name "
+    "that does not exist, or delete the collection first."
+)
 EVERY_SAMPLE_REJECTED = (
     "every sampled record is rejected at copy time; read rejects.jsonl"
 )
@@ -282,13 +289,16 @@ def _int(value: Any) -> bool:
 def _same(expected: Any, found: Any) -> bool:
     """Whether `found` is how the target stores `expected`.
 
-    Weaviate 1.40.4 returns an int above 2**53 rounded to a double, so ints
-    are equal when their doubles are.
+    An int has to come back with the same digits, as an int or as a float.
     """
     if isinstance(expected, list) and isinstance(found, list):
         return len(expected) == len(found) and all(map(_same, expected, found))
-    if _int(expected) and _int(found):
-        return float(expected) == float(found)
+    if isinstance(expected, bool) or isinstance(found, bool):
+        return type(expected) is type(found) and expected == found
+    if _int(expected):
+        if isinstance(found, float):
+            return found.is_integer() and int(found) == expected
+        return _int(found) and expected == found
     if isinstance(expected, float) or isinstance(found, float):
         numbers = (int, float)
         return (
@@ -360,20 +370,28 @@ def verify_records(
 ) -> Check:
     """Compare `sample` source records with their target objects.
 
-    A record that converts to a reject is counted and not compared. An empty
-    sample of an empty source passes. Otherwise the check fails when no record
-    was compared.
+    A record that converts to a reject is not compared. It is a difference
+    when the target holds an object for it, as after a copy under another plan
+    or by a version that did not reject it; otherwise it is counted as
+    skipped. An empty sample of an empty source passes. Otherwise the check
+    fails when no record was compared.
     """
     with_vectors = any(v.mode == "keep" for v in entry.target.vectors)
     records = source.sample(collection, sample, rng, with_vectors)
     if not records and records.source_count == 0:
         return _check("records", entry, True, "source is empty")
     expected: list[tuple[str, TargetObject]] = []
+    rejects: list[Reject] = []
     for record in records:
         obj = to_object(record, entry)
         if isinstance(obj, TargetObject):
             expected.append((record.id, obj))
-    stored = reader.fetch(entry, [obj.uuid for _, obj in expected])
+        else:
+            rejects.append(obj)
+    stored = reader.fetch(
+        entry,
+        [*(obj.uuid for _, obj in expected), *(to_uuid(r.source_id) for r in rejects)],
+    )
     failures: list[str] = []
     for source_id, obj in expected:
         found = stored.get(obj.uuid)
@@ -382,18 +400,26 @@ def verify_records(
         )
         if problems:
             failures.append(f"{_quoted(source_id)}: {', '.join(problems)}")
+    in_target = [r for r in rejects if to_uuid(r.source_id) in stored]
+    failures.extend(
+        f"{_quoted(r.source_id)}: is a reject under this plan ({r.reason}), and "
+        "the target holds an object for it"
+        for r in in_target
+    )
     detail = (
         f"sampled {len(records)}, compared {len(expected)}, "
-        f"rejects skipped {len(records) - len(expected)}, differing {len(failures)}"
+        f"rejects skipped {len(rejects) - len(in_target)}, differing {len(failures)}"
     )
     if not records:
         detail += f"; {NOTHING_COMPARED}"
-    elif not expected:
-        detail += f"; {EVERY_SAMPLE_REJECTED}"
     elif failures:
         detail += ": " + "; ".join(failures[:LISTED_FAILURES])
         if len(failures) > LISTED_FAILURES:
             detail += f"; {len(failures) - LISTED_FAILURES} more"
+        if in_target:
+            detail += f"; {REJECTS_IN_TARGET}"
+    elif not expected:
+        detail += f"; {EVERY_SAMPLE_REJECTED}"
     return _check("records", entry, bool(expected) and not failures, detail)
 
 

@@ -75,8 +75,11 @@ exit 2, `invalid_plan`. A warning does not stop `copy` or `sync`.
   [Edits you can make](plan-file.md#edits-you-can-make).
 - Warnings: `missing_property` (an existing collection lacks a planned
   property; `copy` adds it), `coerced_keys` (a metadata key with mixed types
-  whose values `copy` converts), and `quantizer_training` (a trained
-  quantizer whose training limit is above the record count of the source).
+  whose values `copy` converts), `large_ints` (an `int` or `number` property
+  for a key that holds ints above 2**53, which `copy`
+  [rejects](plan-file.md#types-and-conversion)), and `quantizer_training` (a
+  trained quantizer whose training limit is above the record count of the
+  source).
 
 ## `copy`
 
@@ -105,19 +108,33 @@ operating system releases the lock when the process ends. On a system without
 ### Records added or deleted between runs
 
 Each run also copies the records added to the source since the last run. It
-finds its place from the last two records the previous run read:
+finds its place from the last two records the previous run read. A run that
+continues a stopped copy does the same for each part of the collection that
+is not finished, before it reads that part's next page:
 
 - When deletions in the source moved those records, the run finds them at
-  their new position and reads what follows.
-- When one of them is gone, the run reads again from an earlier record.
-  When it finds no earlier record either, it reads from the start and warns
-  "the source changed since the last run; re-reading from the start".
+  their new position and reads what follows. After a stopped copy, a record
+  that the deletions moved from one part of the collection into another can
+  be written twice, unchanged, and is then counted twice as copied.
+- When one of them is gone, the run reads again from a lower position: after
+  the last two records of an earlier finished part, when it finds them. When
+  it finds none, an unfinished part reads again from the end of the nearest
+  unfinished part before it. When there is no such part, the run reads from
+  the start of the collection and warns, once per collection, "the source
+  changed since the last run; re-reading from the start".
+  A part that copies records added after the first run reads from the start
+  of the collection when one of its own last two records is gone.
   Records read again are written again unchanged.
-  The JSON document of such a run gives the position it read from as
-  `reread_from`.
+  The JSON document of such a run gives the lowest position it read again
+  from as `reread_from`.
 - When the two records were deleted and added back with the same ids, the run
-  cannot tell them apart from the originals and can skip the records added in
-  between. Run the full `verify` after the last copy of a source that changed.
+  cannot tell them apart from the originals. It can then skip records that
+  no run copied: the records added in between, and after a stopped copy also
+  records that were not read yet. It gives no warning. The `ids` check of the
+  full `verify` names the skipped records, and `sync` writes them. The
+  `count` check alone can miss them when Weaviate still holds objects of
+  deleted records. Run the full `verify` after the last copy of a source
+  that changed.
 
 ### Rejects
 
@@ -325,6 +342,18 @@ The JSON document is under [JSON output](#json-output).
 | `count` | The record count of the source and the object count of Weaviate. |
 | `ids` | The full list of ids on both sides. It counts the missing and the extra ids and names up to 20 of each. |
 | `records` | A random sample of records: every property, and each kept source vector, rounded to float32, within 1e-5. |
+
+A sampled record that the plan rejects is not compared. When the target
+holds no object for it, `records` counts it under `rejects skipped`. When
+the target holds one, the record counts as differing, and the detail gives
+the reason of the reject. The object was written under another plan or
+before the record changed. Fix the cause of the reject and run `sync`.
+
+An existing collection keeps its property types, so a reject that needs
+another property type is not fixed by an edit of `plan.yaml`: `sync` stops
+with `plan_mismatch`. Copy into a new collection instead. Use another
+`--dir`, and give the target a name that does not exist, or delete the
+collection first.
 
 A failed check exits 1, `verification_failed`. Its detail names the cause,
 and the fix where there is one. Extra objects with a `source_id` lost their
