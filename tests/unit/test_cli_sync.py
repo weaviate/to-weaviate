@@ -16,6 +16,7 @@ from test_cli_commands import (
     DIR,
     LOCK_HINT,
     LOCK_MESSAGE,
+    PROVIDER_429,
     REFUSED,
     _set_index,
     edit_target,
@@ -202,6 +203,18 @@ def test_a_sync_whose_batch_is_refused_names_sync_in_the_hint():
     d = json.loads(r.stdout)
     assert d["code"] == "target_unreachable"
     assert d["hint"] == "Fix the cause and run to-weaviate sync again."
+
+
+def test_a_sync_that_a_busy_provider_stops_names_the_provider_in_the_hint():
+    fakes, _ = refusing(10, lambda n: all_failed(PROVIDER_429))
+    r = invoke(fakes, "sync", "--parallelism", "1", "--json")
+    assert r.exit_code == 4
+    d = json.loads(r.stdout)
+    assert d["code"] == "target_unreachable"
+    assert d["hint"] == (
+        "Wait for the provider's rate limit to reset or for the provider to "
+        "answer again, or lower --parallelism. Then run to-weaviate sync again."
+    )
 
 
 def test_a_failed_sync_after_a_plan_edit_keeps_the_target_guard(tmp_path):

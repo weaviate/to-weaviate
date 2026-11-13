@@ -4,12 +4,6 @@
 the tool copies its id, document, URI and metadata, and its embedding when
 the plan keeps the source vector. It never writes to Chroma.
 
-> [!IMPORTANT]
-> Chroma Cloud stops accepting writes on 2026-12-07 and stops serving reads
-> on 2026-12-22. Migrate from Chroma Cloud before 2026-12-22. After that you
-> can migrate only from a Chroma server you run yourself, for example one
-> that serves a [Chroma directory on disk](#a-chroma-directory-on-disk).
-
 ## Deployments
 
 | Deployment | Notes |
@@ -148,8 +142,31 @@ embed query text with the same model. With `--vectors both`, the vector
 | `ollama` | `text2vec-ollama` |
 
 The plan carries the model name and, where the module takes them, the
-dimensions, the base URL or endpoint, the project and the location. When a
-function gets no vectorizer, the plan notes why:
+dimensions, the base URL or endpoint, the project and the location.
+
+The plan names OpenAI's `text-embedding-ada-002` as `ada` when the function
+has no base URL, or one whose host is `api.openai.com` or a subdomain of it.
+Weaviate accepts only
+that name on OpenAI's endpoint, and it requests `text-embedding-ada-002` for
+it. The plan stores the host of such a base URL in lower case, because
+Weaviate matches `api.openai.com` in lower case only. With another base URL
+the plan keeps the name `text-embedding-ada-002`.
+
+Weaviate sends that name unchanged unless the base URL holds the text
+`api.openai.com` outside its host, for example in the path or in a longer
+host name such as `api.openai.com.proxy.example.com`. Weaviate treats such a
+URL as OpenAI's endpoint and refuses `text-embedding-ada-002` when it creates
+the collection. In that case set `model: ada` in `plan.yaml` and run `check`
+again.
+
+`check` reports `keep_model_mismatch` for a kept vector whose vectorizer has
+a different `model` than the one `inspect` drafts. `ada` and
+`text-embedding-ada-002` are the same model, so no documents need a new
+embedding. When the plan has `text-embedding-ada-002` and `inspect` drafts
+`ada`, set `model: ada` or run `inspect` again. `check` accepts `ada` when
+`inspect` drafts `text-embedding-ada-002`.
+
+When a function gets no vectorizer, the plan notes why:
 
 - `default`: Chroma's `all-MiniLM-L6-v2` has no Weaviate module. Embed
   queries in your application, use `text2vec-huggingface` with that model,

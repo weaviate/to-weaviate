@@ -26,6 +26,9 @@ def with_retry(
     lasts a few seconds does not use up the attempts (see
     test_chroma_restart.py).
     A `minimum` from a Retry-After header can raise each delay up to 30 s.
+    The Weaviate client retries gRPC UNAVAILABLE inside `call` for 15 s on a
+    write and 63 s on a read, so a full retry against a target that keeps
+    answering UNAVAILABLE takes about 2 minutes or about 8 minutes.
     """
     for attempt in range(attempts):
         try:
