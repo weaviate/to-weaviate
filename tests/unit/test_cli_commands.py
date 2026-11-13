@@ -922,7 +922,9 @@ def test_a_plan_that_types_ints_above_2_to_the_53_as_int_gets_rejects():
     ] == [
         "key stamp has ints above 2**53 in magnitude in the inspected sample and "
         "type int cannot hold them exactly; copy rejects each record that has "
-        "one. Set the type to text, or text[] for a list."
+        "one. Set the type to text, or text[] for a list. An existing collection "
+        "keeps its property types: to change one, copy with another --dir into "
+        "a target name that does not exist, or delete the collection first."
     ]
     # inspect.json of 0.1.0 counts every int as int.
     sample = json.loads((DIR / "inspect.json").read_text())

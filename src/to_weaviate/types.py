@@ -64,6 +64,11 @@ def resolve_type(counts: dict[str, int]) -> tuple[str, list[str]]:
     return target, sorted(observed - {target})
 
 
+def _source_type(observed: str) -> str:
+    """The type of a refused value as the source holds it."""
+    return observed.replace(LARGE_INT, "int")
+
+
 def _exact_int(value: int) -> int:
     if abs(value) > EXACT_INT_LIMIT:
         raise ValueError(
@@ -97,7 +102,8 @@ def _coerce_scalar(value: Any, target: str) -> Any:
     if target == "boolean" and kind == "boolean":
         return value
     raise ValueError(
-        f"cannot convert {kind} value {value!r} to {target} without losing data"
+        f"cannot convert {_source_type(kind)} value {value!r} to {target} "
+        "without losing data"
     )
 
 
@@ -108,5 +114,6 @@ def coerce(value: Any, target_type: str) -> Any:
         items = value if isinstance(value, list) else [value]
         return [_coerce_scalar(v, element_type) for v in items]
     if isinstance(value, list | dict):
-        raise ValueError(f"cannot convert {value_type(value)} value to {target_type}")
+        observed = _source_type(value_type(value))
+        raise ValueError(f"cannot convert {observed} value to {target_type}")
     return _coerce_scalar(value, target_type)

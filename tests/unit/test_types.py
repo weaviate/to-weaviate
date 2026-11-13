@@ -139,3 +139,22 @@ def test_the_refusal_names_the_value_as_the_source_holds_it(value, target, messa
     with pytest.raises(ValueError) as raised:
         coerce(value, target)
     assert str(raised.value) == message
+
+
+@pytest.mark.parametrize(
+    ("value", "target", "message"),
+    [
+        (
+            2**53 + 1,
+            "boolean",
+            "cannot convert int value 9007199254740993 to boolean without "
+            "losing data",
+        ),
+        ([2**53 + 1], "int", "cannot convert int[] value to int"),
+        ([1, 2**53 + 1], "text", "cannot convert int[] value to text"),
+    ],
+)
+def test_a_refusal_names_an_int_above_2_to_the_53_as_int(value, target, message):
+    with pytest.raises(ValueError) as raised:
+        coerce(value, target)
+    assert str(raised.value) == message

@@ -532,7 +532,10 @@ def test_a_reject_whose_object_is_in_the_target_is_a_difference():
         "sampled 3, compared 2, rejects skipped 0, differing 1: "
         f'"id-1": is a reject under this plan ({LARGE_REJECT}), and the target '
         "holds an object for it; the target holds objects for records that this "
-        "plan rejects. Fix the cause of the reject, then run to-weaviate sync."
+        "plan rejects. Fix the cause of each reject, then run to-weaviate sync. "
+        "An existing collection keeps its property types, and a changed type "
+        "stops sync with plan_mismatch: to change one, copy with another --dir "
+        "into a target name that does not exist, or delete the collection first."
     )
 
 

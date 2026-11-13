@@ -421,7 +421,9 @@ def _large_int_findings(
             f"key {prop.source_key} has ints above 2**53 in magnitude in the "
             f"inspected sample and type {prop.type} cannot hold them exactly; "
             "copy rejects each record that has one. Set the type to text, or "
-            "text[] for a list.",
+            "text[] for a list. An existing collection keeps its property "
+            "types: to change one, copy with another --dir into a target name "
+            "that does not exist, or delete the collection first.",
         )
     ]
 

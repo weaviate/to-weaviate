@@ -311,7 +311,13 @@ A sampled record that the plan rejects is not compared. When the target
 holds no object for it, `records` counts it under `rejects skipped`. When
 the target holds one, the record counts as differing, and the detail gives
 the reason of the reject. The object was written under another plan or
-before the record changed; fix the cause of the reject and run `sync`.
+before the record changed. Fix the cause of the reject and run `sync`.
+
+An existing collection keeps its property types, so a reject that needs
+another property type is not fixed by an edit of `plan.yaml`: `sync` stops
+with `plan_mismatch`. Copy into a new collection instead. Use another
+`--dir`, and give the target a name that does not exist, or delete the
+collection first.
 
 A failed check exits 1, `verification_failed`. Its detail names the cause,
 and the fix where there is one. Extra objects with a `source_id` lost their

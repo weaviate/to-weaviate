@@ -627,7 +627,10 @@ def test_an_int_property_for_a_key_with_ints_above_2_to_the_53_is_a_warning(
             "Docs",
             "key title has ints above 2**53 in magnitude in the inspected sample "
             f"and type {kind} cannot hold them exactly; copy rejects each record "
-            "that has one. Set the type to text, or text[] for a list.",
+            "that has one. Set the type to text, or text[] for a list. An "
+            "existing collection keeps its property types: to change one, copy "
+            "with another --dir into a target name that does not exist, or "
+            "delete the collection first.",
         )
     ]
 

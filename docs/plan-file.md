@@ -177,7 +177,10 @@ rounded. `copy` does not write it: for an `int` or `number` property the
 record is a reject with the reason "<key>: int <value> is above 2**53 in
 magnitude and Weaviate would store it rounded; set the property type to
 text, or text[] for a list". A `text` property holds every digit, and
-`inspect` drafts `text` for a key where it read such a value.
+`inspect` drafts `text` for a key where it read such a value. An existing
+collection keeps its property types: to change one, copy with another
+`--dir` into a target name that does not exist, or delete the collection
+first.
 
 A number without a fractional part above that magnitude is a reject for an
 `int` property, with the reason "<key>: number <value> is above 2**53 in

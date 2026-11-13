@@ -51,7 +51,10 @@ COUNT_ABOVE_SOURCE = (
 NOTHING_COMPARED = "no record was compared; run to-weaviate verify again"
 REJECTS_IN_TARGET = (
     "the target holds objects for records that this plan rejects. Fix the "
-    "cause of the reject, then run to-weaviate sync."
+    "cause of each reject, then run to-weaviate sync. An existing collection "
+    "keeps its property types, and a changed type stops sync with "
+    "plan_mismatch: to change one, copy with another --dir into a target name "
+    "that does not exist, or delete the collection first."
 )
 EVERY_SAMPLE_REJECTED = (
     "every sampled record is rejected at copy time; read rejects.jsonl"
