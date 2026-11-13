@@ -20,6 +20,7 @@ from to_weaviate.target.writer import (
     TargetObject,
     WeaviateWriter,
     chunks,
+    provider_busy,
     provider_refusal,
     to_object,
 )
@@ -409,6 +410,139 @@ def test_a_provider_that_refuses_the_key_of_one_object_stops_the_batch():
     assert (info.value.provider, info.value.status) == ("OpenAI API", 401)
     assert "sk-made" not in str(info.value)
     assert len(data.calls) == 1
+
+
+# Per-object errors of Weaviate while a model provider limits or fails the
+# embedding requests: usecases/modulecomponents/clients/openai/openai.go,
+# clients/cohere/cohere.go and batch/batch.go.
+PROVIDER_429 = (
+    "connection to: OpenAI API failed with status: 429 request-id: req-2 error: "
+    "Rate limit reached for text-embedding-3-small in organization org-made on "
+    "requests per min (RPM): Limit 3, Used 3, Requested 1."
+)
+PROVIDER_503 = "connection to Cohere failed with status: 503 error: Service Unavailable"
+PROVIDER_NO_REFRESH = "request rate limit exceeded and will not refresh in time"
+PROVIDER_400 = (
+    "connection to: OpenAI API failed with status: 400 request-id: req-3 error: "
+    "This model's maximum context length is 8192 tokens"
+)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        PROVIDER_429,
+        PROVIDER_503,
+        PROVIDER_NO_REFRESH,
+        "connection to: OpenAI API failed with status: 500",
+        "connection to Cohere API failed with status 502: bad gateway",
+        "connection to Google failed with status: 504 error: timeout",
+        "connection to: https://example.test/v1 failed with status: 429",
+    ],
+)
+def test_a_provider_429_or_5xx_is_a_busy_provider(message):
+    assert provider_busy(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        PROVIDER_400,
+        PROVIDER_401,
+        "connection to Cohere API failed with status 403: forbidden",
+        "connection to: OpenAI API failed with status: 404 error: no such model",
+        "connection to: OpenAI API failed with status: 422",
+        "connection to: OpenAI API failed with status: 4290",
+        "connection to: OpenAI API failed with status: 400 error: at most 500 inputs",
+        "connection to: OpenAI API failed with status: 400 error: code 429",
+        "property 'year' failed with status: 500",
+        "rate limit",
+        CONTENT_ERROR,
+    ],
+)
+def test_other_errors_are_not_a_busy_provider(message):
+    assert not provider_busy(message)
+
+
+@pytest.mark.parametrize("error", [PROVIDER_429, PROVIDER_503, PROVIDER_NO_REFRESH])
+def test_objects_that_a_busy_provider_refused_are_sent_again(error):
+    data = FakeData([partial((0, error), (2, error)), SimpleNamespace(errors={})])
+    sleeps: list[float] = []
+    writer = WeaviateWriter(FakeClient(data), sleep=sleeps.append)  # type: ignore[arg-type]
+    assert writer.write(ENTRY_EMBED, objects(4)) == []
+    assert [[o.uuid for o in call] for call in data.calls] == [
+        ["u0", "u1", "u2", "u3"],
+        ["u0", "u2"],
+    ]
+    assert len(sleeps) == 1 and 0.25 <= sleeps[0] <= 0.5
+
+
+def test_objects_that_a_busy_provider_refuses_on_every_attempt_are_a_refused_batch():
+    data = FakeData([partial((1, PROVIDER_429))] + [partial((0, PROVIDER_429))] * 10)
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    with pytest.raises(BatchRefused) as info:
+        writer.write(ENTRY_EMBED, objects(3))
+    assert str(info.value) == (
+        "Weaviate refused 1 object of a batch of 3 in My_docs: " + PROVIDER_429
+    )
+    assert [[o.uuid for o in call] for call in data.calls] == [["u0", "u1", "u2"]] + [
+        ["u1"]
+    ] * 6
+
+
+def test_a_single_object_that_a_busy_provider_refuses_is_a_refused_batch():
+    data = FakeData([all_failed(PROVIDER_429)] * 10)
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    with pytest.raises(BatchRefused) as info:
+        writer.write(ENTRY_EMBED, objects(1))
+    assert str(info.value) == (
+        "Weaviate refused every object of a batch of 1 in My_docs: " + PROVIDER_429
+    )
+    assert len(data.calls) == 7
+
+
+def test_a_single_object_that_a_busy_provider_refused_once_is_stored():
+    data = FakeData([all_failed(PROVIDER_503), SimpleNamespace(errors={})])
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    assert writer.write(ENTRY_EMBED, objects(1)) == []
+    assert len(data.calls) == 2
+
+
+def test_an_object_that_a_provider_refuses_with_a_400_is_a_reject_at_once():
+    data = FakeData([partial((1, PROVIDER_400))] * 10)
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    assert writer.write(ENTRY_EMBED, objects(3)) == [Reject("s1", PROVIDER_400)]
+    assert len(data.calls) == 1
+
+
+def test_a_single_object_that_a_provider_refuses_with_a_400_is_a_reject_at_once():
+    data = FakeData([all_failed(PROVIDER_400)] * 10)
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    rejects = writer.write(ENTRY_EMBED, objects(1))
+    assert [r.source_id for r in rejects] == ["s0"]
+    assert PROVIDER_400 in rejects[0].reason
+    assert len(data.calls) == 1
+
+
+def test_a_refused_key_next_to_a_busy_provider_stops_the_batch_without_a_retry():
+    data = FakeData([partial((0, PROVIDER_429), (1, PROVIDER_401))] * 10)
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    with pytest.raises(ProviderRefused) as info:
+        writer.write(ENTRY_EMBED, objects(3))
+    assert (info.value.provider, info.value.status) == ("OpenAI API", 401)
+    assert len(data.calls) == 1
+
+
+def test_a_busy_provider_a_content_error_and_a_stored_object_in_one_batch():
+    data = FakeData(
+        [partial((0, PROVIDER_429), (1, CONTENT_ERROR)), SimpleNamespace(errors={})]
+    )
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    assert writer.write(ENTRY_EMBED, objects(3)) == [Reject("s1", CONTENT_ERROR)]
+    assert [[o.uuid for o in call] for call in data.calls] == [
+        ["u0", "u1", "u2"],
+        ["u0"],
+    ]
 
 
 def test_all_failed_batch_is_retried_and_then_raises():

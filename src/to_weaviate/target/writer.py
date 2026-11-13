@@ -58,11 +58,14 @@ def node_outage(message: str) -> bool:
 # How a Weaviate vectorizer module reports the answer of a model provider,
 # as in "connection to: OpenAI API failed with status: 401 ...", "connection
 # to Cohere API failed with status 403: ..." or "connection to: <url> failed
-# with status: 401 ...".
-PROVIDER_REFUSAL = re.compile(
+# with status: 429 ...".
+PROVIDER_STATUS = re.compile(
     r"connection to:? (?P<provider>.+?) (?:request )?failed with status:? "
-    r"(?P<status>401|403)\b"
+    r"(?P<status>\d{3})\b"
 )
+# The per-object error of Weaviate 1.40 when the provider's request limit
+# resets later than the time that Weaviate gives a batch.
+PROVIDER_LIMIT_TEXT = "request rate limit exceeded and will not refresh in time"
 
 
 class ProviderRefused(Exception):
@@ -84,13 +87,34 @@ def provider_refusal(message: str) -> ProviderRefused | None:
 
     A provider named by its URL is named by its host.
     """
-    match = PROVIDER_REFUSAL.search(message)
+    for match in PROVIDER_STATUS.finditer(message):
+        if match["status"] not in ("401", "403"):
+            continue
+        provider = match["provider"]
+        if "://" in provider:
+            provider = urlsplit(provider).hostname or provider
+        return ProviderRefused(provider, int(match["status"]))
+    return None
+
+
+def provider_busy(message: str) -> bool:
+    """Whether a per-object error says that a model provider answered 429 or 5xx.
+
+    Weaviate does not send the request to the provider again. The status is
+    the first one in `message`: a status that the provider's own text repeats
+    after it does not count.
+    """
+    if PROVIDER_LIMIT_TEXT in message:
+        return True
+    match = PROVIDER_STATUS.search(message)
     if match is None:
-        return None
-    provider = match["provider"]
-    if "://" in provider:
-        provider = urlsplit(provider).hostname or provider
-    return ProviderRefused(provider, int(match["status"]))
+        return False
+    status = int(match["status"])
+    return status == 429 or 500 <= status <= 599
+
+
+def _sent_again(message: str) -> bool:
+    return node_outage(message) or provider_busy(message)
 
 
 class BatchRefused(Exception):
@@ -205,10 +229,11 @@ def _refused_or_transient(exc: Exception) -> float | None:
 def _transient_unless_too_large(exc: Exception) -> float | None:
     """`transient`, except for a message that gRPC refuses for its size.
 
-    A refusal of the one object of a chunk is retried only for a node outage.
+    A refusal of the one object of a chunk is retried only for a node outage
+    or a model provider that answered 429 or 5xx.
     """
     if isinstance(exc, WeaviateInsertManyAllFailedError):
-        return 0.0 if node_outage(str(exc)) else None
+        return 0.0 if _sent_again(str(exc)) else None
     return None if refused_for_size(exc) else transient(exc)
 
 
@@ -238,8 +263,9 @@ class WeaviateWriter:
 
         A chunk of more than one object that Weaviate refuses as a whole is
         retried like a transient error. An object that Weaviate refuses with
-        an error of a node outage is sent again, with the others of its chunk
-        that it refused so, after a delay. When the retries are used up, this
+        an error of a node outage, or because a model provider answered 429 or
+        5xx, is sent again, with the others of its chunk that it refused so,
+        after a delay. When the retries are used up, this
         raises BatchRefused. A model provider that refuses the key, for the
         chunk or for one object, raises ProviderRefused. An object refused for
         anything else is a reject, and so is a chunk of one object that gRPC
@@ -283,7 +309,7 @@ class WeaviateWriter:
                     # Not chained: the debug traceback would print the
                     # provider's text, which can echo the key.
                     raise refused_key from None
-                if single and not node_outage(reason):
+                if single and not _sent_again(reason):
                     rejects.append(Reject(_source_id(pending[0]), str(exc)))
                     return rejects
                 refused = None if len(pending) == len(chunk) else len(pending)
@@ -299,7 +325,7 @@ class WeaviateWriter:
                 refused_key = provider_refusal(error.message)
                 if refused_key is not None:
                     raise refused_key
-                if node_outage(error.message):
+                if _sent_again(error.message):
                     again.append(pending[index])
                     reason = reason or error.message
                 else:
