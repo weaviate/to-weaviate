@@ -67,6 +67,132 @@ def test_openai_default_base_gives_no_base_url(api_base):
     assert notes == []
 
 
+# chromadb's OpenAIEmbeddingFunction uses text-embedding-ada-002 when no
+# model is given.
+ADA_002 = "text-embedding-ada-002"
+
+
+def _sent_vectorizer(v):
+    entry = CollectionPlan(
+        source=SourceRef(
+            ref="r",
+            namespace="n",
+            name="docs",
+            count=1,
+            dimension=2,
+            distance="cosine",
+            embedding=None,
+        ),
+        target=TargetPlan(
+            name="Docs", vectors=[VectorPlan(vectorizer=v)], properties=[]
+        ),
+    )
+    return collection_kwargs([entry])["vector_config"][0].vectorizer
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"model_name": ADA_002},
+        {"model_name": ADA_002, "api_base": None, "dimensions": None},
+        {"model_name": ADA_002, "api_base": "https://api.openai.com/v1"},
+    ],
+)
+def test_openai_ada_002_gets_the_weaviate_model_name(config):
+    v, notes = vectorizer_for(known("openai", **config))
+    assert v is not None
+    assert v.module == "text2vec-openai"
+    assert v.options == {"model": "ada"}
+    assert notes == []
+    sent = _sent_vectorizer(v)
+    assert (sent.model, sent.modelVersion, sent.baseURL) == ("ada", None, None)
+
+
+def test_openai_ada_002_keeps_its_name_with_a_base_url():
+    v, _ = vectorizer_for(
+        known("openai", model_name=ADA_002, api_base="https://proxy.example.com/v1")
+    )
+    assert v is not None
+    assert v.options == {"model": ADA_002, "base_url": "https://proxy.example.com"}
+    assert _sent_vectorizer(v).model == ADA_002
+
+
+def test_openai_ada_002_gets_the_weaviate_model_name_on_a_regional_openai_url():
+    # Weaviate validates the model name for every base URL that contains
+    # api.openai.com, not only the default one.
+    v, _ = vectorizer_for(
+        known("openai", model_name=ADA_002, api_base="https://eu.api.openai.com/v1")
+    )
+    assert v is not None
+    assert v.options == {"model": "ada", "base_url": "https://eu.api.openai.com"}
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://api.openai.com.proxy.example.com",
+        "https://myapi.openai.com",
+        "https://proxy.example.com/api.openai.com",
+        "https://proxy.example.com?upstream=api.openai.com",
+        "https://api.openai.com@proxy.example.com",
+    ],
+)
+def test_openai_ada_002_keeps_its_name_when_the_host_is_not_openai(base_url):
+    v, _ = vectorizer_for(known("openai", model_name=ADA_002, api_base=base_url))
+    assert v is not None
+    assert v.options["model"] == ADA_002
+
+
+def test_openai_ada_002_gets_the_weaviate_model_name_on_an_openai_host_with_a_port():
+    v, _ = vectorizer_for(
+        known("openai", model_name=ADA_002, api_base="https://API.openai.com:443/v1")
+    )
+    assert v is not None
+    assert v.options["model"] == "ada"
+
+
+@pytest.mark.parametrize(
+    ("api_base", "options"),
+    [
+        (
+            "https://API.openai.com:443/v1",
+            {"model": "ada", "base_url": "https://api.openai.com:443"},
+        ),
+        (
+            "https://EU.Api.OpenAI.com/v1",
+            {"model": "ada", "base_url": "https://eu.api.openai.com"},
+        ),
+        (
+            "https://API.OPENAI.COM/Custom/v1",
+            {"model": "ada", "base_url": "https://api.openai.com/Custom"},
+        ),
+        ("https://API.OPENAI.COM/v1", {"model": "ada"}),
+    ],
+)
+def test_openai_host_is_stored_in_lower_case(api_base, options):
+    # Weaviate looks for api.openai.com in base_url in lower case only.
+    v, _ = vectorizer_for(known("openai", model_name=ADA_002, api_base=api_base))
+    assert v is not None
+    assert v.options == options
+
+
+def test_openai_base_url_of_another_host_keeps_its_case():
+    v, _ = vectorizer_for(
+        known("openai", model_name=ADA_002, api_base="https://Proxy.Example.com/v1")
+    )
+    assert v is not None
+    assert v.options == {"model": ADA_002, "base_url": "https://Proxy.Example.com"}
+
+
+@pytest.mark.parametrize("model", ["text-embedding-3-small", "text-embedding-3-large"])
+@pytest.mark.parametrize("api_base", [None, "https://proxy.example.com/v1"])
+def test_openai_v3_models_keep_their_name(model, api_base):
+    v, _ = vectorizer_for(known("openai", model_name=model, api_base=api_base))
+    assert v is not None
+    assert v.options["model"] == model
+    assert _sent_vectorizer(v).model == model
+
+
 def test_openai_azure_has_no_mapping():
     v, notes = vectorizer_for(known("openai", api_type="azure", model_name="m"))
     assert v is None and notes

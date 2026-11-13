@@ -397,6 +397,27 @@ OPENAI_PROXY_FUNCTION = {
 }
 
 
+# The collection of test_openai_ada_002_plan_is_accepted_by_the_target, with
+# the configuration that chromadb 1.5.9 sends for an OpenAIEmbeddingFunction
+# made without arguments.
+OPENAI_ADA = "openai-ada"
+OPENAI_ADA_FUNCTION = {
+    "type": "known",
+    "name": "openai",
+    "config": {
+        "api_key_env_var": "CHROMA_OPENAI_API_KEY",
+        "model_name": "text-embedding-ada-002",
+        "organization_id": None,
+        "api_base": None,
+        "api_type": None,
+        "api_version": None,
+        "deployment_id": None,
+        "default_headers": None,
+        "dimensions": None,
+    },
+}
+
+
 def openai_proxy(rng: random.Random) -> list[Record]:
     """10 records of 8 dimensions."""
     return [
@@ -596,14 +617,19 @@ def restore_tiny_l2(records: list[Record]) -> None:
         _recreate(http, "tiny.l2", None, records)
 
 
-def make_collection(name: str, records: list[Record], batch_size: int) -> None:
+def make_collection(
+    name: str,
+    records: list[Record],
+    batch_size: int,
+    embedding_function: dict[str, Any] | None = None,
+) -> None:
     """Delete the collection `name` and make it again with `records`, in their order.
 
     The records go in adds of `batch_size`. The collection has Chroma's
     default distance.
     """
     with _test_server() as http:
-        _recreate(http, name, None, records, batch_size=batch_size)
+        _recreate(http, name, None, records, embedding_function, batch_size)
 
 
 def add_records(name: str, records: list[Record]) -> None:
