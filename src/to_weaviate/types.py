@@ -1,36 +1,50 @@
+from collections.abc import Iterable
 from typing import Any
 
 SCALARS = ("text", "int", "number", "boolean")
 SPARSE_VECTOR = "sparse_vector"
 # The client sends property values in a protobuf Struct, whose numbers are
-# doubles. Weaviate checks that a double for an int property survives Go's
-# int64 conversion, which for 2**63 depends on the CPU: amd64 refuses it,
-# arm64 stores 2**63 - 1. An int whose double reaches this limit is refused
-# here, so the outcome does not depend on the server.
-INT_DOUBLE_LIMIT = 2.0**63
+# doubles, and Weaviate keeps an int as a double. A double holds every int up
+# to this magnitude; above it the stored value can differ from the source.
+EXACT_INT_LIMIT = 2**53
+# Observed type of an int above EXACT_INT_LIMIT. It is not a property type.
+LARGE_INT = "large_int"
 
 
 def _scalar_type(value: Any) -> str:
     if isinstance(value, bool):
         return "boolean"
     if isinstance(value, int):
-        return "int"
+        return "int" if abs(value) <= EXACT_INT_LIMIT else LARGE_INT
     if isinstance(value, float):
         return "number"
     return "text"
 
 
 def value_type(value: Any) -> str:
-    """Weaviate type of a metadata value. Empty or mixed lists are `text[]`."""
+    """Observed type of a metadata value. Empty or mixed lists are `text[]`.
+
+    It is a Weaviate type, or `large_int` for an int that no property type
+    but text holds exactly. A list of ints with such an int is `large_int[]`.
+    """
     if isinstance(value, dict) and value.get("#type") == SPARSE_VECTOR:
         return SPARSE_VECTOR
     if isinstance(value, list):
         element_types = {_scalar_type(v) for v in value}
+        if element_types == {"int", LARGE_INT}:
+            element_types = {LARGE_INT}
         return (element_types.pop() if len(element_types) == 1 else "text") + "[]"
     return _scalar_type(value)
 
 
+def has_large_int(types: Iterable[str]) -> bool:
+    """Whether the observed `types` include an int above 2**53 in magnitude."""
+    return any(t.removesuffix("[]") == LARGE_INT for t in types)
+
+
 def _merge_scalars(types: set[str]) -> str:
+    if LARGE_INT in types:
+        return "text"
     if len(types) == 1:
         return next(iter(types))
     if types == {"int", "number"}:
@@ -50,11 +64,11 @@ def resolve_type(counts: dict[str, int]) -> tuple[str, list[str]]:
     return target, sorted(observed - {target})
 
 
-def _stored_int(value: int) -> int:
-    if float(value) >= INT_DOUBLE_LIMIT:
+def _exact_int(value: int) -> int:
+    if abs(value) > EXACT_INT_LIMIT:
         raise ValueError(
-            f"int {value} cannot be stored: Weaviate keeps ints as doubles and "
-            "refuses this value; type the property text"
+            f"int {value} is above 2**53 in magnitude and Weaviate would store "
+            "it rounded; set the property type to text, or text[] for a list"
         )
     return value
 
@@ -67,12 +81,14 @@ def _coerce_scalar(value: Any, target: str) -> Any:
         if kind == "text":
             return value
         return str(value)
-    if target == "number" and kind in ("int", "number"):
+    if target == "number" and kind == "number":
         return float(value)
-    if target == "int" and kind == "int":
-        return _stored_int(value)
+    if target == "number" and kind in ("int", LARGE_INT):
+        return float(_exact_int(value))
+    if target == "int" and kind in ("int", LARGE_INT):
+        return _exact_int(value)
     if target == "int" and kind == "number" and value.is_integer():
-        return _stored_int(int(value))
+        return _exact_int(int(value))
     if target == "boolean" and kind == "boolean":
         return value
     raise ValueError(

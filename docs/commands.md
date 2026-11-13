@@ -75,8 +75,11 @@ exit 2, `invalid_plan`. A warning does not stop `copy` or `sync`.
   [Edits you can make](plan-file.md#edits-you-can-make).
 - Warnings: `missing_property` (an existing collection lacks a planned
   property; `copy` adds it), `coerced_keys` (a metadata key with mixed types
-  whose values `copy` converts), and `quantizer_training` (a trained
-  quantizer whose training limit is above the record count of the source).
+  whose values `copy` converts), `large_ints` (an `int` or `number` property
+  for a key that holds ints above 2**53, which `copy`
+  [rejects](plan-file.md#types-and-conversion)), and `quantizer_training` (a
+  trained quantizer whose training limit is above the record count of the
+  source).
 
 ## `copy`
 

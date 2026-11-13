@@ -282,13 +282,16 @@ def _int(value: Any) -> bool:
 def _same(expected: Any, found: Any) -> bool:
     """Whether `found` is how the target stores `expected`.
 
-    Weaviate 1.40.4 returns an int above 2**53 rounded to a double, so ints
-    are equal when their doubles are.
+    An int has to come back with the same digits, as an int or as a float.
     """
     if isinstance(expected, list) and isinstance(found, list):
         return len(expected) == len(found) and all(map(_same, expected, found))
-    if _int(expected) and _int(found):
-        return float(expected) == float(found)
+    if isinstance(expected, bool) or isinstance(found, bool):
+        return type(expected) is type(found) and expected == found
+    if _int(expected):
+        if isinstance(found, float):
+            return found.is_integer() and int(found) == expected
+        return _int(found) and expected == found
     if isinstance(expected, float) or isinstance(found, float):
         numbers = (int, float)
         return (

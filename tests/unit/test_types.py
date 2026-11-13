@@ -14,6 +14,15 @@ VALUE_TYPES = [
     ([], "text[]"),
     ([1, "a"], "text[]"),
     (SPARSE, "sparse_vector"),
+    (2**53, "int"),
+    (-(2**53), "int"),
+    (2**53 + 1, "large_int"),
+    (-(2**53) - 1, "large_int"),
+    (2**63 - 1, "large_int"),
+    (2.0**60, "number"),
+    ([2**53 + 1], "large_int[]"),
+    ([1, 2**53 + 1], "large_int[]"),
+    ([1.5, 2**53 + 1], "text[]"),
 ]
 
 RESOLVE = [
@@ -25,6 +34,11 @@ RESOLVE = [
     ({"int[]": 2, "number": 1}, ("number[]", ["int[]", "number"])),
     ({"int[]": 2, "number[]": 1}, ("number[]", ["int[]"])),
     ({"int[]": 2, "text[]": 1}, ("text[]", ["int[]"])),
+    ({"large_int": 1}, ("text", ["large_int"])),
+    ({"int": 5, "large_int": 1}, ("text", ["int", "large_int"])),
+    ({"number": 5, "large_int": 1}, ("text", ["large_int", "number"])),
+    ({"large_int[]": 2}, ("text[]", ["large_int[]"])),
+    ({"int[]": 2, "large_int": 1}, ("text[]", ["int[]", "large_int"])),
 ]
 
 COERCE = [
@@ -38,6 +52,15 @@ COERCE = [
     ([1, True], "text[]", ["1", "true"]),
     (2.0, "int", 2),
     ("x", "text", "x"),
+    (2**53, "int", 2**53),
+    (-(2**53), "int", -(2**53)),
+    (2.0**53, "int", 2**53),
+    (2**53, "number", 2.0**53),
+    (1e300, "number", 1e300),
+    (2**53 + 1, "text", "9007199254740993"),
+    (-(2**53) - 1, "text", "-9007199254740993"),
+    (2**63 - 1, "text", "9223372036854775807"),
+    ([1, 2**63 - 1], "text[]", ["1", "9223372036854775807"]),
 ]
 
 
@@ -63,4 +86,25 @@ def test_coerce(value, target, expected):
 )
 def test_coerce_refuses_lossy(value, target):
     with pytest.raises(ValueError):
+        coerce(value, target)
+
+
+# (value, target type). Weaviate keeps an int and a number as a double, which
+# holds every int up to 2**53 in magnitude.
+ABOVE_THE_DOUBLE_LIMIT = [
+    (2**53 + 1, "int"),
+    (-(2**53) - 1, "int"),
+    (2**63 - 1, "int"),
+    (-(2**63), "int"),
+    (2.0**60, "int"),
+    (2**53 + 1, "number"),
+    (-(2**53) - 1, "number"),
+    ([1, 2**53 + 1], "int[]"),
+    ([1, 2**53 + 1], "number[]"),
+]
+
+
+@pytest.mark.parametrize(("value", "target"), ABOVE_THE_DOUBLE_LIMIT)
+def test_coerce_refuses_an_int_above_2_to_the_53(value, target):
+    with pytest.raises(ValueError, match=r"above 2\*\*53"):
         coerce(value, target)

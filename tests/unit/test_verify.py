@@ -13,6 +13,7 @@ from to_weaviate.engine.verify import (
     ID_BATCH,
     Check,
     IdDiff,
+    _same,
     check_line,
     diff_ids,
     id_tables,
@@ -367,23 +368,26 @@ def test_float_property_is_compared_with_isclose():
     assert check.passed, check.detail
 
 
-# (source int, int that the target returns, same). Weaviate 1.40.4 returns an
-# int above 2**53 rounded to a double. copy rejects an int whose double is
-# 2**63, so verify never compares one.
+# (source int, value that the target returns, same). The target keeps an int as
+# a double and can return it as a float.
 STORED_INTS = [
-    (2**53 + 1, 2**53, True),
-    (2**63 - 1024, 2**63 - 1024, True),
-    (-(2**63), -(2**63), True),
-    ([2**53 + 1, 3], [2**53, 3], True),
-    (2**53 + 1, 2**53 + 4, False),
+    (2**53, 2**53, True),
+    (-(2**53), -(2**53), True),
+    (5, 5.0, True),
+    (2**53, 2.0**53, True),
+    ([2**53, 3], [2.0**53, 3], True),
+    (2**53 - 1, 2**53, False),
+    (2**53 - 1, 2.0**53, False),
+    (-(2**53) + 1, -(2**53), False),
+    ([2**53 - 1, 3], [2**53, 3], False),
+    (5, 5.5, False),
+    (1, True, False),
     (2003, 2004, False),
 ]
 
 
 @pytest.mark.parametrize(("source", "stored", "same"), STORED_INTS)
-def test_an_int_is_compared_with_the_double_that_the_target_stores(
-    source, stored, same
-):
+def test_an_int_is_compared_exactly(source, stored, same):
     records = [replace(r, metadata={"year": source}) for r in make_records(3)]
     entry = make_entry()
     if isinstance(source, list):
@@ -397,6 +401,25 @@ def test_an_int_is_compared_with_the_double_that_the_target_stores(
     )
     check = records_check(records, entry, objects)
     assert check.passed is same, check.detail
+
+
+@pytest.mark.parametrize(
+    ("expected", "found", "same"),
+    [
+        (2**60 + 1, 2**60, False),
+        (2**60 + 1, 2.0**60, False),
+        (2**63 - 1, 2.0**63, False),
+        (2**60, 2.0**60, True),
+        (True, 1, False),
+        (True, True, True),
+        (0.1, 0.1 * (1 + 1e-12), True),
+        (3.0, 3, True),
+    ],
+)
+def test_a_stored_value_is_the_same_only_when_no_int_digit_changed(
+    expected, found, same
+):
+    assert _same(expected, found) is same
 
 
 def test_vector_within_tolerance_passes():

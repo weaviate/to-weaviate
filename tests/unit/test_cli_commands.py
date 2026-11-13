@@ -861,6 +861,93 @@ class ChromaRows:
         return response
 
 
+LARGE_INTS = [2**53, 2**53 + 1, -(2**53) - 1, 2**63 - 1]
+
+
+def _large_int_source() -> ChromaSource:
+    rows = [
+        {
+            "id": f"id-{i}",
+            "embedding": [float(i), 1.0],
+            "document": f"doc {i}",
+            "uri": None,
+            "metadata": {"stamp": value},
+        }
+        for i, value in enumerate(LARGE_INTS)
+    ]
+    return ChromaSource(ChromaRows(rows), "t")  # type: ignore[arg-type]
+
+
+def test_a_key_with_ints_above_2_to_the_53_is_drafted_and_copied_as_text():
+    fakes = FakeFactories(_large_int_source())
+    r = invoke(fakes, "inspect", "chroma")
+    assert r.exit_code == 0, r.output
+    assert (
+        "  note: key stamp holds ints above 2**53 in magnitude, which Weaviate "
+        "would store rounded as int or number; the property is typed text and "
+        "holds the decimal digits"
+    ) in r.stdout.splitlines()
+    stamp = load_plan(DIR / "plan.yaml").collections[0].target.properties[-1]
+    assert (stamp.source_key, stamp.type) == ("stamp", "text")
+    assert stamp.coerced_from == ["int", "large_int"]
+    r = invoke(fakes, "check")
+    assert r.exit_code == 0, r.output
+    line = next(x for x in r.stdout.splitlines() if "coerced_keys" in x)
+    assert "key stamp has the types int: 1, large_int: 3" in line
+    assert "large_ints" not in r.stdout
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 0, r.output
+    stored = [
+        fakes.writer.objects[to_uuid(f"id-{i}")].properties["stamp"] for i in range(4)
+    ]
+    assert stored == [str(value) for value in LARGE_INTS]
+    r = invoke(fakes, "verify", "--json")
+    assert r.exit_code == 0, r.output
+
+
+def test_a_plan_that_types_ints_above_2_to_the_53_as_int_gets_rejects():
+    """A plan drafted by 0.1.0 types the key int and has no coerced_from."""
+    fakes = inspected(FakeFactories(_large_int_source()))
+    document = yaml.safe_load((DIR / "plan.yaml").read_text())
+    stamp = document["collections"][0]["target"]["properties"][-1]
+    stamp.update(type="int", tokenization=None, range_filters=True, coerced_from=[])
+    document["collections"][0]["notes"] = []
+    (DIR / "plan.yaml").write_text(yaml.safe_dump(document))
+    r = invoke(fakes, "check", "--json")
+    assert r.exit_code == 0, r.output
+    assert [
+        w["message"]
+        for w in json.loads(r.stdout)["warnings"]
+        if w["code"] == "large_ints"
+    ] == [
+        "key stamp has ints above 2**53 in magnitude in the inspected sample and "
+        "type int cannot hold them exactly; copy rejects each record that has "
+        "one. Set the type to text, or text[] for a list."
+    ]
+    # inspect.json of 0.1.0 counts every int as int.
+    sample = json.loads((DIR / "inspect.json").read_text())
+    sample["collections"][0]["fields"] = [{"key": "stamp", "types": {"int": 4}}]
+    (DIR / "inspect.json").write_text(json.dumps(sample))
+    r = invoke(fakes, "check", "--json")
+    assert r.exit_code == 0 and json.loads(r.stdout)["warnings"] == [], r.output
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 1, r.output
+    row = json.loads(r.stdout)["collections"][0]
+    assert (row["copied"], row["rejects"]) == (1, 3)
+    assert fakes.writer.objects[to_uuid("id-0")].properties["stamp"] == 2**53
+    lines = (DIR / "rejects.jsonl").read_text().splitlines()
+    assert {json.loads(x)["reason"] for x in lines} == {
+        f"stamp: int {value} is above 2**53 in magnitude and Weaviate would store "
+        "it rounded; set the property type to text, or text[] for a list"
+        for value in LARGE_INTS[1:]
+    }
+    assert len(lines) == 3
+    r = invoke(fakes, "verify", "--json")
+    assert r.exit_code == 1, r.output
+    records = next(c for c in json.loads(r.stdout)["checks"] if c["name"] == "records")
+    assert records["detail"] == "sampled 4, compared 1, rejects skipped 3, differing 0"
+
+
 def test_copy_rejects_a_record_whose_embedding_holds_a_null():
     rows = [
         {
