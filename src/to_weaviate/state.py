@@ -306,11 +306,14 @@ class State:
                 [(ref, key) for key in superseded],
             )
 
-    def forget_copied(self, ref: str, keys: Sequence[str]) -> int:
+    def forget_copied(self, ref: str, keys: Sequence[str], reader: str) -> int:
         """Set the copied count of each partition key in `keys` to 0.
 
-        Returns the sum of the counts before the call. A partition that reads
-        from a lower offset again calls this for the partitions it reads.
+        Returns the sum of the counts before the call. The partition `reader`
+        reads from a lower offset again and calls this for the partitions it
+        reads. The other partitions in `keys` lose their last id and previous
+        id in the same commit: `reader` stores the place of their records
+        from now on, and a later search must not stop at their old one.
         """
         with self._transaction():
             forgotten = 0
@@ -323,6 +326,11 @@ class State:
             self._db.executemany(
                 "UPDATE partitions SET copied = 0 WHERE ref = ? AND key = ?",
                 [(ref, key) for key in keys],
+            )
+            self._db.executemany(
+                "UPDATE partitions SET last_id = NULL, previous_id = NULL "
+                "WHERE ref = ? AND key = ?",
+                [(ref, key) for key in keys if key != reader],
             )
         return forgotten
 

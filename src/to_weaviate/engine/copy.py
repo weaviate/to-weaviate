@@ -334,7 +334,9 @@ def _resume_place(
     wanted = [resume.marks[key] for key in keys]
     if _unshifted(source, collection, wanted[0], position):
         return same
-    found = _last_read(source, collection, wanted, position)
+    # `collection.count` can be lower than the offset of a mark.
+    below = min(position, source.count(collection))
+    found = _last_read(source, collection, wanted, below)
     if found is not None and found[0] == 0:
         return _ResumePlace(str(found[1] + 1), None)
     if found is None:
@@ -443,7 +445,7 @@ class _CollectionCopy:
         place = _resume_place(self._source, self._collection, resume, partition, cursor)
         if place.reread is None:
             return place.cursor
-        forgotten = self._state.forget_copied(self._ref, place.reread)
+        forgotten = self._state.forget_copied(self._ref, place.reread, partition.key)
         start = int(place.cursor or 0)
         with self._lock:
             self._copied -= forgotten

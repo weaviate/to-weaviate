@@ -698,6 +698,64 @@ def test_a_stopped_tail_is_checked_on_resume(src, state, events, tmp_path):
     assert result.reread_from is None and _warnings(tmp_path) == []
 
 
+@pytest.mark.parametrize("deleted", [50, 999], ids=["below", "mark"])
+def test_a_tail_stopped_before_its_first_page_is_checked_on_resume(
+    src, state, events, tmp_path, deleted
+):
+    writer = RefusesCall()
+    copy_collection(src, writer, state, events, ENTRY, C, 2)
+    src.records.extend(make_records(250, start=1000))
+    writer.refused = writer.calls + 1
+    with pytest.raises(RuntimeError, match="connection reset"):
+        copy_collection(src, writer, state, events, ENTRY, C, 2)
+    assert state.pending(C.ref) == [(Partition("1000-", "1000", None), None)]
+    # The tail got the mark of the record below its start when it was added.
+    assert state.last_ids(C.ref)["1000-"] == "id-999"
+    _delete(src, deleted)
+    writer.refused = None
+    copy_collection(src, writer, state, events, ENTRY, C, 2)
+    assert _missing(src, writer) == []
+
+
+def test_a_partition_read_again_by_another_keeps_no_mark(state, events):
+    src = FakeSource(make_records(7), page_size=1)
+    writer = RefusesCall()
+
+    def run(refused: int | None = None) -> CopyResult:
+        writer.refused = None if refused is None else writer.calls + refused
+        collection = replace(C, count=len(src.records))
+        return copy_collection(src, writer, state, events, ENTRY, collection, 1)
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        run(refused=5)
+    src.records.extend(make_records(3, start=7))
+    with pytest.raises(RuntimeError, match="connection reset"):
+        run(refused=6)
+    # 0-7 is finished. The tail 7- stopped at offset 9.
+    assert state.pending(C.ref) == [(Partition("7-", "7", None), "9")]
+    _delete(src, 2, 7)
+    # id-8, the mark of the tail, has no id-7 below it: the tail reads from 0.
+    assert run() == CopyResult(copied=8, rejects=0, reread_from=0, written=8)
+    assert state.last_ids(C.ref) == {"7-": "id-9"}
+    assert state.previous_ids(C.ref) == {"7-": "id-8"}
+    _delete(src, 1, 3, 9)
+    src.records.extend(make_records(3, start=10))
+    result = run()
+    assert _missing(src, writer) == []
+    assert result.copied == len(src.records) == 8
+
+
+def test_a_search_for_a_mark_starts_at_the_source_count(src, state, events):
+    writer = FakeWriter()
+    _stopped_run(src, state, writer, [250, 400, 500, 850])
+    _delete(src, *range(100, 1000))
+    copy_collection(src, writer, state, events, ENTRY, C, 1)
+    assert _missing(src, writer) == []
+    # 250-500, 750-1000 and the tail each read one id page for the check and
+    # one for the search below offset 100.
+    assert src.id_reads == 3 * 2
+
+
 def test_a_resume_of_an_unchanged_source_costs_one_id_read_per_checked_partition(
     src, state, events
 ):

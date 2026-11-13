@@ -119,6 +119,8 @@ is not finished, before it reads that part's next page:
   unfinished part before it. When there is no such part, the run reads from
   the start of the collection and warns, once per collection, "the source
   changed since the last run; re-reading from the start".
+  A part that copies records added after the first run reads from the start
+  of the collection when one of its own last two records is gone.
   Records read again are written again unchanged.
   The JSON document of such a run gives the lowest position it read again
   from as `reread_from`.

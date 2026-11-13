@@ -134,12 +134,13 @@ def test_forget_copied_resets_the_counts_and_returns_their_sum(tmp_path):
     state = make_state(tmp_path)
     state.init_collection(REF, parts("a", "b", "c"), 12)
     for key, copied in (("a", 3), ("b", 4), ("c", 5)):
-        state.advance(REF, key, "9", copied, last_id="r")
-    assert state.forget_copied(REF, ["a", "c", "missing"]) == 8
+        state.advance(REF, key, "9", copied, last_id="r", previous_id="q")
+    assert state.forget_copied(REF, ["a", "c", "missing"], "a") == 8
     assert state.progress()[0].copied == 4
-    # The cursors and the last ids stay.
     assert [cursor for _, cursor in state.pending(REF)] == ["9", "9", "9"]
-    assert state.last_ids(REF) == {"a": "r", "b": "r", "c": "r"}
+    # c is read again by a and loses its ids. a and b keep theirs.
+    assert state.last_ids(REF) == {"a": "r", "b": "r"}
+    assert state.previous_ids(REF) == {"a": "q", "b": "q"}
 
 
 def test_progress_totals(tmp_path):
