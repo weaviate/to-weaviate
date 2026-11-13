@@ -9,6 +9,9 @@ from to_weaviate.sources.chroma.client import (
     CHROMA_MAX_PAGE,
     COLLECTION_GONE_HINT,
     DATABASES_FORBIDDEN_HINT,
+    NO_ROUTE_HINT,
+    NOT_FOUND_HINT,
+    QUOTA_HINT,
     ChromaClient,
     ChromaError,
 )
@@ -507,6 +510,10 @@ def test_other_answers_keep_the_general_hint():
     client, _ = make(_answer(404))
     with pytest.raises(ChromaError) as info:
         client.databases("t")
+    assert info.value.hint == NOT_FOUND_HINT
+    client, _ = make(_answer(400))
+    with pytest.raises(ChromaError) as info:
+        client.databases("t")
     assert info.value.hint is None
     client, _ = make(_answer(403))
     with pytest.raises(ChromaError) as info:
@@ -604,3 +611,242 @@ def test_collection_by_name_reads_the_collection_document():
         seen[0].url.raw_path.decode()
         == "/api/v2/tenants/t/databases/d/collections/my%20docs"
     )
+
+
+def _count(client):
+    return client.count("t", "d", "c")
+
+
+INVALID_COLLECTION = {
+    "error": "InvalidCollection",
+    "message": "Collection c does not exist.",
+}
+QUOTA = {
+    "error": "ChromaError",
+    "message": "'Limit value' exceeded quota limit for action 'Get': current "
+    "usage of 301 exceeds limit of 300",
+}
+
+
+def test_a_400_invalid_collection_on_a_collection_says_to_inspect_again():
+    client, _ = make(lambda r: httpx.Response(400, json=INVALID_COLLECTION))
+    with pytest.raises(ChromaError) as info:
+        _count(client)
+    assert (str(info.value), info.value.hint) == (
+        "Chroma returned HTTP 400: Collection c does not exist.",
+        COLLECTION_GONE_HINT,
+    )
+    with pytest.raises(ChromaError) as info:
+        client.identity()
+    assert info.value.hint is None
+
+
+def test_another_400_on_a_collection_keeps_the_general_hint():
+    body = {"error": "InvalidArgumentError", "message": "Invalid where clause"}
+    client, _ = make(lambda r: httpx.Response(400, json=body))
+    with pytest.raises(ChromaError) as info:
+        _count(client)
+    assert (info.value.message, info.value.hint) == ("Invalid where clause", None)
+
+
+@pytest.mark.parametrize(
+    ("answer", "call", "message"),
+    [
+        (
+            httpx.Response(404),
+            lambda client: client.identity(),
+            "Chroma returned HTTP 404: no route for GET /api/v2/api/v2/auth/identity",
+        ),
+        (
+            httpx.Response(404, json={"detail": "Not Found"}),
+            lambda client: client.collections("t", "d"),
+            "Chroma returned HTTP 404: no route for GET "
+            "/api/v2/api/v2/tenants/t/databases/d/collections",
+        ),
+        (
+            httpx.Response(404),
+            _count,
+            "Chroma returned HTTP 404: no route for GET "
+            "/api/v2/api/v2/tenants/t/databases/d/collections/c/count",
+        ),
+        (
+            httpx.Response(405, headers={"Allow": "POST"}),
+            lambda client: client.databases("t"),
+            "Chroma returned HTTP 405: no route for GET "
+            "/api/v2/api/v2/tenants/t/databases",
+        ),
+        (
+            httpx.Response(404, html="<h1>404 Not Found</h1>"),
+            lambda client: client.identity(),
+            "Chroma returned HTTP 404: no route for GET /api/v2/api/v2/auth/identity",
+        ),
+        (
+            httpx.Response(404, text="404 page not found"),
+            _count,
+            "Chroma returned HTTP 404: no route for GET "
+            "/api/v2/api/v2/tenants/t/databases/d/collections/c/count",
+        ),
+        (
+            httpx.Response(405, html="<h1>405 Not Allowed</h1>"),
+            lambda client: client.databases("t"),
+            "Chroma returned HTTP 405: no route for GET "
+            "/api/v2/api/v2/tenants/t/databases",
+        ),
+    ],
+    ids=[
+        "404 empty",
+        "404 detail",
+        "404 empty on a collection",
+        "405 empty",
+        "404 html",
+        "404 text on a collection",
+        "405 html",
+    ],
+)
+def test_an_answer_of_a_missing_route_names_the_route_and_chroma_url(
+    answer, call, message
+):
+    client, sleeps = make(lambda r: answer, url="http://chroma.test/api/v2")
+    with pytest.raises(ChromaError) as info:
+        call(client)
+    assert (str(info.value), info.value.hint) == (message, NO_ROUTE_HINT)
+    assert sleeps == []
+
+
+def test_a_405_with_a_body_keeps_the_general_hint():
+    answer = httpx.Response(405, json={"detail": "Method Not Allowed"})
+    client, _ = make(lambda r: answer)
+    with pytest.raises(ChromaError) as info:
+        client.databases("t")
+    assert (str(info.value), info.value.hint) == (
+        "Chroma returned HTTP 405: Method Not Allowed",
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda client: client.databases("t"),
+        lambda client: client.collections("t", "d"),
+    ],
+    ids=["databases", "collections"],
+)
+def test_a_404_with_a_body_outside_a_collection_names_tenant_and_database(call):
+    body = {"error": "NotFoundError", "message": "Tenant [t] not found"}
+    client, _ = make(lambda r: httpx.Response(404, json=body))
+    with pytest.raises(ChromaError) as info:
+        call(client)
+    assert (info.value.message, info.value.hint) == (
+        "Tenant [t] not found",
+        NOT_FOUND_HINT,
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"message": {"reason": "no"}},
+        {"message": {"reason": "no"}, "error": ["x"]},
+        {"error": 7, "detail": {"a": 1}},
+    ],
+)
+def test_an_error_field_that_is_not_text_leaves_the_raw_body(body):
+    answer = httpx.Response(400, json=body)
+    client, _ = make(lambda r: answer)
+    with pytest.raises(ChromaError) as info:
+        client.identity()
+    assert info.value.message == answer.text
+
+
+def test_a_422_of_a_quota_names_chroma_cloud():
+    client, _ = make(lambda r: httpx.Response(422, json=QUOTA))
+    with pytest.raises(ChromaError) as info:
+        client.get("t", "d", "c", limit=300, offset=0, include=[])
+    assert (info.value.message, info.value.hint) == (QUOTA["message"], QUOTA_HINT)
+    body = {"error": "ChromaError", "message": "include[0]: unknown variant"}
+    client, _ = make(lambda r: httpx.Response(422, json=body))
+    with pytest.raises(ChromaError) as info:
+        client.get("t", "d", "c", limit=300, offset=0, include=[])
+    assert info.value.hint is None
+
+
+@pytest.mark.parametrize(
+    ("detail", "message"),
+    [
+        ("Method Not Allowed", "Method Not Allowed"),
+        (
+            [
+                {
+                    "type": "enum",
+                    "loc": ["body", "include", 0],
+                    "msg": "Input should be 'documents' or 'embeddings'",
+                    "input": "bogus",
+                },
+                {"type": "int_parsing", "loc": ["body", "limit"], "msg": "Not an int"},
+            ],
+            "body.include.0: Input should be 'documents' or 'embeddings'; "
+            "body.limit: Not an int",
+        ),
+        (["plain", {"msg": "no loc"}], "plain; no loc"),
+    ],
+    ids=["text", "validation errors", "other items"],
+)
+def test_error_message_from_the_detail_field(detail, message):
+    client, _ = make(lambda r: httpx.Response(422, json={"detail": detail}))
+    with pytest.raises(ChromaError) as info:
+        client.identity()
+    assert info.value.message == message
+
+
+@pytest.mark.parametrize("detail", [[], {"a": 1}, 7, "", [{"type": "enum"}]])
+def test_a_detail_field_without_text_leaves_the_raw_body(detail):
+    answer = httpx.Response(422, json={"detail": detail})
+    client, _ = make(lambda r: answer)
+    with pytest.raises(ChromaError) as info:
+        client.identity()
+    assert info.value.message == answer.text
+
+
+def test_the_detail_field_is_redacted():
+    body = {"detail": [{"loc": ["header"], "msg": "bad token ck-x"}]}
+    client, _ = make(lambda r: httpx.Response(422, json=body))
+    with pytest.raises(ChromaError) as info:
+        client.identity()
+    assert info.value.message == "header: bad token ***"
+
+
+@pytest.mark.parametrize("status", [400, 502])
+def test_an_error_without_a_body_does_not_end_with_a_colon(status):
+    client, _ = make(lambda r: httpx.Response(status))
+    with pytest.raises(ChromaError) as info:
+        client.identity()
+    assert str(info.value) == f"Chroma returned HTTP {status}: the answer has no body"
+
+
+@pytest.mark.parametrize("status", [400, 404, 405, 408, 409, 410, 413, 415, 422, 501])
+def test_statuses_outside_the_retry_set_are_not_retried(status):
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(status, json={"message": "no"})
+
+    client, sleeps = make(handler)
+    with pytest.raises(ChromaError):
+        client.identity()
+    assert len(calls) == 1 and sleeps == []
+
+
+@pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+def test_statuses_of_the_retry_set_are_retried(status):
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(status, json={"message": "no"})
+
+    client, sleeps = make(handler)
+    with pytest.raises(ChromaError):
+        client.identity()
+    assert len(calls) == 7 and len(sleeps) == 6

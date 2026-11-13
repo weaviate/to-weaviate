@@ -180,7 +180,7 @@ source conforms; nothing checks it at run time.
 | `get` returns the records of the ids it holds and leaves out the others. | `sync --prune` keeps the object of every record that `get` returns. |
 | `inspect` lists every metadata key in `fields`. | A key missing from the plan makes each record that has it a reject. |
 | Metadata values are `bool`, `int`, `float`, `str`, `None`, or lists of one of these. | `types.py` maps and converts only these. |
-| Errors are the source's own exception class, with a `status` and an optional `hint`. | `cli.py` maps them to `auth_failed` or `source_unreachable`. |
+| Errors are the source's own exception class, with a `status` and an optional `hint`. | `cli.py` maps them to `auth_failed`, `source_rejected` (a status that a later run gets again) or `source_unreachable`. |
 | Every `SourceCollection` field survives `dataclasses.asdict` to JSON and back. | `inspect.json` stores it. |
 
 A source that pages with an opaque cursor, such as a token or the last id,

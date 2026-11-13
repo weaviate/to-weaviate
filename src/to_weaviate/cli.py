@@ -126,7 +126,11 @@ from to_weaviate.sources.base import (
     SourceCollection,
     SourceNotCompacted,
 )
-from to_weaviate.sources.chroma.client import ChromaClient, ChromaError
+from to_weaviate.sources.chroma.client import (
+    COLLECTION_GONE_HINT,
+    ChromaClient,
+    ChromaError,
+)
 from to_weaviate.sources.chroma.mapping import stored_embedding, vectorizer_for
 from to_weaviate.sources.chroma.source import ChromaSource
 from to_weaviate.state import (
@@ -192,6 +196,14 @@ UTF8_HINT = (
     "it again."
 )
 CHROMA_HINT = "Check CHROMA_URL and that the Chroma server is running."
+CHROMA_REJECTED_HINT = (
+    "Chroma refused the request and will refuse it again when the command runs "
+    "again. The message holds the reason."
+)
+# Chroma 0.5 and 0.6 answer 403 for a right token in the wrong header.
+CHROMA_TOKEN_HEADER_HINT = (
+    "If the server reads the token from another header, set CHROMA_TOKEN_HEADER."
+)
 CHANGED_HINT = "Stop the writes to the collection, then run the command again."
 NOT_COMPACTED_HINT = (
     "Stop the writes to the collection and run the command again once Chroma "
@@ -302,6 +314,15 @@ def _refused(service: str, key: str, forbidden: bool) -> CliError:
     )
 
 
+def _source_rejected(status: int) -> bool:
+    """Whether the source answers the same request with HTTP `status` again.
+
+    408, 429 and every 5xx but 501 can pass on a later run. A 3xx and a 200
+    that is not JSON stay source_unreachable: the address is not a Chroma API.
+    """
+    return status == 501 or (400 <= status < 500 and status not in (408, 429))
+
+
 def _as_cli_error(exc: Exception) -> CliError:
     """The CliError for `exc`. An exception outside the table is internal_error.
 
@@ -367,10 +388,17 @@ def _as_cli_error(exc: Exception) -> CliError:
             refused = _refused("Chroma", "CHROMA_API_KEY", exc.status == 403)
             if exc.hint is not None:
                 refused.hint = exc.hint
+            if exc.status == 403:
+                refused.hint = f"{refused.hint} {CHROMA_TOKEN_HEADER_HINT}"
             return refused
         if exc.status is None:
             return CliError(
                 "source_unreachable", f"Chroma could not be reached: {exc}", CHROMA_HINT
+            )
+        # A collection created again under its name is reported with HTTP 200.
+        if _source_rejected(exc.status) or exc.hint == COLLECTION_GONE_HINT:
+            return CliError(
+                "source_rejected", str(exc), exc.hint or CHROMA_REJECTED_HINT
             )
         return CliError("source_unreachable", str(exc), exc.hint or CHROMA_HINT)
     if isinstance(exc, httpx.TransportError):

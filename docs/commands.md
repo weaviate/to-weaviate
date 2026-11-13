@@ -182,7 +182,11 @@ The message holds the provider's status and text. It does not hold the id of
 the record. Read the provider's text for the cause and solve it at the
 provider. To copy the other collections in the meantime, run `copy` with
 `--collection` for each of them. A refused API key is not retried: `copy`
-stops with `auth_failed`, exit 3.
+stops with `auth_failed`, exit 3. Another request that the source refuses,
+with HTTP 501 or a 4xx status other than 408 and 429, is not retried either:
+`copy` stops with `source_rejected`, exit 2, because the same request is
+refused again until an input changes. HTTP 408 is not retried either: `copy`
+stops with `source_unreachable`, exit 4.
 
 ### Existing collections and the recorded target
 
@@ -482,7 +486,7 @@ The exit code is the same with and without `--json`.
 |---|---|---|
 | 0 | Success | |
 | 1 | Rejected records, a failed verification, or a collection with more than 10% stale objects that `sync --prune` left alone | `rejects`, `verification_failed`, `prune_limit` |
-| 2 | Usage error, invalid plan, a state of another target, a state file that cannot be read, a directory that cannot be written, or a first run into a collection with objects that `sync --prune` would delete, not confirmed | `usage`, `invalid_plan`, `plan_mismatch`, `target_rejected_schema`, `state_mismatch`, `invalid_state`, `directory_unwritable`, `foreign_objects` |
+| 2 | Usage error, invalid plan, a state of another target, a state file that cannot be read, a directory that cannot be written, a request that the source refused and refuses again until an input changes, or a first run into a collection with objects that `sync --prune` would delete, not confirmed | `usage`, `invalid_plan`, `plan_mismatch`, `target_rejected_schema`, `state_mismatch`, `invalid_state`, `directory_unwritable`, `source_rejected`, `foreign_objects` |
 | 3 | Missing credential or authentication failure | `missing_credential`, `auth_failed` |
 | 4 | Source or target unreachable, a source collection that the source compacted during the read or did not finish compacting, a source still written to during `sync --prune`, or a deletion that Weaviate did only partly | `source_unreachable`, `target_unreachable`, `source_compacting`, `source_writing`, `delete_failed` |
 | 5 | Internal error | `internal_error` |
