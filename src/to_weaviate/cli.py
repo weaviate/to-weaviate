@@ -335,7 +335,7 @@ def _as_cli_error(exc: Exception) -> CliError:
         return CliError(
             "missing_credential",
             str(exc),
-            f"Set {exc.var} in the environment or in .env.",
+            exc.hint or f"Set {exc.var} in the environment or in .env.",
         )
     if isinstance(exc, InvalidSetting):
         return CliError("usage", str(exc), exc.hint)

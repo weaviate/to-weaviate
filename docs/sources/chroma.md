@@ -23,6 +23,11 @@ the plan keeps the source vector. It never writes to Chroma.
 | `CHROMA_DATABASE` | no | The database that `inspect chroma` reads when you pass no `--database`. With neither, it reads every database of the tenant. |
 | `CHROMA_TOKEN_HEADER` | no | The header that carries the key. Default: `x-chroma-token`. With `Authorization`, the tool sends `Bearer <key>`. |
 
+Without `CHROMA_URL`, the source is Chroma Cloud, and `inspect chroma`,
+`copy`, `sync` and `verify` stop with `missing_credential`, exit 3, when
+`CHROMA_API_KEY` is not set. For a self-hosted Chroma server, set
+`CHROMA_URL` to its address.
+
 `inspect` records `CHROMA_URL`, without its userinfo, query and fragment,
 and `CHROMA_TENANT`, or null when it is unset, in `plan.yaml`. `copy` and
 `verify` compare both with the current values as text, and stop with
