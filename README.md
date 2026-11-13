@@ -8,7 +8,7 @@
 [Weaviate](https://weaviate.io).
 
 > [!NOTE]
-> Chroma is the only supported source so far. To ask for another one,
+> Chroma is the only supported source. To ask for another one,
 > [open an issue](https://github.com/weaviate/to-weaviate/issues/new).
 
 ![to-weaviate inspect reads a Chroma collection of 5,000 records with 1536-dimension vectors, the start of plan.yaml shows the source and target, then check and copy run, sync --prune writes the 10 records that changed since the copy and deletes the 5 whose source record is gone, and verify prints PASS for the count, ids and records checks](docs/demo/demo.gif)
@@ -78,8 +78,8 @@ flowchart LR
 5. Optional: run `to-weaviate sync` to write the records that are new or
    changed since the copy. Run it as often as you like before the last step.
 6. Stop the writes to the source, then run `to-weaviate sync --prune`. It
-   writes the records that changed since the last run and deletes the
-   objects whose source record is gone.
+   writes the records that are new or changed since the last run and
+   deletes the objects whose source record is gone.
 7. Run `to-weaviate verify`. It compares Weaviate with the source and writes
    `report.md`. When every check passes, switch your application to
    Weaviate.
@@ -112,8 +112,11 @@ WEAVIATE_URL=https://my-cluster.weaviate.cloud
 WEAVIATE_API_KEY=<Weaviate API key>
 ```
 
-The API key and the URL of the cluster are in the
-[Weaviate Cloud console](https://console.weaviate.cloud).
+`WEAVIATE_URL` and `WEAVIATE_API_KEY` are the URL and an API key of the
+Weaviate Cloud cluster. Both are in the
+[Weaviate Cloud console](https://console.weaviate.cloud). `CHROMA_API_KEY`
+is a Chroma Cloud API key. The [Chroma guide](docs/sources/chroma.md) lists
+the other Chroma settings.
 
 ### Inspect and review the plan
 
