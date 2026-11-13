@@ -127,6 +127,30 @@ def test_openai_ada_002_gets_the_weaviate_model_name_on_a_regional_openai_url():
     assert v.options == {"model": "ada", "base_url": "https://eu.api.openai.com"}
 
 
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://api.openai.com.proxy.example.com",
+        "https://myapi.openai.com",
+        "https://proxy.example.com/api.openai.com",
+        "https://proxy.example.com?upstream=api.openai.com",
+        "https://api.openai.com@proxy.example.com",
+    ],
+)
+def test_openai_ada_002_keeps_its_name_when_the_host_is_not_openai(base_url):
+    v, _ = vectorizer_for(known("openai", model_name=ADA_002, api_base=base_url))
+    assert v is not None
+    assert v.options["model"] == ADA_002
+
+
+def test_openai_ada_002_gets_the_weaviate_model_name_on_an_openai_host_with_a_port():
+    v, _ = vectorizer_for(
+        known("openai", model_name=ADA_002, api_base="https://API.openai.com:443/v1")
+    )
+    assert v is not None
+    assert v.options["model"] == "ada"
+
+
 @pytest.mark.parametrize("model", ["text-embedding-3-small", "text-embedding-3-large"])
 @pytest.mark.parametrize("api_base", [None, "https://proxy.example.com/v1"])
 def test_openai_v3_models_keep_their_name(model, api_base):

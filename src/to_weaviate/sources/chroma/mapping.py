@@ -1,11 +1,13 @@
 from typing import Any, NamedTuple
+from urllib.parse import urlsplit
 
 from to_weaviate.plan import VectorizerPlan
 from to_weaviate.settings import stored_url
 
+OPENAI_HOST = "api.openai.com"
 # The OpenAI client's default base URL, https://api.openai.com/v1, after
 # `_openai_base`. Weaviate uses it when base_url is not set.
-OPENAI_DEFAULT_BASE = "https://api.openai.com"
+OPENAI_DEFAULT_BASE = f"https://{OPENAI_HOST}"
 # The model of chromadb's OpenAI embedding function when none is given.
 OPENAI_ADA_002 = "text-embedding-ada-002"
 
@@ -146,6 +148,20 @@ def stored_embedding(
     return stored, [note]
 
 
+def _openai_host(base_url: str) -> bool:
+    """Whether the host of `base_url` is api.openai.com or a subdomain of it.
+
+    Weaviate applies its OpenAI model names to every base URL that contains
+    api.openai.com. This rule is narrower: a URL that holds the name outside
+    the host, or in a longer host name, is another server.
+    """
+    try:
+        host = urlsplit(base_url).hostname or ""
+    except ValueError:
+        return False
+    return host == OPENAI_HOST or host.endswith("." + OPENAI_HOST)
+
+
 def _openai_base(api_base: str) -> str:
     """`api_base` without one trailing `/v1` and without a trailing slash.
 
@@ -219,12 +235,11 @@ def vectorizer_for(
             )
     # On OpenAI's own endpoint Weaviate accepts this model only as `ada`,
     # which with its default modelVersion 002 requests text-embedding-ada-002.
-    # Weaviate takes every base_url that contains api.openai.com as OpenAI's
-    # endpoint. With any other base_url it sends the model name unchanged.
+    # With any other base_url it sends the model name unchanged.
     if (
         function.module == "text2vec-openai"
         and model == OPENAI_ADA_002
-        and "api.openai.com" in options.get("base_url", "api.openai.com")
+        and _openai_host(options.get("base_url", OPENAI_DEFAULT_BASE))
     ):
         options["model"] = "ada"
     return VectorizerPlan(module=function.module, options=options), notes

@@ -146,7 +146,8 @@ The plan carries the model name and, where the module takes them, the
 dimensions, the base URL or endpoint, the project and the location.
 
 The plan names OpenAI's `text-embedding-ada-002` as `ada` when the function
-has no base URL, or one that contains `api.openai.com`. Weaviate accepts only
+has no base URL, or one whose host is `api.openai.com` or a subdomain of it.
+Weaviate accepts only
 that name on OpenAI's endpoint, and it requests `text-embedding-ada-002` for
 it. With another base URL the plan keeps the name `text-embedding-ada-002`,
 which Weaviate sends unchanged. `check` reports `keep_model_mismatch` for a kept
