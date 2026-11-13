@@ -2322,6 +2322,50 @@ def test_a_provider_that_refuses_the_key_of_one_object_is_auth_failed(tmp_path):
     assert not rejects.exists() or rejects.read_text() == ""
 
 
+PROVIDER_429 = (
+    "connection to: OpenAI API failed with status: 429 request-id: req-2 error: "
+    "Rate limit reached for text-embedding-3-small in organization org-made on "
+    "requests per min (RPM): Limit 3, Used 3, Requested 1."
+)
+
+
+def test_a_provider_that_keeps_limiting_one_object_is_target_unreachable(tmp_path):
+    client = FakeInsertClient(
+        reject=lambda obj: PROVIDER_429 if obj.uuid == to_uuid("id-3") else None
+    )
+    writer = WeaviateWriter(client, sleep=lambda s: None)  # type: ignore[arg-type]
+    source = FakeSource(cli_records(10))
+    fakes = inspected(FakeFactories(source, writer=writer, store=client))
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json")
+    assert r.exit_code == 4, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["hint"]) == (
+        "target_unreachable",
+        "Wait for the provider's rate limit to reset or for the provider to "
+        "answer again, or lower --parallelism. Then run to-weaviate copy again. "
+        "It resumes at this page.",
+    )
+    assert d["message"] == (
+        f"Weaviate refused 1 object of a batch of 10 in Docs: {PROVIDER_429}"
+    )
+    assert len(client.writes_per_uuid) == 9
+    assert set(client.writes_per_uuid.values()) == {1}
+    state = State(tmp_path / DIR / "state.sqlite")
+    try:
+        assert state.pending(FakeSource.REF) == [(Partition("0-10", "0", "10"), None)]
+        assert state.progress()[0].rejects == 0
+    finally:
+        state.close()
+    assert not (tmp_path / DIR / "rejects.jsonl").exists()
+
+    client.reject = lambda obj: None
+    r = invoke(fakes, "copy", "--parallelism", "1", "--json")
+    assert r.exit_code == 0, r.output
+    row = json.loads(r.stdout)["collections"][0]
+    assert (row["copied"], row["rejects"]) == (10, 0)
+    assert len(client.writes_per_uuid) == 10
+
+
 def test_a_provider_without_a_variable_is_named_in_the_hint():
     refusal = "connection to Ollama API failed with status: 403 error: forbidden"
     fakes, client = refusing(10, lambda n: all_failed(refusal))
