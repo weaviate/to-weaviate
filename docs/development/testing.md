@@ -161,7 +161,10 @@ values to every child process, and the target refuses them.
 
 Every job except `unit (lowest deps)` installs the versions in `uv.lock` with
 `uv sync --locked --extra test`, which fails when `uv.lock` does not match
-`pyproject.toml`.
+`pyproject.toml`. The mypy hook is the exception inside `lint`: pre-commit
+installs the packages in `additional_dependencies` of
+`.pre-commit-config.yaml`, not the versions in `uv.lock`. Those entries carry
+the bounds of `pyproject.toml`.
 
 Both acceptance jobs run Weaviate in a kind cluster with `ASYNC_INDEXING`.
 The tests in `tests/acceptance/chroma/test_cluster.py` run in the `cluster`
