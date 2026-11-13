@@ -27,6 +27,7 @@ from weaviate.exceptions import (
     WeaviateQueryError,
     WeaviateRetryError,
     WeaviateTenantGetError,
+    WeaviateTimeoutError,
 )
 
 from to_weaviate import plan as p
@@ -611,6 +612,73 @@ def test_ensure_collection_does_not_retry_other_errors():
 
 def _status_error(status: int) -> UnexpectedStatusCodeError:
     return UnexpectedStatusCodeError("x", httpx.Response(status))
+
+
+def _already_exists() -> UnexpectedStatusCodeError:
+    body = {"error": [{"message": 'class name "My_docs" already exists'}]}
+    return UnexpectedStatusCodeError("refused", httpx.Response(422, json=body))
+
+
+def _applied_then_lost(client: FakeClient, cfg: Any, lost: Exception) -> None:
+    """The first create stores a collection with `cfg` and raises `lost`.
+
+    Every later create is refused with 422 "already exists".
+    """
+    calls: list[dict[str, Any]] = []
+
+    def create(**kwargs: Any) -> FakeCollection:
+        calls.append(kwargs)
+        if len(calls) == 1:
+            client.collections.existing = FakeCollection(cfg)
+            raise lost
+        raise _already_exists()
+
+    client.collections.create = create  # type: ignore[method-assign]
+
+
+@pytest.mark.parametrize(
+    "lost", [WeaviateTimeoutError("read timeout"), WeaviateConnectionError("reset")]
+)
+def test_a_create_applied_before_its_answer_was_lost_counts_as_created(lost):
+    client = FakeClient(None)
+    _applied_then_lost(client, config(tenancy=True), lost)
+    schema_ = WeaviateSchema(client, sleep=lambda s: None)  # type: ignore[arg-type]
+    assert schema_.ensure([entry(tenant="a")]) == "created"
+    assert client.collections.existing.tenants.created == [["a"]]  # type: ignore[union-attr]
+
+
+def test_a_lost_create_that_left_another_collection_is_a_plan_mismatch():
+    client = FakeClient(None)
+    _applied_then_lost(
+        client, config(properties={"year": "text"}), WeaviateTimeoutError("t")
+    )
+    with pytest.raises(PlanMismatch, match="property year: type is text"):
+        WeaviateSchema(client, sleep=lambda s: None).ensure([entry()])  # type: ignore[arg-type]
+
+
+def test_already_exists_on_the_first_create_attempt_is_schema_rejected():
+    client = FakeClient(None)
+
+    def create(**kwargs: Any) -> FakeCollection:
+        client.collections.existing = FakeCollection(config())
+        raise _already_exists()
+
+    client.collections.create = create  # type: ignore[method-assign]
+    with pytest.raises(SchemaRejected, match="already exists"):
+        WeaviateSchema(client, sleep=lambda s: None).ensure([entry()])  # type: ignore[arg-type]
+
+
+def test_a_create_refused_for_another_reason_after_a_lost_answer_is_schema_rejected():
+    client = FakeClient(None)
+    body = {"error": [{"message": "vector index dynamic needs async indexing"}]}
+    client.collections.fail = [
+        WeaviateTimeoutError("read timeout"),
+        UnexpectedStatusCodeError("refused", httpx.Response(422, json=body)),
+    ]
+    with pytest.raises(SchemaRejected) as info:
+        WeaviateSchema(client, sleep=lambda s: None).ensure([entry()])  # type: ignore[arg-type]
+    assert str(info.value) == "vector index dynamic needs async indexing"
+    assert client.collections.existing is None
 
 
 @pytest.mark.parametrize("status", [429, 500, 502, 503, 504])

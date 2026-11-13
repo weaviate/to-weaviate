@@ -592,6 +592,40 @@ def _add_property(
         raise
 
 
+def _create(
+    client: weaviate.WeaviateClient,
+    group: list[CollectionPlan],
+    sleep: Callable[[float], None],
+) -> None:
+    """Create the collection of `group`.
+
+    The server can apply a create whose answer does not arrive. The attempt
+    after it is then refused, because the collection exists. A 400 or 422
+    after a retried attempt is therefore judged by the collection that exists:
+    none re-raises, one that matches the plan counts as created, another
+    raises PlanMismatch.
+    """
+    kwargs = collection_kwargs(group)
+    retried = False
+
+    def judge(exc: Exception) -> float | None:
+        nonlocal retried
+        delay = transient(exc)
+        retried = retried or delay is not None
+        return delay
+
+    try:
+        with_retry(lambda: client.collections.create(**kwargs), judge, sleep=sleep)
+    except UnexpectedStatusCodeError as exc:
+        if not retried or exc.status_code not in (400, 422):
+            raise
+        found = differences(client, group)
+        if found is None:
+            raise
+        if found:
+            raise PlanMismatch("; ".join(found)) from exc
+
+
 def ensure_collection(
     client: weaviate.WeaviateClient,
     group: list[CollectionPlan],
@@ -607,8 +641,7 @@ def ensure_collection(
     name = group[0].target.name
     result: Literal["created", "exists"] = "exists"
     if found is None:
-        kwargs = collection_kwargs(group)
-        with_retry(lambda: client.collections.create(**kwargs), transient, sleep=sleep)
+        _create(client, group, sleep)
         result = "created"
     else:
         for prop in _missing_properties(client, group):
