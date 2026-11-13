@@ -126,7 +126,11 @@ from to_weaviate.sources.base import (
     SourceCollection,
     SourceNotCompacted,
 )
-from to_weaviate.sources.chroma.client import ChromaClient, ChromaError
+from to_weaviate.sources.chroma.client import (
+    COLLECTION_GONE_HINT,
+    ChromaClient,
+    ChromaError,
+)
 from to_weaviate.sources.chroma.mapping import stored_embedding, vectorizer_for
 from to_weaviate.sources.chroma.source import ChromaSource
 from to_weaviate.state import (
@@ -380,14 +384,15 @@ def _as_cli_error(exc: Exception) -> CliError:
             refused = _refused("Chroma", "CHROMA_API_KEY", exc.status == 403)
             if exc.hint is not None:
                 refused.hint = exc.hint
-            elif exc.status == 403:
+            if exc.status == 403:
                 refused.hint = f"{refused.hint} {CHROMA_TOKEN_HEADER_HINT}"
             return refused
         if exc.status is None:
             return CliError(
                 "source_unreachable", f"Chroma could not be reached: {exc}", CHROMA_HINT
             )
-        if _source_rejected(exc.status):
+        # A collection created again under its name is reported with HTTP 200.
+        if _source_rejected(exc.status) or exc.hint == COLLECTION_GONE_HINT:
             return CliError(
                 "source_rejected", str(exc), exc.hint or CHROMA_REJECTED_HINT
             )

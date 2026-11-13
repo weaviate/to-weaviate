@@ -37,7 +37,12 @@ from to_weaviate.cli import app
 from to_weaviate.output import ERROR_EXIT, CliError
 from to_weaviate.plan import load_plan, save_plan
 from to_weaviate.sources.base import SourceNotCompacted
-from to_weaviate.sources.chroma.client import ChromaClient, ChromaError
+from to_weaviate.sources.chroma.client import (
+    COLLECTION_GONE_HINT,
+    NOT_JSON_HINT,
+    ChromaClient,
+    ChromaError,
+)
 from to_weaviate.target.schema import collection_kwargs
 from to_weaviate.target.writer import WeaviateWriter
 
@@ -909,6 +914,16 @@ REFUSED = "will refuse it again"
         (ChromaError(422, "expected u32"), "source_rejected", REFUSED),
         (ChromaError(501, "Unimplemented"), "source_rejected", REFUSED),
         (ChromaError(404, "gone", hint="inspect again"), "source_rejected", "inspect"),
+        (
+            ChromaError(200, "another id", hint=COLLECTION_GONE_HINT),
+            "source_rejected",
+            "inspect chroma --force",
+        ),
+        (
+            ChromaError(200, "the answer is not JSON", hint=NOT_JSON_HINT),
+            "source_unreachable",
+            "CHROMA_URL",
+        ),
         (ChromaError(408, "request timeout"), "source_unreachable", "CHROMA_URL"),
         (ChromaError(429, "rate limit"), "source_unreachable", "CHROMA_URL"),
         (ChromaError(500, "boom"), "source_unreachable", "CHROMA_URL"),

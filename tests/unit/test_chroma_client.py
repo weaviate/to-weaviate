@@ -10,6 +10,7 @@ from to_weaviate.sources.chroma.client import (
     COLLECTION_GONE_HINT,
     DATABASES_FORBIDDEN_HINT,
     NO_ROUTE_HINT,
+    NOT_FOUND_HINT,
     QUOTA_HINT,
     ChromaClient,
     ChromaError,
@@ -509,6 +510,10 @@ def test_other_answers_keep_the_general_hint():
     client, _ = make(_answer(404))
     with pytest.raises(ChromaError) as info:
         client.databases("t")
+    assert info.value.hint == NOT_FOUND_HINT
+    client, _ = make(_answer(400))
+    with pytest.raises(ChromaError) as info:
+        client.databases("t")
     assert info.value.hint is None
     client, _ = make(_answer(403))
     with pytest.raises(ChromaError) as info:
@@ -670,8 +675,33 @@ def test_another_400_on_a_collection_keeps_the_general_hint():
             "Chroma returned HTTP 405: no route for GET "
             "/api/v2/api/v2/tenants/t/databases",
         ),
+        (
+            httpx.Response(404, html="<h1>404 Not Found</h1>"),
+            lambda client: client.identity(),
+            "Chroma returned HTTP 404: no route for GET /api/v2/api/v2/auth/identity",
+        ),
+        (
+            httpx.Response(404, text="404 page not found"),
+            _count,
+            "Chroma returned HTTP 404: no route for GET "
+            "/api/v2/api/v2/tenants/t/databases/d/collections/c/count",
+        ),
+        (
+            httpx.Response(405, html="<h1>405 Not Allowed</h1>"),
+            lambda client: client.databases("t"),
+            "Chroma returned HTTP 405: no route for GET "
+            "/api/v2/api/v2/tenants/t/databases",
+        ),
     ],
-    ids=["404 empty", "404 detail", "404 empty on a collection", "405 empty"],
+    ids=[
+        "404 empty",
+        "404 detail",
+        "404 empty on a collection",
+        "405 empty",
+        "404 html",
+        "404 text on a collection",
+        "405 html",
+    ],
 )
 def test_an_answer_of_a_missing_route_names_the_route_and_chroma_url(
     answer, call, message
@@ -692,6 +722,41 @@ def test_a_405_with_a_body_keeps_the_general_hint():
         "Chroma returned HTTP 405: Method Not Allowed",
         None,
     )
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda client: client.databases("t"),
+        lambda client: client.collections("t", "d"),
+    ],
+    ids=["databases", "collections"],
+)
+def test_a_404_with_a_body_outside_a_collection_names_tenant_and_database(call):
+    body = {"error": "NotFoundError", "message": "Tenant [t] not found"}
+    client, _ = make(lambda r: httpx.Response(404, json=body))
+    with pytest.raises(ChromaError) as info:
+        call(client)
+    assert (info.value.message, info.value.hint) == (
+        "Tenant [t] not found",
+        NOT_FOUND_HINT,
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"message": {"reason": "no"}},
+        {"message": {"reason": "no"}, "error": ["x"]},
+        {"error": 7, "detail": {"a": 1}},
+    ],
+)
+def test_an_error_field_that_is_not_text_leaves_the_raw_body(body):
+    answer = httpx.Response(400, json=body)
+    client, _ = make(lambda r: answer)
+    with pytest.raises(ChromaError) as info:
+        client.identity()
+    assert info.value.message == answer.text
 
 
 def test_a_422_of_a_quota_names_chroma_cloud():

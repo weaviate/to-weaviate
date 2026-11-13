@@ -30,6 +30,10 @@ NO_ROUTE_HINT = (
     "Set CHROMA_URL to the root address of the Chroma server, without a path "
     "such as /api/v2. The server must be Chroma 0.5.16 or later."
 )
+NOT_FOUND_HINT = (
+    "Check CHROMA_TENANT, CHROMA_DATABASE and --database. The message names "
+    "what Chroma did not find."
+)
 QUOTA_HINT = (
     "The request exceeds a quota of Chroma Cloud. The message names the quota. "
     "Ask Chroma to raise it."
@@ -117,13 +121,17 @@ def _no_route(response: httpx.Response, body: Any) -> bool:
     """Whether the server has no route for the request.
 
     Chroma 1.x answers 404 or 405 with an empty body. Chroma 0.5 and 0.6
-    answer 404 with `{"detail": "Not Found"}`. Their 405 has a body and does
-    not count: Chroma 0.5.16 to 0.6.2 answer it for the database list of a
-    correct CHROMA_URL.
+    answer 404 with `{"detail": "Not Found"}`. Their 405 has a JSON body and
+    does not count: Chroma 0.5.16 to 0.6.2 answer it for the database list of
+    a correct CHROMA_URL. A 404 or 405 whose body is not JSON comes from a
+    proxy or another server, since Chroma answers an error of an existing
+    route with JSON.
     """
-    if response.status_code == 404:
-        return not response.text.strip() or body == {"detail": "Not Found"}
-    return response.status_code == 405 and not response.text.strip()
+    if response.status_code not in (404, 405):
+        return False
+    if body is None:
+        return True
+    return response.status_code == 404 and body == {"detail": "Not Found"}
 
 
 def _error(
@@ -143,6 +151,8 @@ def _error(
     invalid = isinstance(body, dict) and body.get("error") == INVALID_COLLECTION
     if on_collection and (status == 404 or (status == 400 and invalid)):
         hint = COLLECTION_GONE_HINT
+    elif status == 404:
+        hint = NOT_FOUND_HINT
     elif status == 422 and QUOTA_TEXT in response.text:
         hint = QUOTA_HINT
     return ChromaError(status, _message(response, body, secrets), retry_after, hint)

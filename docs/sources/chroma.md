@@ -211,7 +211,7 @@ A failed Chroma request ends a command with one of three error codes:
 
 | Answer of Chroma | Error code | Exit code |
 |---|---|---|
-| A network error, a timeout, HTTP 408, 429, or 5xx except 501. Also a redirect, and an answer that is not JSON. | `source_unreachable` | 4 |
+| A network error, a timeout, HTTP 408, 429, or 5xx except 501. Also a redirect, and an HTTP 2xx answer that is not JSON. | `source_unreachable` | 4 |
 | HTTP 401 or 403 | `auth_failed` | 3 |
 | Any other HTTP 4xx, and 501 | `source_rejected` | 2 |
 
@@ -223,7 +223,11 @@ names the fix for these cases:
 - The collection is gone, or was created again with a new id (HTTP 404, or
   HTTP 400 `InvalidCollection` from Chroma 0.5 and 0.6): run
   `to-weaviate inspect chroma --force`.
-- The server has no such route (HTTP 404 or 405 without an error body): set
+- The tenant or the database does not exist (HTTP 404 with a JSON error
+  body, on a request that names no collection): check `CHROMA_TENANT`,
+  `CHROMA_DATABASE` and `--database`.
+- The server has no such route (HTTP 404 or 405 with an empty body or a body
+  that is not JSON, or HTTP 404 with `{"detail": "Not Found"}`): set
   `CHROMA_URL` to the root address of the server, without a path such as
   `/api/v2`. Chroma before 0.5.16 has no `/api/v2` API.
 - A Chroma Cloud quota (HTTP 422 with "exceeded quota limit"): the message
