@@ -603,7 +603,8 @@ def _create(
     after it is then refused, because the collection exists. A 400 or 422
     after a retried attempt is therefore judged by the collection that exists:
     none re-raises, one that matches the plan counts as created, another
-    raises PlanMismatch.
+    raises PlanMismatch. A matching collection can come from another writer,
+    so the planned properties it lacks are added.
     """
     kwargs = collection_kwargs(group)
     retried = False
@@ -619,11 +620,13 @@ def _create(
     except UnexpectedStatusCodeError as exc:
         if not retried or exc.status_code not in (400, 422):
             raise
-        found = differences(client, group)
+        found = with_retry(lambda: differences(client, group), transient, sleep=sleep)
         if found is None:
             raise
         if found:
             raise PlanMismatch("; ".join(found)) from exc
+        for prop in _missing_properties(client, group):
+            _add_property(client, group[0].target.name, prop, sleep)
 
 
 def ensure_collection(

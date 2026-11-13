@@ -656,6 +656,34 @@ def test_a_lost_create_that_left_another_collection_is_a_plan_mismatch():
         WeaviateSchema(client, sleep=lambda s: None).ensure([entry()])  # type: ignore[arg-type]
 
 
+def test_the_read_after_a_refused_retried_create_is_retried():
+    client = FakeClient(None)
+    _applied_then_lost(client, config(), WeaviateTimeoutError("read timeout"))
+    exists = client.collections.exists
+    fail: list[Exception] = [WeaviateConnectionError("reset")]
+
+    def flaky_exists(name: str) -> bool:
+        if client.collections.existing is not None and fail:
+            raise fail.pop(0)
+        return exists(name)
+
+    client.collections.exists = flaky_exists  # type: ignore[method-assign]
+    schema_ = WeaviateSchema(client, sleep=lambda s: None)  # type: ignore[arg-type]
+    assert schema_.ensure([entry()]) == "created"
+    assert fail == []
+
+
+def test_a_recovered_collection_gets_the_planned_properties_it_lacks():
+    client = FakeClient(None)
+    cfg = config()
+    cfg.properties = [x for x in cfg.properties if x.name != "year"]
+    _applied_then_lost(client, cfg, WeaviateTimeoutError("read timeout"))
+    schema_ = WeaviateSchema(client, sleep=lambda s: None)  # type: ignore[arg-type]
+    assert schema_.ensure([entry()]) == "created"
+    added = client.collections.existing.added  # type: ignore[union-attr]
+    assert [(x.name, x.dataType.value) for x in added] == [("year", "int")]
+
+
 def test_already_exists_on_the_first_create_attempt_is_schema_rejected():
     client = FakeClient(None)
 
