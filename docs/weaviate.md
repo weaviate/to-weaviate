@@ -45,10 +45,65 @@ reads the schema and the tenants, counts the objects and reads them. A key
 without the permission for one of these steps makes the command stop with
 `auth_failed`, exit 3.
 
+`check`, `copy` and `sync` also read the nodes of the cluster, to choose and
+to check the [replication factor](#replication). With role-based access
+control, that is the permission to read the nodes with minimal verbosity
+(`read_nodes`). A key without it does not stop them.
+
 `copy` and `sync` create every target collection before they write the
 first object. When the key may not create a collection, they stop before
 they write any object. A collection that they created earlier in the same
 run stays.
+
+## Replication
+
+`replication_factor` of a plan entry sets how many nodes hold each object of
+a collection that `copy` or `sync` creates. `inspect` drafts `auto`.
+
+| Value | Effect |
+|---|---|
+| `auto` | `copy` reads the node count and creates the collection with a factor of 3, or with the node count on a cluster of fewer than 3 nodes. |
+| A number from 1 | `copy` creates the collection with that factor. |
+
+`copy` and `sync` print the factor of each collection they create, for
+example `Created Docs with replication factor 3 (3 nodes)`. With `--json`,
+the line goes to stderr and the document lists the collection under
+`created_collections`.
+
+Weaviate cannot raise the factor of a collection through its schema once
+the collection exists, and the tool never changes it. Choose the factor
+before the first `copy`.
+
+With `auto`:
+
+- A key that may not read the nodes makes `copy` send no factor. The server
+  then applies its own: its `REPLICATION_MINIMUM_FACTOR`, which is 1 unless
+  the server sets it. `copy` prints the factor that the server chose.
+- When the server refuses the factor, `copy` creates the collection once
+  more without a factor and prints the factor that the server chose. A
+  server refuses a factor below its `REPLICATION_MINIMUM_FACTOR`.
+- An existing collection is accepted with the factor it has. `check` warns
+  when that factor is 1 and the cluster has more than one node
+  (`not_replicated`).
+
+With a number:
+
+- `check` reports `too_few_nodes` when the cluster has fewer nodes than the
+  factor and the collection does not exist yet. When the key may not read
+  the nodes, it warns instead (`unknown_node_count`).
+- A factor that the server refuses stops `copy` with
+  `target_rejected_schema`, exit 2.
+- An existing collection with another factor does not match the plan.
+  `check` reports `plan_mismatch`, and `copy` stops with `plan_mismatch`,
+  exit 2, before it writes an object.
+
+Entries that share a collection, one tenant each, need the same
+`replication_factor`.
+
+A Weaviate Cloud cluster with high availability has 3 nodes and sets its
+minimum factor to 3. It creates every collection with factor 3 at least,
+also when the request sends no factor, and it refuses a lower one. `auto`
+sends 3 there.
 
 ## Vectorizer keys
 
