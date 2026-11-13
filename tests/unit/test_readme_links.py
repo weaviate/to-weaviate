@@ -89,8 +89,11 @@ def test_every_readme_link_is_absolute_or_an_anchor() -> None:
     ]
 
     assert relative == [], (
-        "PyPI shows README.md and cannot resolve these links. Write them as "
-        "https://github.com/weaviate/to-weaviate/blob/main/<path>."
+        "These README.md links are neither https:// URLs nor #anchors. PyPI "
+        "shows README.md and resolves a relative link against pypi.org. Write "
+        "a link to a file of the repository as "
+        "https://github.com/weaviate/to-weaviate/blob/main/<path>. Write any "
+        "other link as an https:// URL."
     )
 
 
