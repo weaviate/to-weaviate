@@ -238,6 +238,6 @@ class ServerFactories(FakeFactories):
         )
         return ChromaSource(
             client,
-            settings.tenant or client.identity()["tenant"],
+            settings.tenant or client.tenant(),
             sleep=self.sleeps.append,
         )

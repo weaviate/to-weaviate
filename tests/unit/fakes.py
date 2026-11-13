@@ -64,6 +64,7 @@ class FakeSource:
     COLLECTION = "docs"
     TENANT = "default_tenant"
     tenant = TENANT
+    namespaces_note: str | None = None
 
     def __init__(
         self,

@@ -386,3 +386,132 @@ def test_a_chroma_without_the_indexing_status_route_copies_and_verifies_unguarde
     checks = {c["name"]: c["detail"] for c in json.loads(r.stdout)["checks"]}
     assert checks["ids"] == "missing 0, extra 0"
     assert fakes.sleeps == []
+
+
+def no_database_listing() -> httpx.Response:
+    """The answer of Chroma 0.5.16 to 0.6.2 to the database listing."""
+    return httpx.Response(
+        405, json={"detail": "Method Not Allowed"}, headers={"Allow": "POST"}
+    )
+
+
+def identity_answer(tenant: str, databases: Any) -> httpx.Response:
+    identity = {
+        "user_id": "",
+        "tenant": tenant,
+        "databases": databases,
+        "attributes": None,
+    }
+    return httpx.Response(200, json=identity)
+
+
+UNLISTED = (
+    "The Chroma server cannot list databases (HTTP 405, as Chroma before 0.6.3 "
+    "answers). Searched only default_database, from the server's identity answer. "
+    "Pass --database or set CHROMA_DATABASE to search another database."
+)
+
+
+def test_inspect_uses_the_identity_databases_when_the_server_cannot_list_them():
+    server = ChromaServer(records(0, 10))
+    server.faults["databases"] = [no_database_listing()]
+    r = invoke(ServerFactories(server), "inspect", "chroma")
+    assert r.exit_code == 0, r.output
+    assert r.stdout.splitlines().count(UNLISTED) == 1
+    assert [c.source.name for c in load_plan(DIR / "plan.yaml").collections] == ["docs"]
+    kinds = [c.kind for c in server.calls]
+    assert kinds[:4] == ["identity", "databases", "identity", "collections"]
+    assert "unknown" not in kinds
+
+
+def test_the_line_about_the_database_listing_goes_to_stderr_with_json():
+    server = ChromaServer(records(0, 10))
+    server.faults["databases"] = [no_database_listing()]
+    r = invoke(ServerFactories(server), "inspect", "chroma", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["status"] == "success"
+    assert UNLISTED in r.stderr.splitlines()
+
+
+def test_inspect_prints_no_line_about_the_listing_when_it_is_not_used():
+    server = ChromaServer(records(0, 10))
+    r = invoke(ServerFactories(server), "inspect", "chroma")
+    assert r.exit_code == 0, r.output
+    assert "cannot list databases" not in r.output
+    server.faults["databases"] = [no_database_listing()]
+    r = invoke(
+        ServerFactories(server),
+        "inspect",
+        "chroma",
+        "--force",
+        "--database",
+        "default_database",
+    )
+    assert r.exit_code == 0, r.output
+    assert "cannot list databases" not in r.output
+    assert len(server.faults["databases"]) == 1
+
+
+def test_a_listing_that_fails_and_finds_no_collection_prints_the_line_too():
+    server = ChromaServer(records(0, 10))
+    server.faults["databases"] = [no_database_listing()]
+    server.faults["collections"] = [httpx.Response(200, json=[])]
+    r = invoke(ServerFactories(server), "inspect", "chroma", "--json")
+    assert r.exit_code == 2, r.output
+    assert json.loads(r.stdout)["message"] == (
+        "Chroma tenant default_tenant has no collection in database default_database."
+    )
+    assert UNLISTED in r.stderr.splitlines()
+
+
+@pytest.mark.parametrize("databases", [[], None])
+def test_inspect_asks_for_a_database_when_the_identity_names_none(databases):
+    server = ChromaServer(records(0, 10))
+    server.faults["databases"] = [no_database_listing()]
+    server.faults["identity"] = [
+        identity_answer("default_tenant", databases) for _ in range(2)
+    ]
+    r = invoke(ServerFactories(server), "inspect", "chroma", "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"], d["hint"]) == (
+        "usage",
+        "The Chroma server cannot list databases (HTTP 405, as Chroma before "
+        "0.6.3 answers), and its identity answer names no database.",
+        "Pass --database or set CHROMA_DATABASE.",
+    )
+    assert not DIR.exists()
+
+
+def test_an_identity_tenant_of_a_star_is_the_default_tenant():
+    # Chroma 0.5.16 to 0.6.3 with token authentication.
+    server = ChromaServer(records(0, 10))
+    server.faults["identity"] = [identity_answer("*", ["*"])]
+    r = invoke(ServerFactories(server), "inspect", "chroma", "--json")
+    assert r.exit_code == 0, r.output
+    paths = [c.raw_path for c in server.calls if c.kind != "identity"]
+    assert paths and all(p.startswith("/api/v2/tenants/default_tenant/") for p in paths)
+    assert "unknown" not in [c.kind for c in server.calls]
+
+
+def test_a_star_identity_on_a_server_that_cannot_list_databases():
+    server = ChromaServer(records(0, 10))
+    server.faults["databases"] = [no_database_listing()]
+    server.faults["identity"] = [identity_answer("*", ["*"]) for _ in range(2)]
+    r = invoke(ServerFactories(server), "inspect", "chroma")
+    assert r.exit_code == 0, r.output
+    assert UNLISTED in r.stdout.splitlines()
+    paths = [c.raw_path for c in server.calls if c.kind == "collections"]
+    assert set(paths) == {
+        "/api/v2/tenants/default_tenant/databases/default_database/collections"
+    }
+
+
+def test_the_cli_source_reads_a_star_tenant_as_the_default_tenant(monkeypatch):
+    server = ChromaServer(records(0, 10))
+    server.faults["identity"] = [identity_answer("*", ["*"])]
+    app = cli_app(monkeypatch, server, FakeFactories(None))  # type: ignore[arg-type]
+    r = run_cli(app, "inspect", "chroma", "--json")
+    assert r.exit_code == 0, r.output
+    paths = [c.raw_path for c in server.calls if c.kind != "identity"]
+    assert paths and all(p.startswith("/api/v2/tenants/default_tenant/") for p in paths)

@@ -604,3 +604,74 @@ def test_collection_by_name_reads_the_collection_document():
         seen[0].url.raw_path.decode()
         == "/api/v2/tenants/t/databases/d/collections/my%20docs"
     )
+
+
+# Chroma 0.5.16 to 0.6.2 answer the first body, a Rust server the empty one.
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx.Response(
+            405, json={"detail": "Method Not Allowed"}, headers={"Allow": "POST"}
+        ),
+        httpx.Response(405, headers={"Allow": "POST"}),
+    ],
+)
+def test_databases_is_none_when_the_server_answers_405(answer):
+    client, sleeps = make(lambda r: answer)
+    assert client.databases("t") is None
+    assert sleeps == []
+
+
+IDENTITY_NO_AUTH = {
+    "user_id": "",
+    "tenant": "default_tenant",
+    "databases": ["default_database"],
+    "attributes": None,
+}
+IDENTITY_TOKEN_AUTH = {
+    "user_id": "anonymous",
+    "tenant": "*",
+    "databases": ["*"],
+    "attributes": None,
+}
+
+
+@pytest.mark.parametrize(
+    ("identity", "tenant"),
+    [
+        (IDENTITY_NO_AUTH, "default_tenant"),
+        (IDENTITY_TOKEN_AUTH, "default_tenant"),
+        ({"tenant": "of-the-key", "databases": ["a"]}, "of-the-key"),
+    ],
+)
+def test_tenant_is_the_identity_tenant_and_the_default_for_a_star(identity, tenant):
+    client, _ = make(lambda r: httpx.Response(200, json=identity))
+    assert client.tenant() == tenant
+
+
+@pytest.mark.parametrize(
+    ("identity", "databases"),
+    [
+        (IDENTITY_NO_AUTH, ["default_database"]),
+        (IDENTITY_TOKEN_AUTH, ["default_database"]),
+        (
+            {"tenant": "t", "databases": ["a", "*", "b", "a"]},
+            ["a", "default_database", "b"],
+        ),
+        ({"tenant": "t", "databases": ["*", "default_database"]}, ["default_database"]),
+        ({"tenant": "t", "databases": []}, []),
+        ({"tenant": "t", "databases": None}, []),
+        ({"tenant": "t"}, []),
+        ({"tenant": "t", "databases": ["", 3, None]}, []),
+    ],
+)
+def test_identity_databases_names_the_default_for_a_star(identity, databases):
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.path)
+        return httpx.Response(200, json=identity)
+
+    client, _ = make(handler)
+    assert client.identity_databases() == databases
+    assert seen == ["/api/v2/auth/identity"]
