@@ -307,6 +307,12 @@ The JSON document is under [JSON output](#json-output).
 | `ids` | The full list of ids on both sides. It counts the missing and the extra ids and names up to 20 of each. |
 | `records` | A random sample of records: every property, and each kept source vector, rounded to float32, within 1e-5. |
 
+A sampled record that the plan rejects is not compared. When the target
+holds no object for it, `records` counts it under `rejects skipped`. When
+the target holds one, the record counts as differing, and the detail gives
+the reason of the reject. The object was written under another plan or
+before the record changed; fix the cause of the reject and run `sync`.
+
 A failed check exits 1, `verification_failed`. Its detail names the cause,
 and the fix where there is one. Extra objects with a `source_id` lost their
 source record, and `sync --prune` deletes them. Extra objects without a

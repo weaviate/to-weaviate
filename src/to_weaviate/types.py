@@ -25,13 +25,13 @@ def value_type(value: Any) -> str:
     """Observed type of a metadata value. Empty or mixed lists are `text[]`.
 
     It is a Weaviate type, or `large_int` for an int that no property type
-    but text holds exactly. A list of ints with such an int is `large_int[]`.
+    but text holds exactly. A list with such an int is `large_int[]`.
     """
     if isinstance(value, dict) and value.get("#type") == SPARSE_VECTOR:
         return SPARSE_VECTOR
     if isinstance(value, list):
         element_types = {_scalar_type(v) for v in value}
-        if element_types == {"int", LARGE_INT}:
+        if LARGE_INT in element_types:
             element_types = {LARGE_INT}
         return (element_types.pop() if len(element_types) == 1 else "text") + "[]"
     return _scalar_type(value)
@@ -88,7 +88,12 @@ def _coerce_scalar(value: Any, target: str) -> Any:
     if target == "int" and kind in ("int", LARGE_INT):
         return _exact_int(value)
     if target == "int" and kind == "number" and value.is_integer():
-        return _exact_int(int(value))
+        if abs(value) > EXACT_INT_LIMIT:
+            raise ValueError(
+                f"number {value!r} is above 2**53 in magnitude, which an int "
+                "property does not hold; set the property type to number or text"
+            )
+        return int(value)
     if target == "boolean" and kind == "boolean":
         return value
     raise ValueError(

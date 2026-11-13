@@ -19,7 +19,7 @@ from conftest import (
     write_plan,
 )
 
-from to_weaviate.engine.verify import MISSING_IDS
+from to_weaviate.engine.verify import ID_SAMPLE, MISSING_IDS
 
 
 def test_an_empty_collection_copies_and_verifies(seeded, tmp_path):
@@ -150,7 +150,8 @@ def test_an_int_above_2_to_the_53_for_an_int_property_is_a_reject(seeded, tmp_pa
     ids = checks["ids"]["detail"]
     assert ids.startswith("missing 24, extra 0; missing ids "), ids
     listed, _, fix = ids.partition("missing ids ")[2].partition("; ")
-    assert set(json.loads(listed)) <= refused
+    named = json.loads(listed)
+    assert len(named) == len(set(named)) == ID_SAMPLE and set(named) <= refused
     assert fix == MISSING_IDS
     assert checks["records"]["passed"], checks["records"]
     assert "rejects skipped 24, differing 0" in checks["records"]["detail"]

@@ -22,7 +22,9 @@ VALUE_TYPES = [
     (2.0**60, "number"),
     ([2**53 + 1], "large_int[]"),
     ([1, 2**53 + 1], "large_int[]"),
-    ([1.5, 2**53 + 1], "text[]"),
+    ([1.5, 2**53 + 1], "large_int[]"),
+    (["a", True, 2**60], "large_int[]"),
+    ([1.5, 2**53], "text[]"),
 ]
 
 RESOLVE = [
@@ -108,3 +110,32 @@ ABOVE_THE_DOUBLE_LIMIT = [
 def test_coerce_refuses_an_int_above_2_to_the_53(value, target):
     with pytest.raises(ValueError, match=r"above 2\*\*53"):
         coerce(value, target)
+
+
+@pytest.mark.parametrize(
+    ("value", "target", "message"),
+    [
+        (
+            2**53 + 1,
+            "int",
+            "int 9007199254740993 is above 2**53 in magnitude and Weaviate would "
+            "store it rounded; set the property type to text, or text[] for a list",
+        ),
+        (
+            2.0**60,
+            "int",
+            "number 1.152921504606847e+18 is above 2**53 in magnitude, which an "
+            "int property does not hold; set the property type to number or text",
+        ),
+        (
+            -1e300,
+            "int[]",
+            "number -1e+300 is above 2**53 in magnitude, which an int property "
+            "does not hold; set the property type to number or text",
+        ),
+    ],
+)
+def test_the_refusal_names_the_value_as_the_source_holds_it(value, target, message):
+    with pytest.raises(ValueError) as raised:
+        coerce(value, target)
+    assert str(raised.value) == message

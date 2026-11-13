@@ -149,7 +149,7 @@ Every other `source_key` is a metadata key. A property has these fields:
   numbers too. An empty list counts as `text[]`.
 - A key with an int above 2**53 in magnitude becomes `text`, or `text[]`
   for lists. `inspect` counts such a value as the type `large_int`
-  (`large_int[]` for a list of ints that holds one), which is not a property
+  (`large_int[]` for a list that holds one), which is not a property
   type, and adds a note to the plan entry.
 
 When the chosen type differs from a type that the source holds,
@@ -179,10 +179,23 @@ magnitude and Weaviate would store it rounded; set the property type to
 text, or text[] for a list". A `text` property holds every digit, and
 `inspect` drafts `text` for a key where it read such a value.
 
+A number without a fractional part above that magnitude is a reject for an
+`int` property, with the reason "<key>: number <value> is above 2**53 in
+magnitude, which an int property does not hold; set the property type to
+number or text".
+
 `check` and `copy` show the warning `large_ints` when the plan types a key
-as `int` or `number` and `inspect.json` counted a `large_int` for it. A
-sample that `--sample-pages` limits can miss the value; `copy` then reports
-the rejects. `verify` compares an int digit by digit.
+as `int` or `number` and `inspect.json` counted a `large_int` for it. The
+warning is missing when the sample that `--sample-pages` limits did not read
+the value, and when an earlier version of the tool wrote `inspect.json`,
+because it counted every int as `int`. `inspect --force` counts again and
+replaces `plan.yaml`. Without the warning, `copy` still reports the rejects.
+
+`verify` compares the value of an `int` or `int[]` property digit by digit,
+and the value of a `number` or `number[]` property with a relative tolerance
+of 1e-9. When the target holds an object for a record that the plan rejects,
+for example an int that an earlier copy stored rounded, the `records` check
+fails and names the record.
 
 ## Vector modes
 

@@ -507,6 +507,68 @@ def test_rejects_are_counted_and_not_compared():
     assert "sampled 11, compared 10, rejects skipped 1" in check.detail
 
 
+LARGE = 2**53 + 1
+LARGE_REJECT = (
+    f"year: int {LARGE} is above 2**53 in magnitude and Weaviate would store it "
+    "rounded; set the property type to text, or text[] for a list"
+)
+
+
+def _with_a_large_year(count: int, at: set[int]) -> tuple[list[Record], list[Record]]:
+    """Records whose year is LARGE at the indexes `at`, and as 0.1.0 wrote them."""
+    rounded = [replace(r, metadata={"year": 2**53}) for r in make_records(count)]
+    source = [
+        replace(r, metadata={"year": LARGE}) if i in at else r
+        for i, r in enumerate(rounded)
+    ]
+    return source, rounded
+
+
+def test_a_reject_whose_object_is_in_the_target_is_a_difference():
+    source, rounded = _with_a_large_year(3, {1})
+    check = records_check(source, ENTRY, converted(rounded, ENTRY))
+    assert not check.passed
+    assert check.detail == (
+        "sampled 3, compared 2, rejects skipped 0, differing 1: "
+        f'"id-1": is a reject under this plan ({LARGE_REJECT}), and the target '
+        "holds an object for it; the target holds objects for records that this "
+        "plan rejects. Fix the cause of the reject, then run to-weaviate sync."
+    )
+
+
+def test_a_reject_without_an_object_in_the_target_is_skipped():
+    source, rounded = _with_a_large_year(3, {1})
+    stored = converted([r for r in rounded if r.id != "id-1"], ENTRY)
+    check = records_check(source, ENTRY, stored)
+    assert check.passed, check.detail
+    assert check.detail == "sampled 3, compared 2, rejects skipped 1, differing 0"
+
+
+def test_rejects_in_the_target_are_listed_when_every_sampled_record_is_a_reject():
+    source, rounded = _with_a_large_year(2, {0, 1})
+    check = records_check(source, ENTRY, converted(rounded[:1], ENTRY))
+    assert not check.passed
+    assert check.detail.startswith(
+        "sampled 2, compared 0, rejects skipped 1, differing 1: "
+        '"id-0": is a reject under this plan ('
+    )
+    assert "every sampled record" not in check.detail
+
+
+def test_one_fetch_reads_the_compared_records_and_the_rejects():
+    source_records, rounded = _with_a_large_year(3, {1})
+    source, writer = FakeSource(source_records), FakeWriter()
+    writer.write(ENTRY, converted(rounded, ENTRY))
+    reader = FakeReader(writer)
+    asked: list[list[str]] = []
+    fetch = reader.fetch
+    reader.fetch = lambda entry, uuids: asked.append(uuids) or fetch(entry, uuids)  # type: ignore[method-assign]
+    verify_records(source, reader, ENTRY, collection_of(source), 3, random.Random(0))
+    assert [sorted(uuids) for uuids in asked] == [
+        sorted(to_uuid(r.id) for r in source_records)
+    ]
+
+
 class EmptySampleSource(FakeSource):
     """FakeSource whose sample holds no record, as after deletes in the source."""
 
