@@ -263,11 +263,11 @@ variables.
   `tests/unit/chroma_server.py` serves a fake Chroma through
   `httpx.MockTransport`, so the CLI tests run the real client.
 - Acceptance tests: `tests/acceptance/chroma/`. `seed.py` creates the test
-  collections. Locally and in the CI job `acceptance (single)` they read the
-  single-node Chroma of `tests/acceptance/chroma/docker-compose.yml`. The CI
-  job `acceptance (cluster)` reads distributed Chroma, which
+  collections. Locally and in the `single` setup of CI they read the
+  single-node Chroma of `tests/acceptance/chroma/docker-compose.yml`. The
+  `cluster` setup of CI reads distributed Chroma, which
   `tests/acceptance/chroma-k8s.sh` deploys from Chroma's Helm chart.
-  `test_source_order.py` checks the page order in both jobs, and its
-  compaction case runs in `acceptance (cluster)` only.
+  `test_source_order.py` checks the page order in both setups, and its
+  compaction case runs in the `cluster` setup only.
 
 [Testing](../development/testing.md) explains how to run them.

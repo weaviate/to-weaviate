@@ -7,8 +7,8 @@ each failure with the right exit code. They run at three levels.
 | Level | Where | Servers | Runs in CI |
 |---|---|---|---|
 | Unit | `tests/unit/` | None. Fakes stand in for the source and Weaviate. | Yes, on Python 3.10, 3.13 and 3.14 |
-| Acceptance, API | `tests/acceptance/` | A real source and a real Weaviate, reached only through the `to-weaviate` command and the server APIs | Yes |
-| Acceptance, infra | `tests/acceptance/`, marker `infra` | Also restarts or deletes a server through Docker or kubectl | Yes |
+| Acceptance, API | `tests/acceptance/` | A real source and a real Weaviate, reached only through the `to-weaviate` command and the server APIs | On pull requests and releases |
+| Acceptance, infra | `tests/acceptance/`, marker `infra` | Also restarts or deletes a server through Docker or kubectl | On pull requests and releases |
 
 The API level also runs against a Weaviate Cloud cluster with
 `make acceptance-cloud`, by hand before a release. See
@@ -35,7 +35,7 @@ pieces are `tests/acceptance/conftest.py` and `tests/e2e.py`.
 ## Not covered
 
 - Chroma Cloud. No test account exists. The unit tests cover the tool's side
-  with fakes, and the CI job `acceptance (cluster)` covers distributed
+  with fakes, and the `cluster` setup of CI covers distributed
   Chroma, which Chroma Cloud runs. Its quotas, rate limits and sharded
   collections stay untested.
 - A Weaviate Cloud sandbox cluster, and Weaviate versions other than
@@ -148,27 +148,61 @@ values to every child process, and the target refuses them.
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every pull request and every push to
-`main`:
+`.github/workflows/ci.yml` runs these jobs:
 
-| Job | What it runs |
-|---|---|
-| `lint` | `pre-commit run --all-files`: ruff, ruff-format, mypy |
-| `unit` | `pytest tests/unit` on Python 3.10, 3.13 and 3.14 |
-| `unit (lowest deps)` | `pytest tests/unit` on Python 3.10 with the lower bound of each dependency in `pyproject.toml` |
-| `acceptance (single)` | The acceptance suite against one Weaviate node and the single-node Chroma |
-| `acceptance (cluster)` | The acceptance suite against three Weaviate nodes with replication factor 3 and distributed Chroma |
+| Job | What it runs | Pull request | Push to `main` | Manual run |
+|---|---|---|---|---|
+| `lint` | `pre-commit run --all-files`: ruff, ruff-format, mypy | Yes | Yes | Yes |
+| `unit` | `pytest tests/unit` on Python 3.10, 3.13 and 3.14 | Yes | Yes | Yes |
+| `unit (lowest deps)` | `pytest tests/unit` on Python 3.10 with the lower bound of each dependency in `pyproject.toml` | Yes | Yes | Yes |
+| `acceptance` | Both acceptance setups, through `.github/workflows/acceptance-suites.yml` | Yes | No | Yes |
+
+A manual run is "Run workflow" on the CI workflow page, or
+`gh workflow run ci.yml --ref <branch>`. `.github/workflows/release.yml`
+runs the `acceptance` job on the tagged commit. See [Releasing](releasing.md).
 
 Every job except `unit (lowest deps)` installs the versions in `uv.lock` with
 `uv sync --locked --extra test`, which fails when `uv.lock` does not match
 `pyproject.toml`.
 
-Both acceptance jobs run Weaviate in a kind cluster with `ASYNC_INDEXING`.
+The `acceptance` job has two setups. Each runs Weaviate in a kind cluster
+with `ASYNC_INDEXING`.
+
+| Setup | Servers | Check that holds its result |
+|---|---|---|
+| `single` | One Weaviate node and the single-node Chroma | `acceptance / single / run` |
+| `cluster` | Three Weaviate nodes with replication factor 3 and distributed Chroma | `acceptance / cluster result` |
+
 The tests in `tests/acceptance/chroma/test_cluster.py` run in the `cluster`
-job only. Each job uploads its JUnit XML as the artifact
+setup only. Each setup uploads its JUnit XML as the artifact
 `acceptance-junit-single` or `acceptance-junit-cluster`.
 `test_copy_during_compaction` records its measurements there as test
 properties.
+
+### The cluster result
+
+Distributed Chroma needs a CPU with AVX-512, and part of GitHub's
+`ubuntu-latest` runners lack it. No runner label guarantees it. The
+`cluster` setup therefore makes up to four attempts, one after the other,
+each on a runner that GitHub picks: `acceptance / cluster runner attempt 1 / run`
+to `attempt 4`. An attempt on a runner without AVX-512 ends in seconds, runs
+no test and is green, and the next attempt starts. The first attempt on a
+runner with AVX-512 runs the suite, and the later attempts are skipped.
+
+A green or skipped attempt therefore says nothing about the suite. Read
+`acceptance / cluster result`. It passes only when exactly one attempt ran
+the suite and that run passed. It fails when the suite failed, and it fails
+when no attempt ran it.
+
+When it reports that no attempt got a runner with AVX-512, attempt 4 has
+failed too, and no test ran. Rerun the failed jobs, which runs attempt 4 on
+another runner and then the result job again:
+
+```bash
+gh run rerun <run id> --failed
+```
+
+Repeat it until an attempt gets such a runner.
 
 ## Writing tests
 

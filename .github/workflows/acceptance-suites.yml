@@ -1,0 +1,80 @@
+# Both setups of the acceptance tests, each one call of acceptance.yml per
+# runner. ci.yml and release.yml call this workflow; the job "cluster result"
+# is the result of the cluster suite.
+#
+# The cluster setup needs a runner whose CPU has AVX-512 (the first step of
+# acceptance.yml says why), and part of the ubuntu-latest pool lacks it. An
+# attempt that runs on such a runner ends in seconds with cpu-unsupported
+# true and a green job, and the next attempt runs on another runner, which
+# the pool picks at random. GitHub Actions has no retry of a job and no
+# runner label that guarantees AVX-512, so the attempts are a chain of jobs.
+# An attempt that ran the tests is the last one, whatever its result.
+name: acceptance suites
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  single:
+    uses: ./.github/workflows/acceptance.yml
+    with: {name: single, replicas: 1, workers: 1, replication: "1", chroma: single}
+
+  cluster-1:
+    name: cluster runner attempt 1
+    uses: ./.github/workflows/acceptance.yml
+    with: {name: cluster, replicas: 3, workers: 3, replication: "3", chroma: distributed, attempt: 1, attempts: 4}
+
+  cluster-2:
+    name: cluster runner attempt 2
+    needs: cluster-1
+    if: needs.cluster-1.outputs.cpu-unsupported == 'true'
+    uses: ./.github/workflows/acceptance.yml
+    with: {name: cluster, replicas: 3, workers: 3, replication: "3", chroma: distributed, attempt: 2, attempts: 4}
+
+  cluster-3:
+    name: cluster runner attempt 3
+    needs: cluster-2
+    if: needs.cluster-2.outputs.cpu-unsupported == 'true'
+    uses: ./.github/workflows/acceptance.yml
+    with: {name: cluster, replicas: 3, workers: 3, replication: "3", chroma: distributed, attempt: 3, attempts: 4}
+
+  cluster-4:
+    name: cluster runner attempt 4
+    needs: cluster-3
+    if: needs.cluster-3.outputs.cpu-unsupported == 'true'
+    uses: ./.github/workflows/acceptance.yml
+    with: {name: cluster, replicas: 3, workers: 3, replication: "3", chroma: distributed, attempt: 4, attempts: 4}
+
+  # Passes only when exactly one attempt ran the suite and that run passed.
+  # A green attempt with cpu-unsupported true ran no test and counts for
+  # nothing. always() is needed: without it a skipped or failed attempt
+  # skips this job, and a skipped job reads as a pass.
+  cluster-result:
+    name: cluster result
+    needs: [cluster-1, cluster-2, cluster-3, cluster-4]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          ran='.[] | select(.outputs["cpu-unsupported"] != "true")'
+          passed=$(echo "$NEEDS" | jq "[$ran | select(.result == \"success\")] | length")
+          not_passed=$(echo "$NEEDS" | jq "[$ran | select(.result == \"failure\" or .result == \"cancelled\")] | length")
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result), cpu-unsupported \(.value.outputs["cpu-unsupported"] // "unset")"'
+          if [ "$passed" -eq 1 ] && [ "$not_passed" -eq 0 ]; then
+            echo "One attempt ran the cluster suite and it passed."
+            exit 0
+          fi
+          if [ "$passed" -eq 0 ] && [ "$not_passed" -eq 0 ]; then
+            message="The cluster suite did not run: no attempt got a runner with AVX-512. Rerun the failed jobs for another runner: gh run rerun <run id> --failed"
+          else
+            message="The cluster suite did not pass: $passed attempts ran it and passed, $not_passed failed or were cancelled."
+          fi
+          echo "::error::$message"
+          echo "$message" >>"$GITHUB_STEP_SUMMARY"
+          exit 1
