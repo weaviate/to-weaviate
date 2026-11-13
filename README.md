@@ -230,7 +230,7 @@ JSON document. The exit code names the class of failure, with and without
 |---|---|
 | 0 | Success |
 | 1 | Rejected records, a failed verification, or stale objects above 10% that `sync --prune` left alone |
-| 2 | A usage, plan, state or directory error, or an unconfirmed first run into a collection that holds objects `sync --prune` would delete |
+| 2 | A usage, plan, state or directory error, a request the source refused, or an unconfirmed first run into a collection that holds objects `sync --prune` would delete |
 | 3 | A missing or refused credential |
 | 4 | An unreachable server, a source that is compacting or still written to, or a deletion Weaviate did only partly |
 | 5 | An internal error |

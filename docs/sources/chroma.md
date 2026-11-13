@@ -200,6 +200,33 @@ On single-node Chroma and a Chroma directory on disk, the application can
 keep writing while `copy` and `sync` run. Stop the writes before the last
 `sync --prune`.
 
+## Errors
+
+A failed Chroma request ends a command with one of three error codes:
+
+| Answer of Chroma | Error code | Exit code |
+|---|---|---|
+| A network error, a timeout, HTTP 408, 429, or 5xx except 501. Also a redirect, and an answer that is not JSON. | `source_unreachable` | 4 |
+| HTTP 401 or 403 | `auth_failed` | 3 |
+| Any other HTTP 4xx, and 501 | `source_rejected` | 2 |
+
+Exit 4 means the same command can work when it runs again later. Exit 2
+means Chroma refuses the same request again: change a setting, the plan or
+the source first. The message holds the text of Chroma's answer. The hint
+names the fix for these cases:
+
+- The collection is gone, or was created again with a new id (HTTP 404, or
+  HTTP 400 `InvalidCollection` from Chroma 0.5 and 0.6): run
+  `to-weaviate inspect chroma --force`.
+- The server has no such route (HTTP 404 or 405 without an error body): set
+  `CHROMA_URL` to the root address of the server, without a path such as
+  `/api/v2`. Chroma before 0.5.16 has no `/api/v2` API.
+- A Chroma Cloud quota (HTTP 422 with "exceeded quota limit"): the message
+  names the quota.
+- HTTP 403 from a server with token authentication: check `CHROMA_API_KEY`
+  and `CHROMA_TOKEN_HEADER`. Such a server answers 403 for a right token in
+  the wrong header.
+
 ## Limits
 
 - Records come in pages of 300, the most that Chroma Cloud returns per

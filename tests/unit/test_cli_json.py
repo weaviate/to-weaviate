@@ -833,18 +833,38 @@ def test_auth_error_of_a_batch_does_not_repeat_the_server_text():
     )
 
 
+REFUSED = "will refuse it again"
+
+
 @pytest.mark.parametrize(
     ("error", "code", "named"),
     [
         (ChromaError(401, "bad key"), "auth_failed", "CHROMA_API_KEY"),
         (ChromaError(403, "forbidden"), "auth_failed", "CHROMA_API_KEY"),
-        (ChromaError(404, "no such tenant"), "source_unreachable", "CHROMA_URL"),
+        (ChromaError(403, "forbidden"), "auth_failed", "CHROMA_TOKEN_HEADER"),
+        (ChromaError(404, "Tenant [nope] not found"), "source_rejected", REFUSED),
+        (ChromaError(400, "Invalid where clause"), "source_rejected", REFUSED),
+        (ChromaError(405, "Method Not Allowed"), "source_rejected", REFUSED),
+        (ChromaError(409, "already exists"), "source_rejected", REFUSED),
+        (ChromaError(410, "The v1 API is deprecated"), "source_rejected", REFUSED),
+        (ChromaError(413, "length limit exceeded"), "source_rejected", REFUSED),
+        (ChromaError(415, "Expected request with"), "source_rejected", REFUSED),
+        (ChromaError(422, "expected u32"), "source_rejected", REFUSED),
+        (ChromaError(501, "Unimplemented"), "source_rejected", REFUSED),
+        (ChromaError(404, "gone", hint="inspect again"), "source_rejected", "inspect"),
+        (ChromaError(408, "request timeout"), "source_unreachable", "CHROMA_URL"),
+        (ChromaError(429, "rate limit"), "source_unreachable", "CHROMA_URL"),
+        (ChromaError(500, "boom"), "source_unreachable", "CHROMA_URL"),
+        (ChromaError(502, "bad gateway"), "source_unreachable", "CHROMA_URL"),
+        (ChromaError(503, "unavailable"), "source_unreachable", "CHROMA_URL"),
+        (ChromaError(504, "gateway timeout"), "source_unreachable", "CHROMA_URL"),
         (
             ChromaError(None, "ConnectError: refused"),
             "source_unreachable",
             "CHROMA_URL",
         ),
     ],
+    ids=lambda value: str(value.status) if isinstance(value, ChromaError) else None,
 )
 def test_source_errors_map_to_codes(error, code, named):
     fakes = FakeFactories(FakeSource(cli_records(10)), source_error=error)
@@ -852,6 +872,20 @@ def test_source_errors_map_to_codes(error, code, named):
     assert r.exit_code == ERROR_EXIT[code]
     d = json.loads(r.stdout)
     assert (d["status"], d["code"]) == ("error", code) and named in d["hint"]
+
+
+def test_a_rejected_source_request_exits_2_with_the_server_text():
+    error = ChromaError(400, "Invalid where clause")
+    fakes = FakeFactories(FakeSource(cli_records(10)), source_error=error)
+    r = invoke(fakes, "inspect", "chroma", "--json")
+    assert r.exit_code == 2, r.output
+    assert json.loads(r.stdout) == {
+        "status": "error",
+        "code": "source_rejected",
+        "message": "Chroma returned HTTP 400: Invalid where clause",
+        "hint": "Chroma refused the request and will refuse it again when the "
+        "command runs again. The message holds the reason.",
+    }
 
 
 @pytest.mark.parametrize(
@@ -1053,6 +1087,7 @@ def test_error_exit_covers_every_code():
         "missing_credential": 3,
         "auth_failed": 3,
         "source_unreachable": 4,
+        "source_rejected": 2,
         "target_unreachable": 4,
         "source_compacting": 4,
         "source_writing": 4,

@@ -276,20 +276,120 @@ def test_a_403_on_the_database_list_names_the_database_settings():
     )
 
 
+GONE_HINT = (
+    "The collection is gone from Chroma, or it was created again with a new "
+    "id. Run to-weaviate inspect chroma --force to inspect it again."
+)
+
+
 def test_a_source_collection_that_is_gone_names_inspect_force():
     server = ChromaServer(records(0, 10))
     fakes = inspected(server)
     server.collection_id = "created-again"
     r = invoke(fakes, "copy", "--json")
-    assert r.exit_code == 4, r.output
+    assert r.exit_code == 2, r.output
     d = json.loads(r.stdout)
     assert (d["code"], d["message"]) == (
-        "source_unreachable",
+        "source_rejected",
         "Chroma returned HTTP 404: collection not found",
     )
-    assert d["hint"] == (
-        "The collection is gone from Chroma, or it was created again with a new "
-        "id. Run to-weaviate inspect chroma --force to inspect it again."
+    assert d["hint"] == GONE_HINT
+
+
+def test_a_400_invalid_collection_of_a_python_server_names_inspect_force():
+    server = ChromaServer(records(0, 10))
+    fakes = inspected(server)
+    body = {"error": "InvalidCollection", "message": "Collection c-1 does not exist."}
+    server.faults["count"] = [httpx.Response(400, json=body)]
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"], d["hint"]) == (
+        "source_rejected",
+        "Chroma returned HTTP 400: Collection c-1 does not exist.",
+        GONE_HINT,
+    )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [httpx.Response(404), httpx.Response(404, json={"detail": "Not Found"})],
+    ids=["rust", "python"],
+)
+def test_a_server_without_the_route_names_chroma_url_and_the_version(answer):
+    server = ChromaServer(records(0, 10))
+    server.faults["identity"] = [answer]
+    fakes = ServerFactories(server)
+    r = invoke(fakes, "inspect", "chroma", "--json")
+    assert r.exit_code == 2, r.output
+    assert json.loads(r.stdout) == {
+        "status": "error",
+        "code": "source_rejected",
+        "message": "Chroma returned HTTP 404: no route for GET /api/v2/auth/identity",
+        "hint": "Set CHROMA_URL to the root address of the Chroma server, without "
+        "a path such as /api/v2. The server must be Chroma 0.5.16 or later.",
+    }
+    assert fakes.sleeps == []
+
+
+def test_a_request_that_chroma_refuses_during_copy_is_not_retried():
+    server = ChromaServer(records(0, 10))
+    fakes = inspected(server)
+    body = {"error": "InvalidArgumentError", "message": "Invalid where clause"}
+    server.faults["get"] = [httpx.Response(400, json=body)]
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"]) == (
+        "source_rejected",
+        "Chroma returned HTTP 400: Invalid where clause",
+    )
+    assert "will refuse it again" in d["hint"]
+    assert fakes.sleeps == []
+
+
+def test_a_chroma_cloud_quota_is_named_in_the_hint():
+    server = ChromaServer(records(0, 10))
+    fakes = inspected(server)
+    message = (
+        "'Limit value' exceeded quota limit for action 'Get': current usage of "
+        "301 exceeds limit of 300"
+    )
+    body = {"error": "ChromaError", "message": message}
+    server.faults["get"] = [httpx.Response(422, json=body)]
+    r = invoke(fakes, "copy", "--json")
+    assert r.exit_code == 2, r.output
+    assert json.loads(r.stdout) == {
+        "status": "error",
+        "code": "source_rejected",
+        "message": f"Chroma returned HTTP 422: {message}",
+        "hint": "The request exceeds a quota of Chroma Cloud. The message names "
+        "the quota. Ask Chroma to raise it.",
+    }
+
+
+def test_a_403_names_the_token_header():
+    server = ChromaServer(records(0, 10))
+    body = {"error": "AuthError", "message": "Forbidden"}
+    server.faults["identity"] = [httpx.Response(403, json=body)]
+    r = invoke(ServerFactories(server), "inspect", "chroma", "--json")
+    assert r.exit_code == 3, r.output
+    assert json.loads(r.stdout) == {
+        "status": "error",
+        "code": "auth_failed",
+        "message": "Chroma refused the request: the API key lacks a permission.",
+        "hint": "Check CHROMA_API_KEY in the environment or in .env. If the server "
+        "reads the token from another header, set CHROMA_TOKEN_HEADER.",
+    }
+
+
+def test_a_401_does_not_name_the_token_header():
+    server = ChromaServer(records(0, 10))
+    server.faults["identity"] = [httpx.Response(401, json={"message": "no"})]
+    r = invoke(ServerFactories(server), "inspect", "chroma", "--json")
+    assert r.exit_code == 3, r.output
+    assert json.loads(r.stdout)["hint"] == (
+        "Check CHROMA_API_KEY in the environment or in .env."
     )
 
 
