@@ -6,6 +6,8 @@ from to_weaviate.settings import stored_url
 # The OpenAI client's default base URL, https://api.openai.com/v1, after
 # `_openai_base`. Weaviate uses it when base_url is not set.
 OPENAI_DEFAULT_BASE = "https://api.openai.com"
+# The model of chromadb's OpenAI embedding function when none is given.
+OPENAI_ADA_002 = "text-embedding-ada-002"
 
 
 class _Function(NamedTuple):
@@ -215,4 +217,13 @@ def vectorizer_for(
                 f"text2vec-openai uses base_url {base_url}; the Weaviate server "
                 "must reach this host."
             )
+    # On OpenAI's own endpoint Weaviate accepts this model only as `ada`,
+    # which with its default modelVersion 002 requests text-embedding-ada-002.
+    # With a base_url Weaviate sends the model name unchanged.
+    if (
+        function.module == "text2vec-openai"
+        and "base_url" not in options
+        and model == OPENAI_ADA_002
+    ):
+        options["model"] = "ada"
     return VectorizerPlan(module=function.module, options=options), notes

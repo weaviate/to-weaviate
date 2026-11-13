@@ -117,6 +117,50 @@ def test_keep_model_mismatch_for_a_plan_drafted_without_the_model(
     assert [e.code for e in errors] == ["keep_model_mismatch"]
 
 
+def _openai(model: str, **config: Any) -> dict[str, Any]:
+    return {
+        "type": "known",
+        "name": "openai",
+        "config": {"model_name": model, **config},
+    }
+
+
+ADA_002 = "text-embedding-ada-002"
+V3_SMALL = "text-embedding-3-small"
+PROXY = "https://proxy.example.com"
+
+
+@pytest.mark.parametrize(
+    ("embedding", "options", "codes"),
+    [
+        (_openai(ADA_002), {"model": "ada"}, []),
+        (_openai(ADA_002), {"model": ADA_002}, ["keep_model_mismatch"]),
+        (_openai(ADA_002), {"model": V3_SMALL}, ["keep_model_mismatch"]),
+        (
+            _openai(ADA_002, api_base=PROXY + "/v1"),
+            {"model": ADA_002, "base_url": PROXY},
+            [],
+        ),
+        (_openai(V3_SMALL), {"model": V3_SMALL}, []),
+        (_openai(V3_SMALL), {"model": "ada"}, ["keep_model_mismatch"]),
+    ],
+)
+def test_keep_model_for_openai_ada_002(embedding, options, codes):
+    vectorizer = p.VectorizerPlan(module="text2vec-openai", options=options)
+    plan = plan_of(entry([keep(vectorizer)], embedding=embedding))
+    errors, _ = plan_findings(plan, None, vectorizer_for)
+    assert [e.code for e in errors] == codes
+
+
+def test_keep_model_passes_for_the_drafted_openai_ada_002_vectorizer():
+    embedding = _openai(ADA_002)
+    drafted, _ = vectorizer_for(embedding)
+    errors, _ = plan_findings(
+        plan_of(entry([keep(drafted)], embedding=embedding)), None, vectorizer_for
+    )
+    assert errors == []
+
+
 def test_module_findings_accept_the_legacy_google_name():
     plan = plan_of(entry([embed("text2vec-google")]))
     assert module_findings(plan, {"text2vec-palm"}) == []

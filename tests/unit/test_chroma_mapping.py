@@ -67,6 +67,65 @@ def test_openai_default_base_gives_no_base_url(api_base):
     assert notes == []
 
 
+# chromadb's OpenAIEmbeddingFunction uses text-embedding-ada-002 when no
+# model is given.
+ADA_002 = "text-embedding-ada-002"
+
+
+def _sent_vectorizer(v):
+    entry = CollectionPlan(
+        source=SourceRef(
+            ref="r",
+            namespace="n",
+            name="docs",
+            count=1,
+            dimension=2,
+            distance="cosine",
+            embedding=None,
+        ),
+        target=TargetPlan(
+            name="Docs", vectors=[VectorPlan(vectorizer=v)], properties=[]
+        ),
+    )
+    return collection_kwargs([entry])["vector_config"][0].vectorizer
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"model_name": ADA_002},
+        {"model_name": ADA_002, "api_base": None, "dimensions": None},
+        {"model_name": ADA_002, "api_base": "https://api.openai.com/v1"},
+    ],
+)
+def test_openai_ada_002_gets_the_weaviate_model_name(config):
+    v, notes = vectorizer_for(known("openai", **config))
+    assert v is not None
+    assert v.module == "text2vec-openai"
+    assert v.options == {"model": "ada"}
+    assert notes == []
+    sent = _sent_vectorizer(v)
+    assert (sent.model, sent.modelVersion, sent.baseURL) == ("ada", None, None)
+
+
+def test_openai_ada_002_keeps_its_name_with_a_base_url():
+    v, _ = vectorizer_for(
+        known("openai", model_name=ADA_002, api_base="https://proxy.example.com/v1")
+    )
+    assert v is not None
+    assert v.options == {"model": ADA_002, "base_url": "https://proxy.example.com"}
+    assert _sent_vectorizer(v).model == ADA_002
+
+
+@pytest.mark.parametrize("model", ["text-embedding-3-small", "text-embedding-3-large"])
+@pytest.mark.parametrize("api_base", [None, "https://proxy.example.com/v1"])
+def test_openai_v3_models_keep_their_name(model, api_base):
+    v, _ = vectorizer_for(known("openai", model_name=model, api_base=api_base))
+    assert v is not None
+    assert v.options["model"] == model
+    assert _sent_vectorizer(v).model == model
+
+
 def test_openai_azure_has_no_mapping():
     v, notes = vectorizer_for(known("openai", api_type="azure", model_name="m"))
     assert v is None and notes
