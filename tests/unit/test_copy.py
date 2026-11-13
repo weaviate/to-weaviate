@@ -612,6 +612,76 @@ def test_a_deleted_mark_of_the_first_partition_reads_from_the_start(
     assert warned == [SOURCE_CHANGED]
 
 
+def test_reread_from_stays_0_when_a_later_tail_reads_again_from_above(
+    src, state, events, tmp_path
+):
+    writer = FakeWriter()
+    _stopped_run(src, state, writer, [100, 500, 750, 1000])
+    # Without id-99, 0-250 reads from offset 0. Without id-999, the tail
+    # reads again from after id-749.
+    _delete(src, 99, 999)
+    result = copy_collection(src, writer, state, events, ENTRY, C, 4)
+    assert _missing(src, writer) == []
+    assert result.reread_from == 0
+    assert state.partitions(C.ref)[-1].start == "749"
+
+
+def test_a_run_warns_once_when_a_partition_and_the_tail_read_from_the_start(
+    src, state, events, tmp_path
+):
+    _stopped_run(src, state, FakeWriter(), [100])
+    src.records = []
+    warned: list[str] = []
+    result = copy_collection(
+        src, FakeWriter(), state, events, ENTRY, C, 1, warn=warned.append
+    )
+    assert result.reread_from == 0
+    assert [e["event"] for e in _warnings(tmp_path)] == ["source_changed"]
+    assert warned == [SOURCE_CHANGED]
+
+
+def test_a_run_stopped_after_the_check_and_before_a_page_checks_again(
+    src, state, events, tmp_path
+):
+    writer = RefusesCall()
+    _stopped_run(src, state, writer, [250, 400, 500, 750])
+    _delete(src, 399)
+    writer.refused = writer.calls + 1
+    with pytest.raises(RuntimeError, match="connection reset"):
+        copy_collection(src, writer, state, events, ENTRY, C, 1)
+    # 250-500 keeps its cursor and its mark. Its count is 0, because the
+    # stopped run was going to read its records again.
+    assert [(part.key, cursor) for part, cursor in state.pending(C.ref)] == [
+        ("250-500", "400"),
+        ("500-750", None),
+        ("750-1000", None),
+    ]
+    assert state.last_ids(C.ref)["250-500"] == "id-399"
+    assert state.progress()[0].copied == 250
+    writer.refused = None
+    result = copy_collection(src, writer, state, events, ENTRY, C, 4)
+    assert _missing(src, writer) == []
+    assert result.reread_from == 250 and result.copied == 999
+    assert _warnings(tmp_path) == []
+
+
+@pytest.mark.parametrize("deleted", [[], [10]], ids=["added", "deleted and added"])
+def test_a_resume_copies_the_records_added_since_the_stop(
+    src, state, events, tmp_path, deleted
+):
+    writer = FakeWriter()
+    _stopped_run(src, state, writer, [250, 400, 500, 850])
+    _delete(src, *deleted)
+    src.records.extend(make_records(50, start=1000))
+    result = copy_collection(src, writer, state, events, ENTRY, C, 4)
+    assert _missing(src, writer) == []
+    # After the deletion, id-750 moved into 500-750 and is written again.
+    assert _written_twice(writer) == ({"id-750"} if deleted else set())
+    assert result.copied == 1050 + len(deleted)
+    assert result.reread_from is None and _warnings(tmp_path) == []
+    assert state.progress()[0].total == 1050 - len(deleted)
+
+
 def test_a_stopped_tail_is_checked_on_resume(src, state, events, tmp_path):
     writer = RefusesCall()
     copy_collection(src, writer, state, events, ENTRY, C, 2)

@@ -33,7 +33,8 @@ class CopyResult:
     # the runs since the last fresh one.
     copied: int
     rejects: int
-    # The start offset of a tail that reads records of earlier runs again.
+    # The lowest offset from which a pending partition or a tail reads records
+    # of earlier runs again.
     reread_from: int | None = None
     # Records this run wrote: not the unchanged ones, not the rejects. A record
     # that changed again before a tail read it twice counts twice.
@@ -275,22 +276,6 @@ class _Resume:
     warn: Callable[[str], None] | None
 
 
-def _resume(
-    state: State,
-    ref: str,
-    pending: list[tuple[Partition, str | None]],
-    warn: Callable[[str], None] | None,
-) -> _Resume | None:
-    """None when no stored partition was read: there is no place to check."""
-    stored = state.partitions(ref)
-    started = any(cursor is not None for _, cursor in pending)
-    if not pending or (len(stored) == len(pending) and not started):
-        return None
-    return _Resume(
-        stored, frozenset(part.key for part, _ in pending), _marks(state, ref), warn
-    )
-
-
 @dataclass(frozen=True)
 class _ResumePlace:
     cursor: str | None
@@ -325,8 +310,9 @@ def _resume_place(
     whose mark is gone reads from offset 0: the stored partitions do not
     tell which of them the tail reads again.
 
-    A partition without a mark to check, from a state written before marks
-    were stored, keeps its cursor.
+    A partition without a mark to check keeps its cursor and reads no id:
+    every partition of a first or fresh copy, and one from a state written
+    before marks were stored.
     """
     same = _ResumePlace(cursor, None)
     position = int(cursor if cursor is not None else partition.start or 0)
@@ -598,7 +584,8 @@ def copy_collection(
     run checks its place with `_resume_place`, in its own worker, so that
     records deleted from the source between the runs make it skip no record.
     A partition that reads records of earlier runs again sets `reread_from`,
-    and one that reads from offset 0 warns as a tail from offset 0 does. With
+    and one that reads from offset 0 warns as a tail from offset 0 does. A
+    run writes that warning once. With
     `fresh`, the stored read positions and rejects of
     the collection go after `source.wait_compacted` returned, so the run reads
     every record again; a run that stops in the wait keeps them. A fresh run
@@ -642,7 +629,13 @@ def copy_collection(
         source, writer, state, events, entry, collection, skip_unchanged
     )
     pending = state.pending(ref)
-    copy.run(pending, parallelism, _resume(state, ref, pending, warn))
+    resume = _Resume(
+        state.partitions(ref),
+        frozenset(part.key for part, _ in pending),
+        _marks(state, ref),
+        warn,
+    )
+    copy.run(pending, parallelism, resume)
     written = copy.written
     count = source.count(collection)
     if fresh:
@@ -652,13 +645,16 @@ def copy_collection(
     stored = state.partitions(ref)
     covered = _covered(stored)
     reread_from = copy.reread_from
+    # A pending partition that read from offset 0 wrote the warning.
+    warned = reread_from == 0
     if covered is not None:
         marks = _marks(state, ref)
         place = _tail_place(source, collection, stored, marks, covered, count)
         shifted = place.start != covered
         if place.superseded and count > place.start:
-            reread_from = min(place.start, reread_from or place.start)
-        if shifted and place.start == 0:
+            if reread_from is None or place.start < reread_from:
+                reread_from = place.start
+        if shifted and place.start == 0 and not warned:
             events.emit("warning", "source_changed", ref=ref, message=SOURCE_CHANGED)
             if warn is not None:
                 warn(SOURCE_CHANGED)
