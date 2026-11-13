@@ -6,7 +6,7 @@ each failure with the right exit code. They run at three levels.
 
 | Level | Where | Servers | Runs in CI |
 |---|---|---|---|
-| Unit | `tests/unit/` | None. Fakes stand in for the source and Weaviate. | Yes, on Python 3.10 and 3.13 |
+| Unit | `tests/unit/` | None. Fakes stand in for the source and Weaviate. | Yes, on Python 3.10, 3.13 and 3.14 |
 | Acceptance, API | `tests/acceptance/` | A real source and a real Weaviate, reached only through the `to-weaviate` command and the server APIs | Yes |
 | Acceptance, infra | `tests/acceptance/`, marker `infra` | Also restarts or deletes a server through Docker or kubectl | Yes |
 
@@ -154,9 +154,17 @@ values to every child process, and the target refuses them.
 | Job | What it runs |
 |---|---|
 | `lint` | `pre-commit run --all-files`: ruff, ruff-format, mypy |
-| `unit` | `pytest tests/unit` on Python 3.10 and 3.13 |
+| `unit` | `pytest tests/unit` on Python 3.10, 3.13 and 3.14 |
+| `unit (lowest deps)` | `pytest tests/unit` on Python 3.10 with the lower bound of each dependency in `pyproject.toml` |
 | `acceptance (single)` | The acceptance suite against one Weaviate node and the single-node Chroma |
 | `acceptance (cluster)` | The acceptance suite against three Weaviate nodes with replication factor 3 and distributed Chroma |
+
+Every job except `unit (lowest deps)` installs the versions in `uv.lock` with
+`uv sync --locked --extra test`, which fails when `uv.lock` does not match
+`pyproject.toml`. The mypy hook is the exception inside `lint`: pre-commit
+installs the packages in `additional_dependencies` of
+`.pre-commit-config.yaml`, not the versions in `uv.lock`. Those entries carry
+the bounds of `pyproject.toml`.
 
 Both acceptance jobs run Weaviate in a kind cluster with `ASYNC_INDEXING`.
 The tests in `tests/acceptance/chroma/test_cluster.py` run in the `cluster`

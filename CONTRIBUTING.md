@@ -10,13 +10,24 @@ You need Python 3.10 or newer and [uv](https://docs.astral.sh/uv/).
 ```bash
 git clone https://github.com/weaviate/to-weaviate
 cd to-weaviate
-uv venv --python 3.10 .venv
-uv pip install -e ".[test]" pre-commit
+uv sync --python 3.10 --extra test
 .venv/bin/pre-commit install
 ```
 
-The `test` extra does not include `pre-commit`, so the `uv pip install`
-command names both.
+`uv sync` creates `.venv` and installs the versions in `uv.lock`, which CI
+uses too. It installs the `test` extra and the `dev` dependency group, which
+holds `pre-commit`.
+
+To install the newest versions that `pyproject.toml` allows instead, run
+`uv venv --python 3.10 .venv` and `uv pip install -e ".[test]" pre-commit`.
+
+## Dependencies
+
+Each dependency in `pyproject.toml` has a lower bound that the unit tests
+pass on. The CI job `unit (lowest deps)` installs those lower bounds. After
+a change to the dependencies in `pyproject.toml`, run `uv lock` and commit
+`uv.lock`. The mypy hook does not read `uv.lock`, so copy a changed bound to
+`additional_dependencies` in `.pre-commit-config.yaml` too. Dependabot opens a weekly pull request that updates `uv.lock`.
 
 ## Before you open a pull request
 
