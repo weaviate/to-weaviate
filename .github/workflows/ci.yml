@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -12,10 +13,10 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.13"
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
@@ -30,10 +31,10 @@ jobs:
       matrix:
         python-version: ["3.10", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: ${{ matrix.python-version }}
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
@@ -48,10 +49,10 @@ jobs:
     name: unit (lowest deps)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.10"
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
@@ -61,41 +62,12 @@ jobs:
       - run: uv pip freeze
       - run: .venv/bin/python -m pytest tests/unit
 
-  # Each setup is one call of acceptance.yml. The cluster setup needs a runner
-  # whose CPU has AVX-512 (the first step of acceptance.yml says why), and
-  # part of the ubuntu-latest pool lacks it. An attempt that runs on such a
-  # runner ends in seconds with cpu-unsupported true, and the next attempt
-  # runs on another runner, which the pool picks at random. GitHub Actions
-  # has no retry of a job and no choice of CPU within ubuntu-latest, so the
-  # attempts are a chain of jobs. An attempt that ran the tests is the last
-  # one, whatever its result.
-  acceptance-single:
-    name: acceptance (single)
-    uses: ./.github/workflows/acceptance.yml
-    with: {name: single, replicas: 1, workers: 1, replication: "1", chroma: single}
-
-  acceptance-cluster:
-    name: acceptance (cluster)
-    uses: ./.github/workflows/acceptance.yml
-    with: {name: cluster, replicas: 3, workers: 3, replication: "3", chroma: distributed, attempt: 1, attempts: 4}
-
-  acceptance-cluster-2:
-    name: acceptance (cluster, attempt 2)
-    needs: acceptance-cluster
-    if: needs.acceptance-cluster.outputs.cpu-unsupported == 'true'
-    uses: ./.github/workflows/acceptance.yml
-    with: {name: cluster, replicas: 3, workers: 3, replication: "3", chroma: distributed, attempt: 2, attempts: 4}
-
-  acceptance-cluster-3:
-    name: acceptance (cluster, attempt 3)
-    needs: acceptance-cluster-2
-    if: needs.acceptance-cluster-2.outputs.cpu-unsupported == 'true'
-    uses: ./.github/workflows/acceptance.yml
-    with: {name: cluster, replicas: 3, workers: 3, replication: "3", chroma: distributed, attempt: 3, attempts: 4}
-
-  acceptance-cluster-4:
-    name: acceptance (cluster, attempt 4)
-    needs: acceptance-cluster-3
-    if: needs.acceptance-cluster-3.outputs.cpu-unsupported == 'true'
-    uses: ./.github/workflows/acceptance.yml
-    with: {name: cluster, replicas: 3, workers: 3, replication: "3", chroma: distributed, attempt: 4, attempts: 4}
+  # A push to main runs no acceptance suite: the pull request ran both, and
+  # release.yml runs both on the tagged commit.
+  acceptance:
+    if: github.event_name != 'push'
+    # packages: read is for the private images of the cluster setup.
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/acceptance-suites.yml

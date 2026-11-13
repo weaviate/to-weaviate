@@ -2,16 +2,23 @@
 
 A release is a tag `vX.Y.Z` on a commit of `main`; a tag with a suffix, such
 as `v0.1.0rc1`, starts no workflow. `.github/workflows/release.yml` builds
-the wheel and the sdist, attaches them to a GitHub release, and publishes
-them to PyPI through trusted publishing, without a PyPI token.
+the wheel and the sdist, runs the unit tests and both acceptance setups on
+the tagged commit, attaches the files to a GitHub release, and publishes them
+to PyPI through trusted publishing, without a PyPI token. A tag on a commit
+whose unit tests or acceptance run fail publishes nothing.
 
 ## Before the tag
 
-The release workflow runs no tests. Check two runs of the commit you will
-tag, and keep each result (passed, skipped with the reasons, or failed) for
-the release notes:
+The release workflow runs the unit tests and the acceptance tests. It does
+not run the lint, the unit tests with the lowest dependency versions, or
+anything against Weaviate Cloud. Check two runs of the commit you will tag,
+and keep each result (passed, skipped with the reasons, or failed) for the
+release notes:
 
-- The `CI` workflow of that commit on `main`.
+- A manual run of the `CI` workflow on that commit, while it is the head of
+  `main`: `gh workflow run ci.yml --ref main`. It runs the lint, the unit
+  tests and both acceptance setups. The run that a push to `main` starts
+  skips the acceptance setups.
 - `make acceptance-cloud` against a dedicated serverless Weaviate Cloud
   cluster, from your machine. See [Testing](testing.md#against-weaviate-cloud).
 
@@ -23,24 +30,34 @@ git tag v0.1.0 origin/main
 git push origin v0.1.0
 ```
 
-The workflow runs three jobs in order:
+The workflow runs five jobs. `unit` starts with `build`; the others run in
+order:
 
 1. `build` stops unless the tag points at a commit on `main` and the built
    wheel has the tag's version without the `v`.
-2. `github-release` creates the GitHub release for the tag, with generated
+2. `unit` runs `pytest tests/unit` on the tagged commit, on Python 3.10, 3.13
+   and 3.14, as on a pull request.
+3. `acceptance` runs the `single` and the `cluster` setup on the tagged
+   commit, as on a pull request. It passes only when
+   `acceptance / single / run` and `acceptance / cluster / run` pass.
+4. `github-release` creates the GitHub release for the tag, with generated
    notes and the wheel and the sdist as assets. A release that exists for
    the tag, made by hand or by an earlier run, gets the files instead.
-3. `publish` uploads the same files to PyPI. It waits until a member of
+5. `publish` uploads the same files to PyPI. It waits until a member of
    `weaviate/core` approves the deployment to the `pypi` environment, under
    "Review deployments" on the workflow run.
 
-Between the second and the third job, edit the release on GitHub and add the
+When `unit` or `acceptance` fails, `github-release` and `publish` are skipped
+and nothing is public. Fix the test on `main`, delete the tag, and tag the
+new commit.
+
+Between `github-release` and `publish`, edit the release on GitHub and add the
 two results from "Before the tag" to the generated notes. Then approve the
 deployment.
 
 PyPI never accepts a file name twice, even after a deletion, so `publish`
 runs last: a GitHub release can be deleted and the tag moved; an upload to
-PyPI is final. When the three jobs pass, `uvx to-weaviate --version` prints
+PyPI is final. When the five jobs pass, `uvx to-weaviate --version` prints
 `to-weaviate 0.1.0`.
 
 ## One-time setup
