@@ -20,10 +20,6 @@ on:
         description: Worker nodes of the kind cluster.
         required: true
         type: number
-      replication:
-        description: REPLICATION_MINIMUM_FACTOR of the Weaviate pods.
-        required: true
-        type: string
       chroma:
         description: >-
           The Chroma of the setup. single is the compose container; distributed
@@ -120,7 +116,6 @@ jobs:
           values-override: |
             env:
               ASYNC_INDEXING: "true"
-              REPLICATION_MINIMUM_FACTOR: "${{ inputs.replication }}"
       # The kubectl-relay forwards of the action can stop forwarding gRPC
       # after the SIGKILL resume test; the script replaces them.
       - id: forward

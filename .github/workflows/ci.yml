@@ -47,30 +47,30 @@ jobs:
   acceptance-single:
     name: acceptance (single)
     uses: ./.github/workflows/acceptance.yml
-    with: {name: single, replicas: 1, workers: 1, replication: "1", chroma: single}
+    with: {name: single, replicas: 1, workers: 1, chroma: single}
 
   acceptance-cluster:
     name: acceptance (cluster)
     uses: ./.github/workflows/acceptance.yml
-    with: {name: cluster, replicas: 3, workers: 3, replication: "3", chroma: distributed, attempt: 1, attempts: 4}
+    with: {name: cluster, replicas: 3, workers: 3, chroma: distributed, attempt: 1, attempts: 4}
 
   acceptance-cluster-2:
     name: acceptance (cluster, attempt 2)
     needs: acceptance-cluster
     if: needs.acceptance-cluster.outputs.cpu-unsupported == 'true'
     uses: ./.github/workflows/acceptance.yml
-    with: {name: cluster, replicas: 3, workers: 3, replication: "3", chroma: distributed, attempt: 2, attempts: 4}
+    with: {name: cluster, replicas: 3, workers: 3, chroma: distributed, attempt: 2, attempts: 4}
 
   acceptance-cluster-3:
     name: acceptance (cluster, attempt 3)
     needs: acceptance-cluster-2
     if: needs.acceptance-cluster-2.outputs.cpu-unsupported == 'true'
     uses: ./.github/workflows/acceptance.yml
-    with: {name: cluster, replicas: 3, workers: 3, replication: "3", chroma: distributed, attempt: 3, attempts: 4}
+    with: {name: cluster, replicas: 3, workers: 3, chroma: distributed, attempt: 3, attempts: 4}
 
   acceptance-cluster-4:
     name: acceptance (cluster, attempt 4)
     needs: acceptance-cluster-3
     if: needs.acceptance-cluster-3.outputs.cpu-unsupported == 'true'
     uses: ./.github/workflows/acceptance.yml
-    with: {name: cluster, replicas: 3, workers: 3, replication: "3", chroma: distributed, attempt: 4, attempts: 4}
+    with: {name: cluster, replicas: 3, workers: 3, chroma: distributed, attempt: 4, attempts: 4}
