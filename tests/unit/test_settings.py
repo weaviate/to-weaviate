@@ -21,9 +21,10 @@ def test_chroma_defaults():
     assert s.url == "https://api.trychroma.com" and s.token_header == "x-chroma-token"
 
 
-def test_cloud_url_requires_key():
+@pytest.mark.parametrize("env", [{}, {"CHROMA_URL": "  "}])
+def test_cloud_url_requires_key(env):
     with pytest.raises(MissingCredential) as e:
-        chroma_settings({})
+        chroma_settings(env)
     assert e.value.var == "CHROMA_API_KEY"
     assert e.value.hint == (
         "Set CHROMA_API_KEY in the environment or in .env. Without CHROMA_URL "
