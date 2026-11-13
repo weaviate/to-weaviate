@@ -75,10 +75,12 @@ flowchart LR
    records. If it stops, run it again to resume. Some sources need the
    writes to them paused while `copy` and `sync` run; the "Writes during a
    copy" section of each [source guide](docs/sources/README.md) says which.
-5. Stop the writes to the source, then run `to-weaviate sync --prune`. It
-   writes the records that changed since the copy and deletes the objects
-   whose source record is gone.
-6. Run `to-weaviate verify`. It compares Weaviate with the source and writes
+5. Optional: run `to-weaviate sync` to write the records that are new or
+   changed since the copy. Run it as often as you like before the last step.
+6. Stop the writes to the source, then run `to-weaviate sync --prune`. It
+   writes the records that changed since the last run and deletes the
+   objects whose source record is gone.
+7. Run `to-weaviate verify`. It compares Weaviate with the source and writes
    `report.md`. When every check passes, switch your application to
    Weaviate.
 
