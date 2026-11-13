@@ -152,6 +152,39 @@ def test_keep_model_for_openai_ada_002(embedding, options, codes):
     assert [e.code for e in errors] == codes
 
 
+def test_keep_model_names_ada_as_the_same_model_as_ada_002():
+    vectorizer = p.VectorizerPlan(module="text2vec-openai", options={"model": ADA_002})
+    plan = plan_of(entry([keep(vectorizer)], embedding=_openai(ADA_002)))
+    errors, _ = plan_findings(plan, None, vectorizer_for)
+    assert [e.code for e in errors] == ["keep_model_mismatch"]
+    text = errors[0].message
+    assert "ada is Weaviate's name for text-embedding-ada-002" in text
+    assert "set model: ada" in text
+    assert "run inspect again" in text
+    assert "embed mode" not in text
+
+
+def test_keep_model_keeps_the_embed_hint_for_another_openai_model():
+    vectorizer = p.VectorizerPlan(module="text2vec-openai", options={"model": V3_SMALL})
+    plan = plan_of(entry([keep(vectorizer)], embedding=_openai(ADA_002)))
+    errors, _ = plan_findings(plan, None, vectorizer_for)
+    assert "embed mode" in errors[0].message
+
+
+def test_keep_model_accepts_ada_set_by_hand_for_ada_002_with_a_base_url():
+    # Weaviate refuses text-embedding-ada-002 for a base URL that holds
+    # api.openai.com outside the host. The plan then needs model: ada.
+    base = "https://proxy.example.com/api.openai.com"
+    vectorizer = p.VectorizerPlan(
+        module="text2vec-openai", options={"model": "ada", "base_url": base}
+    )
+    plan = plan_of(
+        entry([keep(vectorizer)], embedding=_openai(ADA_002, api_base=base + "/v1"))
+    )
+    errors, _ = plan_findings(plan, None, vectorizer_for)
+    assert errors == []
+
+
 def test_keep_model_passes_for_the_drafted_openai_ada_002_vectorizer():
     embedding = _openai(ADA_002)
     drafted, _ = vectorizer_for(embedding)

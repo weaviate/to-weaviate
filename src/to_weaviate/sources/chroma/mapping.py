@@ -162,6 +162,17 @@ def _openai_host(base_url: str) -> bool:
     return host == OPENAI_HOST or host.endswith("." + OPENAI_HOST)
 
 
+def _lower_host(base_url: str) -> str:
+    """`base_url` with its host in lower case.
+
+    Weaviate looks for api.openai.com in base_url in lower case only. With
+    another case it sends the model name `ada` unchanged.
+    """
+    parts = urlsplit(base_url)
+    userinfo, at, host = parts.netloc.rpartition("@")
+    return parts._replace(netloc=userinfo + at + host.lower()).geturl()
+
+
 def _openai_base(api_base: str) -> str:
     """`api_base` without one trailing `/v1` and without a trailing slash.
 
@@ -225,6 +236,8 @@ def vectorizer_for(
     base_url = options.get("base_url")
     if isinstance(base_url, str):
         base_url = _openai_base(base_url)
+        if _openai_host(base_url):
+            base_url = _lower_host(base_url)
         if base_url == OPENAI_DEFAULT_BASE:
             del options["base_url"]
         else:

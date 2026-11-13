@@ -151,6 +151,39 @@ def test_openai_ada_002_gets_the_weaviate_model_name_on_an_openai_host_with_a_po
     assert v.options["model"] == "ada"
 
 
+@pytest.mark.parametrize(
+    ("api_base", "options"),
+    [
+        (
+            "https://API.openai.com:443/v1",
+            {"model": "ada", "base_url": "https://api.openai.com:443"},
+        ),
+        (
+            "https://EU.Api.OpenAI.com/v1",
+            {"model": "ada", "base_url": "https://eu.api.openai.com"},
+        ),
+        (
+            "https://API.OPENAI.COM/Custom/v1",
+            {"model": "ada", "base_url": "https://api.openai.com/Custom"},
+        ),
+        ("https://API.OPENAI.COM/v1", {"model": "ada"}),
+    ],
+)
+def test_openai_host_is_stored_in_lower_case(api_base, options):
+    # Weaviate looks for api.openai.com in base_url in lower case only.
+    v, _ = vectorizer_for(known("openai", model_name=ADA_002, api_base=api_base))
+    assert v is not None
+    assert v.options == options
+
+
+def test_openai_base_url_of_another_host_keeps_its_case():
+    v, _ = vectorizer_for(
+        known("openai", model_name=ADA_002, api_base="https://Proxy.Example.com/v1")
+    )
+    assert v is not None
+    assert v.options == {"model": ADA_002, "base_url": "https://Proxy.Example.com"}
+
+
 @pytest.mark.parametrize("model", ["text-embedding-3-small", "text-embedding-3-large"])
 @pytest.mark.parametrize("api_base", [None, "https://proxy.example.com/v1"])
 def test_openai_v3_models_keep_their_name(model, api_base):
