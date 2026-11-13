@@ -1,15 +1,15 @@
 # to-weaviate
 
 [![CI](https://github.com/weaviate/to-weaviate/actions/workflows/ci.yml/badge.svg)](https://github.com/weaviate/to-weaviate/actions/workflows/ci.yml)
-[![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
+[![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](https://github.com/weaviate/to-weaviate/blob/main/LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://github.com/weaviate/to-weaviate/blob/main/pyproject.toml)
 
 `to-weaviate` migrates collections from other vector databases into
 [Weaviate](https://weaviate.io). It copies each record's id, vector, text and
 metadata, resumes where it stopped, and checks the copy against the source.
 It only reads from the source.
 
-![to-weaviate inspect reads a Chroma collection of 5,000 records with 1536-dimension vectors, the start of plan.yaml shows the source and target, then check and copy run, sync --prune writes the 10 records that changed since the copy and deletes the 5 whose source record is gone, and verify prints PASS for the count, ids and records checks](docs/demo/demo.gif)
+![to-weaviate inspect reads a Chroma collection of 5,000 records with 1536-dimension vectors, the start of plan.yaml shows the source and target, then check and copy run, sync --prune writes the 10 records that changed since the copy and deletes the 5 whose source record is gone, and verify prints PASS for the count, ids and records checks](https://raw.githubusercontent.com/weaviate/to-weaviate/main/docs/demo/demo.gif)
 
 The Weaviate team maintains it.
 
@@ -17,7 +17,7 @@ The Weaviate team maintains it.
 
 | Source | Deployments | Inspect command | Guide |
 |---|---|---|---|
-| Chroma | Chroma Cloud, distributed Chroma, single-node Chroma, a Chroma directory on disk | `inspect chroma` | [Chroma](docs/sources/chroma.md) |
+| Chroma | Chroma Cloud, distributed Chroma, single-node Chroma, a Chroma directory on disk | `inspect chroma` | [Chroma](https://github.com/weaviate/to-weaviate/blob/main/docs/sources/chroma.md) |
 
 To ask for another source, [open an issue](https://github.com/weaviate/to-weaviate/issues/new).
 
@@ -71,7 +71,7 @@ flowchart LR
 3. `to-weaviate check` validates the plan against Weaviate. It creates nothing.
 4. `to-weaviate copy` creates the collections and copies the records. Some
    sources need the writes to them paused while `copy` and `sync` run; the
-   "Writes during a copy" section of each [source guide](docs/sources/README.md)
+   "Writes during a copy" section of each [source guide](https://github.com/weaviate/to-weaviate/blob/main/docs/sources/README.md)
    says which.
 5. Stop the writes to the source and run `to-weaviate sync --prune`. It
    writes the records that changed since the copy and deletes the objects
@@ -87,7 +87,7 @@ unless you pass `--dir`.
 
 This example migrates the Chroma collection `support-articles` to Weaviate.
 Replace the collection name and the settings with your own.
-[`docs/demo/seed.py`](docs/demo/seed.py) creates this collection: 5,000
+[`docs/demo/seed.py`](https://github.com/weaviate/to-weaviate/blob/main/docs/demo/seed.py) creates this collection: 5,000
 records with 1536-dimension vectors.
 
 ### Configure the source
@@ -99,7 +99,7 @@ the directory where you run the tool, or export them:
 CHROMA_URL=http://localhost:8001
 ```
 
-Each [source guide](docs/sources/README.md) lists the settings of its source,
+Each [source guide](https://github.com/weaviate/to-weaviate/blob/main/docs/sources/README.md) lists the settings of its source,
 with an example for each deployment.
 
 ### Inspect
@@ -146,7 +146,7 @@ collections:
       type: boolean
 ```
 
-[The plan file](docs/plan-file.md) lists the edits you can make.
+[The plan file](https://github.com/weaviate/to-weaviate/blob/main/docs/plan-file.md) lists the edits you can make.
 
 ### Configure Weaviate
 
@@ -163,7 +163,7 @@ Leave `WEAVIATE_API_KEY` unset for a server without authentication. For a
 Weaviate Cloud cluster, set `WEAVIATE_URL` to the cluster URL and
 `WEAVIATE_API_KEY` to an API key of the cluster from the
 [Weaviate Cloud console](https://console.weaviate.cloud), and leave
-`WEAVIATE_GRPC_URL` unset. [Weaviate target](docs/weaviate.md) has the
+`WEAVIATE_GRPC_URL` unset. [Weaviate target](https://github.com/weaviate/to-weaviate/blob/main/docs/weaviate.md) has the
 details.
 
 ### Check and copy
@@ -181,7 +181,7 @@ Total: 5000 records
 ```
 
 Some sources need the writes to them paused while `copy` and `sync` run; the
-"Writes during a copy" section of each [source guide](docs/sources/README.md)
+"Writes during a copy" section of each [source guide](https://github.com/weaviate/to-weaviate/blob/main/docs/sources/README.md)
 says which.
 
 ### Sync, verify and switch
@@ -235,17 +235,17 @@ JSON document. The exit code names the class of failure, with and without
 | 4 | An unreachable server, a source that is compacting or still written to, or a deletion Weaviate did only partly |
 | 5 | An internal error |
 
-[Commands](docs/commands.md#exit-codes) lists every error code.
+[Commands](https://github.com/weaviate/to-weaviate/blob/main/docs/commands.md#exit-codes) lists every error code.
 
 ## Documentation
 
 | Page | Contents |
 |---|---|
-| [Commands](docs/commands.md) | The options every source shares, the migration directory, resuming, sync and the cutover, rejects, JSON output, error codes |
-| [The plan file](docs/plan-file.md) | The fields of `plan.yaml`, the edits it allows, vector modes, index and quantizer settings |
-| [Weaviate target](docs/weaviate.md) | `WEAVIATE_*` settings, Weaviate Cloud and self-hosted servers, vectorizer keys |
-| [Sources](docs/sources/README.md) | One guide per source: settings, options, data mapping, limits |
-| [Development](docs/development/README.md) | Architecture, adding a source, testing, releases |
+| [Commands](https://github.com/weaviate/to-weaviate/blob/main/docs/commands.md) | The options every source shares, the migration directory, resuming, sync and the cutover, rejects, JSON output, error codes |
+| [The plan file](https://github.com/weaviate/to-weaviate/blob/main/docs/plan-file.md) | The fields of `plan.yaml`, the edits it allows, vector modes, index and quantizer settings |
+| [Weaviate target](https://github.com/weaviate/to-weaviate/blob/main/docs/weaviate.md) | `WEAVIATE_*` settings, Weaviate Cloud and self-hosted servers, vectorizer keys |
+| [Sources](https://github.com/weaviate/to-weaviate/blob/main/docs/sources/README.md) | One guide per source: settings, options, data mapping, limits |
+| [Development](https://github.com/weaviate/to-weaviate/blob/main/docs/development/README.md) | Architecture, adding a source, testing, releases |
 
 The [Weaviate documentation](https://docs.weaviate.io) explains how to search
 the migrated collections.
@@ -257,8 +257,8 @@ Ask in the [Weaviate forum](https://forum.weaviate.io), or report a bug in
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](https://github.com/weaviate/to-weaviate/blob/main/CONTRIBUTING.md).
 
 ## License
 
-BSD-3-Clause. See [LICENSE](LICENSE).
+BSD-3-Clause. See [LICENSE](https://github.com/weaviate/to-weaviate/blob/main/LICENSE).
