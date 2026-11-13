@@ -105,10 +105,14 @@ operating system releases the lock when the process ends. On a system without
 ### Records added or deleted between runs
 
 Each run also copies the records added to the source since the last run. It
-finds its place from the last two records the previous run read:
+finds its place from the last two records the previous run read. A run that
+continues a stopped copy does the same for each part of the collection that
+is not finished, before it reads that part's next page:
 
 - When deletions in the source moved those records, the run finds them at
-  their new position and reads what follows.
+  their new position and reads what follows. After a stopped copy, a record
+  that the deletions moved from one part of the collection into another can
+  be written twice, unchanged, and is then counted twice as copied.
 - When one of them is gone, the run reads again from an earlier record.
   When it finds no earlier record either, it reads from the start and warns
   "the source changed since the last run; re-reading from the start".

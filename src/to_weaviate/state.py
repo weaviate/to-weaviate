@@ -306,6 +306,26 @@ class State:
                 [(ref, key) for key in superseded],
             )
 
+    def forget_copied(self, ref: str, keys: Sequence[str]) -> int:
+        """Set the copied count of each partition key in `keys` to 0.
+
+        Returns the sum of the counts before the call. A partition that reads
+        from a lower offset again calls this for the partitions it reads.
+        """
+        with self._transaction():
+            forgotten = 0
+            for key in keys:
+                row = self._db.execute(
+                    "SELECT copied FROM partitions WHERE ref = ? AND key = ?",
+                    (ref, key),
+                ).fetchone()
+                forgotten += row[0] if row else 0
+            self._db.executemany(
+                "UPDATE partitions SET copied = 0 WHERE ref = ? AND key = ?",
+                [(ref, key) for key in keys],
+            )
+        return forgotten
+
     def last_ids(self, ref: str) -> dict[str, str]:
         """The stored last id of each partition of `ref` that has one, by key."""
         with self._lock:

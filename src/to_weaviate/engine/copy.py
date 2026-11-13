@@ -257,6 +257,113 @@ def _tail_place(
     )
 
 
+def _marks(state: State, ref: str) -> dict[str, _Mark]:
+    previous = state.previous_ids(ref)
+    return {
+        key: _Mark(last_id, previous.get(key))
+        for key, last_id in state.last_ids(ref).items()
+    }
+
+
+@dataclass(frozen=True)
+class _Resume:
+    """The stored partitions of a run that continues an earlier one."""
+
+    stored: list[Partition]
+    pending: frozenset[str]  # keys of the partitions that are not finished
+    marks: dict[str, _Mark]
+    warn: Callable[[str], None] | None
+
+
+def _resume(
+    state: State,
+    ref: str,
+    pending: list[tuple[Partition, str | None]],
+    warn: Callable[[str], None] | None,
+) -> _Resume | None:
+    """None when no stored partition was read: there is no place to check."""
+    stored = state.partitions(ref)
+    started = any(cursor is not None for _, cursor in pending)
+    if not pending or (len(stored) == len(pending) and not started):
+        return None
+    return _Resume(
+        stored, frozenset(part.key for part, _ in pending), _marks(state, ref), warn
+    )
+
+
+@dataclass(frozen=True)
+class _ResumePlace:
+    cursor: str | None
+    # Keys of the partitions whose records are read again. None when the
+    # partition reads no record that an earlier run read.
+    reread: list[str] | None
+
+
+def _resume_place(
+    source: Source,
+    collection: SourceCollection,
+    resume: _Resume,
+    partition: Partition,
+    cursor: str | None,
+) -> _ResumePlace:
+    """Where a pending partition reads next, checked against the source.
+
+    The order rules of `_tail_place` apply. A partition that read a page
+    stores the mark of the record below its cursor. A partition that read
+    none has no mark: the records below its start belong to the partition
+    before it. When that one is pending, it reads up to its stop, so no
+    record is left out and nothing is read here. When it is finished, its
+    mark is the record below this start. A tail stores the mark of the
+    record below its start when it is added.
+
+    One read of the ids below the position shows that nothing shifted. A
+    mark found at a lower offset moves the cursor after it. When the mark is
+    gone, the marks of the finished partitions before this one are searched,
+    nearest first, and the partition reads from after the one found. When
+    none is found, it reads from the start of the first of those finished
+    partitions, which is the stop of a pending partition or offset 0. A tail
+    whose mark is gone reads from offset 0: the stored partitions do not
+    tell which of them the tail reads again.
+
+    A partition without a mark to check, from a state written before marks
+    were stored, keeps its cursor.
+    """
+    same = _ResumePlace(cursor, None)
+    position = int(cursor if cursor is not None else partition.start or 0)
+    index = next(i for i, p in enumerate(resume.stored) if p.key == partition.key)
+    before: list[Partition] = []
+    if partition.stop is not None:
+        for earlier in reversed(resume.stored[:index]):
+            if earlier.key in resume.pending:
+                break
+            before.append(earlier)
+    own = resume.marks.get(partition.key)
+    keys = [p.key for p in before if p.key in resume.marks]
+    if own is not None:
+        keys.insert(0, partition.key)
+    elif cursor is not None or not before or before[0].key not in resume.marks:
+        return same
+    if position == 0:
+        return same
+    wanted = [resume.marks[key] for key in keys]
+    if _unshifted(source, collection, wanted[0], position):
+        return same
+    found = _last_read(source, collection, wanted, position)
+    if found is not None and found[0] == 0:
+        return _ResumePlace(str(found[1] + 1), None)
+    if found is None:
+        if partition.stop is None:
+            return _ResumePlace("0", [p.key for p in resume.stored])
+        first = before[-1] if before else partition
+        return _ResumePlace(
+            str(int(first.start or 0)), [partition.key, *(p.key for p in before)]
+        )
+    reached = next(i for i, p in enumerate(before) if p.key == keys[found[0]])
+    return _ResumePlace(
+        str(found[1] + 1), [partition.key, *(p.key for p in before[:reached])]
+    )
+
+
 def _tail_end(partition: Partition, cursor: str | None, page: Page) -> str | None:
     """The end offset of a tail whose last page is `page`; None for other pages.
 
@@ -299,16 +406,27 @@ class _CollectionCopy:
         self._copied = _progress(state, self._ref).copied
         self.total = collection.count
         self.written = 0
+        # The lowest offset from which a partition reads records again.
+        self.reread_from: int | None = None
 
-    def run(self, pending: list[tuple[Partition, str | None]], workers: int) -> None:
+    def run(
+        self,
+        pending: list[tuple[Partition, str | None]],
+        workers: int,
+        resume: _Resume | None = None,
+    ) -> None:
         """Copy every pending partition and raise the first worker error.
 
         After a worker raises, the other workers stop before their next page.
+        With `resume`, each worker first checks the place of its partition
+        against the source.
         """
         stop = threading.Event()
 
         def work(partition: Partition, cursor: str | None) -> None:
             try:
+                if resume is not None:
+                    cursor = self._resume_at(resume, partition, cursor)
                 self._copy_partition(partition, cursor, stop)
             except BaseException:
                 stop.set()
@@ -327,6 +445,31 @@ class _CollectionCopy:
                 stop.set()
         if first is not None:
             raise first
+
+    def _resume_at(
+        self, resume: _Resume, partition: Partition, cursor: str | None
+    ) -> str | None:
+        """The cursor `partition` reads from, after `_resume_place` checked it.
+
+        The moved cursor is not stored: the first page stores the next one,
+        and a run that stops before it checks the same marks again.
+        """
+        place = _resume_place(self._source, self._collection, resume, partition, cursor)
+        if place.reread is None:
+            return place.cursor
+        forgotten = self._state.forget_copied(self._ref, place.reread)
+        start = int(place.cursor or 0)
+        with self._lock:
+            self._copied -= forgotten
+            if self.reread_from is None or start < self.reread_from:
+                self.reread_from = start
+        if start == 0:
+            self._events.emit(
+                "warning", "source_changed", ref=self._ref, message=SOURCE_CHANGED
+            )
+            if resume.warn is not None:
+                resume.warn(SOURCE_CHANGED)
+        return place.cursor
 
     def _copy_partition(
         self, partition: Partition, cursor: str | None, stop: threading.Event
@@ -451,7 +594,12 @@ def copy_collection(
     """Copy one collection and return its totals.
 
     Progress is stored in `state`, so a run after a failure resumes where the
-    last one stopped. With `fresh`, the stored read positions and rejects of
+    last one stopped. Before its first page, each pending partition of such a
+    run checks its place with `_resume_place`, in its own worker, so that
+    records deleted from the source between the runs make it skip no record.
+    A partition that reads records of earlier runs again sets `reread_from`,
+    and one that reads from offset 0 warns as a tail from offset 0 does. With
+    `fresh`, the stored read positions and rejects of
     the collection go after `source.wait_compacted` returned, so the run reads
     every record again; a run that stops in the wait keeps them. A fresh run
     stores the count it read after its pass as the total. Otherwise the
@@ -493,7 +641,8 @@ def copy_collection(
     copy = _CollectionCopy(
         source, writer, state, events, entry, collection, skip_unchanged
     )
-    copy.run(state.pending(ref), parallelism)
+    pending = state.pending(ref)
+    copy.run(pending, parallelism, _resume(state, ref, pending, warn))
     written = copy.written
     count = source.count(collection)
     if fresh:
@@ -502,17 +651,13 @@ def copy_collection(
         state.raise_total(ref, count)
     stored = state.partitions(ref)
     covered = _covered(stored)
-    reread_from = None
+    reread_from = copy.reread_from
     if covered is not None:
-        previous = state.previous_ids(ref)
-        marks = {
-            key: _Mark(last_id, previous.get(key))
-            for key, last_id in state.last_ids(ref).items()
-        }
+        marks = _marks(state, ref)
         place = _tail_place(source, collection, stored, marks, covered, count)
         shifted = place.start != covered
         if place.superseded and count > place.start:
-            reread_from = place.start
+            reread_from = min(place.start, reread_from or place.start)
         if shifted and place.start == 0:
             events.emit("warning", "source_changed", ref=ref, message=SOURCE_CHANGED)
             if warn is not None:
