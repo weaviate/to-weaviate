@@ -6,6 +6,7 @@ import weaviate
 from weaviate.classes.query import Filter
 from weaviate.collections import Collection
 from weaviate.collections.classes.tenants import TenantActivityStatus
+from weaviate.exceptions import WeaviateQueryError
 
 from to_weaviate.plan import CollectionPlan
 from to_weaviate.retry import with_retry
@@ -15,6 +16,10 @@ from to_weaviate.target.writer import TargetObject
 T = TypeVar("T")
 
 FETCH_BATCH = 100
+# Objects per request of the id listing. The server refuses a request above
+# QUERY_MAXIMUM_RESULTS (default 10,000) with an error that names the setting.
+LIST_PAGE = 1000
+MAXIMUM_RESULTS = "QUERY_MAXIMUM_RESULTS"
 SOURCE_ID = "source_id"
 # HOT is the name of ACTIVE before Weaviate 1.26.
 ACTIVE = (TenantActivityStatus.ACTIVE, TenantActivityStatus.HOT)
@@ -158,6 +163,19 @@ class WeaviateReader:
     def source_ids(self, entry: CollectionPlan) -> Iterator[tuple[str, str | None]]:
         # The client's iterator keeps its cursor when a page request raises,
         # so a retried next() asks for the same page again.
-        objects = iter(self._collection(entry).iterator(return_properties=[SOURCE_ID]))
-        while (obj := self._call(lambda: next(objects, None))) is not None:
+        collection = self._collection(entry)
+        objects = iter(
+            collection.iterator(return_properties=[SOURCE_ID], cache_size=LIST_PAGE)
+        )
+        try:
+            obj = self._call(lambda: next(objects, None))
+        except WeaviateQueryError as exc:
+            if MAXIMUM_RESULTS not in str(exc):
+                raise
+            # Nothing was yielded, so the listing starts again with the
+            # client's page size.
+            objects = iter(collection.iterator(return_properties=[SOURCE_ID]))
+            obj = self._call(lambda: next(objects, None))
+        while obj is not None:
             yield str(obj.uuid), _source_id(obj)
+            obj = self._call(lambda: next(objects, None))

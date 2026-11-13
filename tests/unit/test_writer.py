@@ -20,6 +20,7 @@ from to_weaviate.target.writer import (
     TargetObject,
     WeaviateWriter,
     chunks,
+    provider_busy,
     provider_refusal,
     to_object,
 )
@@ -411,6 +412,198 @@ def test_a_provider_that_refuses_the_key_of_one_object_stops_the_batch():
     assert len(data.calls) == 1
 
 
+# Per-object errors of Weaviate while a model provider limits or fails the
+# embedding requests: usecases/modulecomponents/clients/openai/openai.go,
+# clients/cohere/cohere.go and batch/batch.go.
+PROVIDER_429 = (
+    "connection to: OpenAI API failed with status: 429 request-id: req-2 error: "
+    "Rate limit reached for text-embedding-3-small in organization org-made on "
+    "requests per min (RPM): Limit 3, Used 3, Requested 1."
+)
+PROVIDER_503 = "connection to Cohere failed with status: 503 error: Service Unavailable"
+PROVIDER_NO_REFRESH = "request rate limit exceeded and will not refresh in time"
+PROVIDER_400 = (
+    "connection to: OpenAI API failed with status: 400 request-id: req-3 error: "
+    "This model's maximum context length is 8192 tokens"
+)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        PROVIDER_429,
+        PROVIDER_503,
+        PROVIDER_NO_REFRESH,
+        "connection to: OpenAI API failed with status: 500",
+        "connection to Cohere API failed with status 502: bad gateway",
+        "connection to Google failed with status: 504 error: timeout",
+        "connection to: https://example.test/v1 failed with status: 429",
+    ],
+)
+def test_a_provider_429_or_5xx_is_a_busy_provider(message):
+    assert provider_busy(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        PROVIDER_400,
+        PROVIDER_401,
+        "connection to Cohere API failed with status 403: forbidden",
+        "connection to: OpenAI API failed with status: 404 error: no such model",
+        "connection to: OpenAI API failed with status: 422",
+        "connection to: OpenAI API failed with status: 4290",
+        "connection to: OpenAI API failed with status: 400 error: at most 500 inputs",
+        "connection to: OpenAI API failed with status: 400 error: code 429",
+        "property 'year' failed with status: 500",
+        "rate limit",
+        CONTENT_ERROR,
+    ],
+)
+def test_other_errors_are_not_a_busy_provider(message):
+    assert not provider_busy(message)
+
+
+@pytest.mark.parametrize("error", [PROVIDER_429, PROVIDER_503, PROVIDER_NO_REFRESH])
+def test_objects_that_a_busy_provider_refused_are_sent_again(error):
+    data = FakeData([partial((0, error), (2, error)), SimpleNamespace(errors={})])
+    sleeps: list[float] = []
+    writer = WeaviateWriter(FakeClient(data), sleep=sleeps.append)  # type: ignore[arg-type]
+    assert writer.write(ENTRY_EMBED, objects(4)) == []
+    assert [[o.uuid for o in call] for call in data.calls] == [
+        ["u0", "u1", "u2", "u3"],
+        ["u0", "u2"],
+    ]
+    assert len(sleeps) == 1 and 0.25 <= sleeps[0] <= 0.5
+
+
+def test_objects_that_a_busy_provider_refuses_on_every_attempt_are_a_refused_batch():
+    data = FakeData([partial((1, PROVIDER_429))] + [partial((0, PROVIDER_429))] * 10)
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    with pytest.raises(BatchRefused) as info:
+        writer.write(ENTRY_EMBED, objects(3))
+    assert str(info.value) == (
+        "Weaviate refused 1 object of a batch of 3 in My_docs: " + PROVIDER_429
+    )
+    assert [[o.uuid for o in call] for call in data.calls] == [["u0", "u1", "u2"]] + [
+        ["u1"]
+    ] * 6
+
+
+def test_a_single_object_that_a_busy_provider_refuses_is_a_refused_batch():
+    data = FakeData([all_failed(PROVIDER_429)] * 10)
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    with pytest.raises(BatchRefused) as info:
+        writer.write(ENTRY_EMBED, objects(1))
+    assert str(info.value) == (
+        "Weaviate refused every object of a batch of 1 in My_docs: " + PROVIDER_429
+    )
+    assert len(data.calls) == 7
+
+
+def test_a_single_object_that_a_busy_provider_refused_once_is_stored():
+    data = FakeData([all_failed(PROVIDER_503), SimpleNamespace(errors={})])
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    assert writer.write(ENTRY_EMBED, objects(1)) == []
+    assert len(data.calls) == 2
+
+
+def test_an_object_that_a_provider_refuses_with_a_400_is_a_reject_at_once():
+    data = FakeData([partial((1, PROVIDER_400))] * 10)
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    assert writer.write(ENTRY_EMBED, objects(3)) == [Reject("s1", PROVIDER_400)]
+    assert len(data.calls) == 1
+
+
+def test_a_single_object_that_a_provider_refuses_with_a_400_is_a_reject_at_once():
+    data = FakeData([all_failed(PROVIDER_400)] * 10)
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    rejects = writer.write(ENTRY_EMBED, objects(1))
+    assert [r.source_id for r in rejects] == ["s0"]
+    assert PROVIDER_400 in rejects[0].reason
+    assert len(data.calls) == 1
+
+
+def test_a_batch_that_a_provider_refuses_with_a_400_is_a_reject_per_object():
+    data = FakeData([all_failed(PROVIDER_400)] * 10)
+    sleeps: list[float] = []
+    writer = WeaviateWriter(FakeClient(data), sleep=sleeps.append)  # type: ignore[arg-type]
+    rejects = writer.write(ENTRY_EMBED, objects(3))
+    assert [r.source_id for r in rejects] == ["s0", "s1", "s2"]
+    assert all(PROVIDER_400 in r.reason for r in rejects)
+    assert [[o.uuid for o in call] for call in data.calls] == [
+        ["u0", "u1", "u2"],
+        ["u0"],
+        ["u1"],
+        ["u2"],
+    ]
+    assert sleeps == []
+
+
+def test_a_batch_refused_with_a_400_and_a_429_is_sent_object_by_object():
+    data = FakeData(
+        [
+            all_failed(PROVIDER_429 + "\n" + PROVIDER_400),
+            all_failed(PROVIDER_400),
+            all_failed(PROVIDER_429),
+            SimpleNamespace(errors={}),
+        ]
+    )
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    rejects = writer.write(ENTRY_EMBED, objects(2))
+    assert [r.source_id for r in rejects] == ["s0"]
+    assert [[o.uuid for o in call] for call in data.calls] == [
+        ["u0", "u1"],
+        ["u0"],
+        ["u1"],
+        ["u1"],
+    ]
+
+
+def test_a_batch_refused_with_a_400_and_a_401_is_a_refused_key():
+    data = FakeData([all_failed(PROVIDER_400 + "\n" + PROVIDER_401)] * 10)
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    with pytest.raises(ProviderRefused):
+        writer.write(ENTRY_EMBED, objects(2))
+    assert len(data.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("reason", "busy"),
+    [
+        (PROVIDER_429, True),
+        (PROVIDER_503, True),
+        (PROVIDER_NO_REFRESH, True),
+        (PROVIDER_400, False),
+        (OUTAGE_ERRORS[0], False),
+        ("bad vector", False),
+    ],
+)
+def test_a_refused_batch_tells_whether_a_provider_was_busy(reason, busy):
+    assert BatchRefused(3, "My_docs", reason, 1).provider_busy is busy
+
+
+def test_a_refused_key_next_to_a_busy_provider_stops_the_batch_without_a_retry():
+    data = FakeData([partial((0, PROVIDER_429), (1, PROVIDER_401))] * 10)
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    with pytest.raises(ProviderRefused) as info:
+        writer.write(ENTRY_EMBED, objects(3))
+    assert (info.value.provider, info.value.status) == ("OpenAI API", 401)
+    assert len(data.calls) == 1
+
+
+def test_a_busy_provider_a_content_error_and_a_stored_object_in_one_batch():
+    data = FakeData(
+        [partial((0, PROVIDER_429), (1, CONTENT_ERROR)), SimpleNamespace(errors={})]
+    )
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    assert writer.write(ENTRY_EMBED, objects(3)) == [Reject("s1", CONTENT_ERROR)]
+    assert [[o.uuid for o in call] for call in data.calls] == [
+        ["u0", "u1", "u2"],
+        ["u0"],
+    ]
+
+
 def test_all_failed_batch_is_retried_and_then_raises():
     data = FakeData([all_failed("bad vector")] * 10)
     writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
@@ -508,38 +701,53 @@ def _int_record(value: Any) -> Record:
     return Record("edge-3", [0.1], "doc", None, {"int_edge": value, "year": 2020})
 
 
-INT_REJECT = (
-    "int_edge: int 9223372036854775807 cannot be stored: Weaviate keeps ints as "
-    "doubles and refuses this value; type the property text"
-)
-
-
-@pytest.mark.parametrize(
-    ("kind", "value"), [("int", 2**63 - 1), ("int[]", [3, 2**63 - 1])]
-)
-def test_an_int_whose_double_is_2_to_the_63_is_a_reject(kind, value):
-    assert to_object(_int_record(value), _int_entry(kind)) == Reject(
-        "edge-3", INT_REJECT
+def _int_reject(value: int) -> str:
+    return (
+        f"int_edge: int {value} is above 2**53 in magnitude and Weaviate would "
+        "store it rounded; set the property type to text, or text[] for a list"
     )
 
 
 @pytest.mark.parametrize(
-    ("kind", "value"),
+    ("kind", "value", "named"),
     [
-        ("int", 2**63 - 1024),
-        ("int", 2**63 - 513),
-        ("int", -(2**63)),
-        ("int[]", [-(2**63), 2**53 + 1]),
-        ("number", 2**63 - 1),
+        ("int", 2**53 + 1, 2**53 + 1),
+        ("int", -(2**53) - 1, -(2**53) - 1),
+        ("int", 2**63 - 1, 2**63 - 1),
+        ("int", -(2**63), -(2**63)),
+        ("number", 2**53 + 1, 2**53 + 1),
+        ("number", 2**63 - 1, 2**63 - 1),
+        ("int[]", [3, 2**63 - 1], 2**63 - 1),
+        ("int[]", [-(2**63), 2**53 + 1], -(2**63)),
+        ("number[]", [3, 2**53 + 1], 2**53 + 1),
     ],
 )
-def test_an_int_below_the_double_2_to_the_63_is_stored(kind, value):
+def test_an_int_above_2_to_the_53_is_a_reject(kind, value, named):
+    assert to_object(_int_record(value), _int_entry(kind)) == Reject(
+        "edge-3", _int_reject(named)
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "value", "stored"),
+    [
+        ("int", 2**53, 2**53),
+        ("int", -(2**53), -(2**53)),
+        ("int[]", [-(2**53), 2**53], [-(2**53), 2**53]),
+        ("number", 2**53, 2.0**53),
+        ("number", 1e300, 1e300),
+        ("text", 2**53 + 1, "9007199254740993"),
+        ("text", 2**63 - 1, "9223372036854775807"),
+        ("text[]", [3, -(2**63)], ["3", "-9223372036854775808"]),
+    ],
+)
+def test_a_value_that_the_property_type_holds_exactly_is_stored(kind, value, stored):
     obj = to_object(_int_record(value), _int_entry(kind))
     assert isinstance(obj, TargetObject)
-    expected = float(value) if kind == "number" else value
     assert obj.properties == {
         "source_id": "edge-3",
         "document": "doc",
         "year": "2020",
-        "int_edge": expected,
+        "int_edge": stored,
     }
+    assert type(obj.properties["int_edge"]) is type(stored)

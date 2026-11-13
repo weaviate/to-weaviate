@@ -1,0 +1,36 @@
+# Both setups of the acceptance tests, with one call of acceptance.yml each.
+# ci.yml and release.yml call this workflow.
+name: acceptance suites
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  # The cluster setup pulls two images from private packages of this
+  # repository.
+  packages: read
+
+jobs:
+  single:
+    uses: ./.github/workflows/acceptance.yml
+    with: {name: single, replicas: 1, workers: 1, replication: "1", chroma: single}
+
+  # The cluster setup pulls images from private packages. The token of a pull
+  # request from a fork is not given access to them, so the setup does not
+  # run there and cluster-not-run says so.
+  cluster:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/acceptance.yml
+    with: {name: cluster, replicas: 3, workers: 3, replication: "3", chroma: distributed}
+
+  cluster-not-run:
+    name: cluster (not run on a fork)
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: |
+          message="The cluster suite did not run: this pull request comes from a fork, and the suite needs private images of the repository. A maintainer runs it by pushing the commits to a branch of weaviate/to-weaviate and running the ci workflow on that branch."
+          echo "::warning::$message"
+          echo "$message" >>"$GITHUB_STEP_SUMMARY"

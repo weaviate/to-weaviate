@@ -8,7 +8,7 @@ from weaviate.classes.config import VectorDistances
 
 from to_weaviate.naming import collection_name, property_name
 from to_weaviate.sources.base import SourceCollection
-from to_weaviate.types import resolve_type
+from to_weaviate.types import has_large_int, resolve_type
 
 INDEX_OPTIONS: dict[str, set[str]] = {
     "default": set(),
@@ -84,6 +84,11 @@ EMBED_INSTEAD = (
     "run to-weaviate inspect chroma --force --vectors embed --vectorizer MODULE"
 )
 NO_VECTORS_NOTE = f"the source has no vectors; {EMBED_INSTEAD}"
+LARGE_INT_NOTE = (
+    "key {key} holds ints above 2**53 in magnitude, which Weaviate would store "
+    "rounded as int or number; the property is typed {type} and holds the "
+    "decimal digits"
+)
 MERGE_TAG = "tag:yaml.org,2002:merge"
 
 
@@ -321,6 +326,11 @@ def _draft_collection(
     name = collection_name(source.name, taken_names)
     taken_names.add(name)
     props, dropped = _properties(source)
+    notes.extend(
+        LARGE_INT_NOTE.format(key=prop.source_key, type=prop.type)
+        for prop in props
+        if has_large_int(prop.coerced_from)
+    )
 
     def kept(vector_name: str, with_vectorizer: bool) -> VectorPlan:
         chosen = None

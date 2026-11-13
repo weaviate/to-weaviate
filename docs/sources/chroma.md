@@ -4,12 +4,6 @@
 the tool copies its id, document, URI and metadata, and its embedding when
 the plan keeps the source vector. It never writes to Chroma.
 
-> [!IMPORTANT]
-> Chroma Cloud stops accepting writes on 2026-12-07 and stops serving reads
-> on 2026-12-22. Migrate from Chroma Cloud before 2026-12-22. After that you
-> can migrate only from a Chroma server you run yourself, for example one
-> that serves a [Chroma directory on disk](#a-chroma-directory-on-disk).
-
 ## Deployments
 
 | Deployment | Notes |
@@ -75,6 +69,11 @@ Limits of the versions older than 1.0.6:
 | `CHROMA_TENANT` | no | The Chroma tenant. Default: the tenant of the API key, or `default_tenant` when the server names none for it. |
 | `CHROMA_DATABASE` | no | The database that `inspect chroma` reads when you pass no `--database`. With neither, it reads every database of the tenant that the server lists; see [Supported Chroma versions](#supported-chroma-versions). |
 | `CHROMA_TOKEN_HEADER` | no | The header that carries the key. Default: `x-chroma-token`. With `Authorization`, the tool sends `Bearer <key>`. |
+
+Without `CHROMA_URL`, the source is Chroma Cloud, and `inspect chroma`,
+`copy`, `sync` and `verify` stop with `missing_credential`, exit 3, when
+`CHROMA_API_KEY` is not set. For a self-hosted Chroma server, set
+`CHROMA_URL` to its address.
 
 `inspect` records `CHROMA_URL`, without its userinfo, query and fragment,
 and `CHROMA_TENANT`, or null when it is unset, in `plan.yaml`. `copy` and
@@ -190,8 +189,31 @@ embed query text with the same model. With `--vectors both`, the vector
 | `ollama` | `text2vec-ollama` |
 
 The plan carries the model name and, where the module takes them, the
-dimensions, the base URL or endpoint, the project and the location. When a
-function gets no vectorizer, the plan notes why:
+dimensions, the base URL or endpoint, the project and the location.
+
+The plan names OpenAI's `text-embedding-ada-002` as `ada` when the function
+has no base URL, or one whose host is `api.openai.com` or a subdomain of it.
+Weaviate accepts only
+that name on OpenAI's endpoint, and it requests `text-embedding-ada-002` for
+it. The plan stores the host of such a base URL in lower case, because
+Weaviate matches `api.openai.com` in lower case only. With another base URL
+the plan keeps the name `text-embedding-ada-002`.
+
+Weaviate sends that name unchanged unless the base URL holds the text
+`api.openai.com` outside its host, for example in the path or in a longer
+host name such as `api.openai.com.proxy.example.com`. Weaviate treats such a
+URL as OpenAI's endpoint and refuses `text-embedding-ada-002` when it creates
+the collection. In that case set `model: ada` in `plan.yaml` and run `check`
+again.
+
+`check` reports `keep_model_mismatch` for a kept vector whose vectorizer has
+a different `model` than the one `inspect` drafts. `ada` and
+`text-embedding-ada-002` are the same model, so no documents need a new
+embedding. When the plan has `text-embedding-ada-002` and `inspect` drafts
+`ada`, set `model: ada` or run `inspect` again. `check` accepts `ada` when
+`inspect` drafts `text-embedding-ada-002`.
+
+When a function gets no vectorizer, the plan notes why:
 
 - `default`: Chroma's `all-MiniLM-L6-v2` has no Weaviate module. Embed
   queries in your application, use `text2vec-huggingface` with that model,
@@ -246,6 +268,37 @@ runs are copied by the next `sync`.
 On single-node Chroma and a Chroma directory on disk, the application can
 keep writing while `copy` and `sync` run. Stop the writes before the last
 `sync --prune`.
+
+## Errors
+
+A failed Chroma request ends a command with one of three error codes:
+
+| Answer of Chroma | Error code | Exit code |
+|---|---|---|
+| A network error, a timeout, HTTP 408, 429, or 5xx except 501. Also a redirect, and an HTTP 2xx answer that is not JSON. | `source_unreachable` | 4 |
+| HTTP 401 or 403 | `auth_failed` | 3 |
+| Any other HTTP 4xx, and 501 | `source_rejected` | 2 |
+
+Exit 4 means the same command can work when it runs again later. Exit 2
+means Chroma refuses the same request again: change a setting, the plan or
+the source first. The message holds the text of Chroma's answer. The hint
+names the fix for these cases:
+
+- The collection is gone, or was created again with a new id (HTTP 404, or
+  HTTP 400 `InvalidCollection` from Chroma 0.5 and 0.6): run
+  `to-weaviate inspect chroma --force`.
+- The tenant or the database does not exist (HTTP 404 with a JSON error
+  body, on a request that names no collection): check `CHROMA_TENANT`,
+  `CHROMA_DATABASE` and `--database`.
+- The server has no such route (HTTP 404 or 405 with an empty body or a body
+  that is not JSON, or HTTP 404 with `{"detail": "Not Found"}`): set
+  `CHROMA_URL` to the root address of the server, without a path such as
+  `/api/v2`. Chroma before 0.5.16 has no `/api/v2` API.
+- A Chroma Cloud quota (HTTP 422 with "exceeded quota limit"): the message
+  names the quota.
+- HTTP 403 from a server with token authentication: check `CHROMA_API_KEY`
+  and `CHROMA_TOKEN_HEADER`. Such a server answers 403 for a right token in
+  the wrong header.
 
 ## Limits
 
@@ -313,11 +366,11 @@ variables.
   `tests/unit/chroma_server.py` serves a fake Chroma through
   `httpx.MockTransport`, so the CLI tests run the real client.
 - Acceptance tests: `tests/acceptance/chroma/`. `seed.py` creates the test
-  collections. Locally and in the CI job `acceptance (single)` they read the
-  single-node Chroma of `tests/acceptance/chroma/docker-compose.yml`. The CI
-  job `acceptance (cluster)` reads distributed Chroma, which
+  collections. Locally and in the `single` setup of CI they read the
+  single-node Chroma of `tests/acceptance/chroma/docker-compose.yml`. The
+  `cluster` setup of CI reads distributed Chroma, which
   `tests/acceptance/chroma-k8s.sh` deploys from Chroma's Helm chart.
-  `test_source_order.py` checks the page order in both jobs, and its
-  compaction case runs in `acceptance (cluster)` only.
+  `test_source_order.py` checks the page order in both setups, and its
+  compaction case runs in the `cluster` setup only.
 
 [Testing](../development/testing.md) explains how to run them.
