@@ -39,7 +39,7 @@ order:
    and 3.14, as on a pull request.
 3. `acceptance` runs the `single` and the `cluster` setup on the tagged
    commit, as on a pull request. It passes only when
-   `acceptance / single / run` and `acceptance / cluster result` pass.
+   `acceptance / single / run` and `acceptance / cluster / run` pass.
 4. `github-release` creates the GitHub release for the tag, with generated
    notes and the wheel and the sdist as assets. A release that exists for
    the tag, made by hand or by an earlier run, gets the files instead.
@@ -48,15 +48,8 @@ order:
    "Review deployments" on the workflow run.
 
 When `unit` or `acceptance` fails, `github-release` and `publish` are skipped
-and nothing is public. When `unit` fails, fix the test on `main`, delete the
-tag, and tag the new commit. When `acceptance` fails, read
-`acceptance / cluster result` first:
-
-- It reports that no attempt got a runner with AVX-512: no test ran. Run
-  `gh run rerun <run id> --failed`, which tries another runner and then
-  continues with the release. See
-  [The cluster result](testing.md#the-cluster-result).
-- A test failed: fix it on `main`, delete the tag, and tag the new commit.
+and nothing is public. Fix the test on `main`, delete the tag, and tag the
+new commit.
 
 Between `github-release` and `publish`, edit the release on GitHub and add the
 two results from "Before the tag" to the generated notes. Then approve the

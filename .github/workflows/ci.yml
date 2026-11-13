@@ -65,4 +65,8 @@ jobs:
   # release.yml runs both on the tagged commit.
   acceptance:
     if: github.event_name != 'push'
+    # packages: read is for the private images of the cluster setup.
+    permissions:
+      contents: read
+      packages: read
     uses: ./.github/workflows/acceptance-suites.yml

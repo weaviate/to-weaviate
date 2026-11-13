@@ -65,10 +65,13 @@ jobs:
       - run: uv sync --locked --extra test
       - run: uv run --no-sync pytest tests/unit
 
-  # Both acceptance suites on the tagged commit. The job fails unless the
-  # single suite passed and "cluster result" of acceptance-suites.yml passed.
+  # Both acceptance suites on the tagged commit. packages: read is for the
+  # private images of the cluster setup.
   acceptance:
     needs: build
+    permissions:
+      contents: read
+      packages: read
     uses: ./.github/workflows/acceptance-suites.yml
 
   # No always() here or in publish: a failed, cancelled or skipped job in

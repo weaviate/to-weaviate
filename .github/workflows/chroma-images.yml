@@ -4,7 +4,8 @@ name: Chroma images
 # pushes them to ghcr.io. Chroma publishes both images built with
 # ENABLE_AVX512=1, and they stop with SIGILL on a runner whose CPU lacks
 # avx512f. tests/acceptance/chroma-k8s.sh pins the images this workflow
-# pushes. Run it once per Chroma version, then update the pins there.
+# pushes. Run it once per Chroma version, then update the pins there. The
+# packages stay private: only workflows of this repository pull them.
 
 on:
   workflow_dispatch:
@@ -13,21 +14,17 @@ on:
         description: Chroma release tag, for example 1.5.9
         required: true
         type: string
-  # Removed before merge: runs the build from this branch.
-  push:
-    branches: [jose/chroma-baseline-images]
-    paths: [.github/workflows/chroma-images.yml]
 
 permissions:
   contents: read
   packages: write
 
 concurrency:
-  group: chroma-images-${{ inputs.chroma_version || '1.5.9' }}
+  group: chroma-images-${{ inputs.chroma_version }}
   cancel-in-progress: false
 
 env:
-  CHROMA_VERSION: ${{ inputs.chroma_version || '1.5.9' }}
+  CHROMA_VERSION: ${{ inputs.chroma_version }}
   REGISTRY: ghcr.io/weaviate/to-weaviate
 
 jobs:

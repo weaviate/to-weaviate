@@ -171,7 +171,7 @@ with `ASYNC_INDEXING`.
 | Setup | Servers | Check that holds its result |
 |---|---|---|
 | `single` | One Weaviate node and the single-node Chroma | `acceptance / single / run` |
-| `cluster` | Three Weaviate nodes with replication factor 3 and distributed Chroma | `acceptance / cluster result` |
+| `cluster` | Three Weaviate nodes with replication factor 3 and distributed Chroma | `acceptance / cluster / run` |
 
 The tests in `tests/acceptance/chroma/test_cluster.py` run in the `cluster`
 setup only. Each setup uploads its JUnit XML as the artifact
@@ -179,30 +179,27 @@ setup only. Each setup uploads its JUnit XML as the artifact
 `test_copy_during_compaction` records its measurements there as test
 properties.
 
-### The cluster result
+### The images of the cluster setup
 
-Distributed Chroma needs a CPU with AVX-512, and part of GitHub's
-`ubuntu-latest` runners lack it. No runner label guarantees it. The
-`cluster` setup therefore makes up to four attempts, one after the other,
-each on a runner that GitHub picks: `acceptance / cluster runner attempt 1 / run`
-to `attempt 4`. An attempt on a runner without AVX-512 ends in seconds, runs
-no test and is green, and the next attempt starts. The first attempt on a
-runner with AVX-512 runs the suite, and the later attempts are skipped.
+Chroma publishes its `query-service` and `compactor-service` images built
+with AVX-512. Part of GitHub's `ubuntu-latest` runners have a CPU without it,
+and both services exit with SIGILL there. The `cluster` setup uses builds of
+the same Chroma release without AVX-512, from two private packages of the
+repository: `chroma-query-service` and `chroma-compactor-service`.
+`tests/acceptance/chroma-k8s.sh` pins each by its digest.
 
-A green or skipped attempt therefore says nothing about the suite. Read
-`acceptance / cluster result`. It passes only when exactly one attempt ran
-the suite and that run passed. It fails when the suite failed, and it fails
-when no attempt ran it.
+To move to another Chroma release, run the `Chroma images` workflow with the
+release tag. It takes about an hour. Its summary lists the two digests. Set
+`CHROMA_TAG`, `CHROMA_COMMIT` and the two digests in `chroma-k8s.sh`.
 
-When it reports that no attempt got a runner with AVX-512, attempt 4 has
-failed too, and no test ran. Rerun the failed jobs, which runs attempt 4 on
-another runner and then the result job again:
+A pull request from a fork cannot read the packages, so the `cluster` setup
+does not run there. The check `acceptance / cluster (not run on a fork)`
+says so with a warning. Before the merge, push the commits to a branch of
+`weaviate/to-weaviate` and run the `ci` workflow on it:
 
 ```bash
-gh run rerun <run id> --failed
+gh workflow run ci.yml --ref <branch>
 ```
-
-Repeat it until an attempt gets such a runner.
 
 ## Writing tests
 
