@@ -117,6 +117,16 @@ def test_openai_ada_002_keeps_its_name_with_a_base_url():
     assert _sent_vectorizer(v).model == ADA_002
 
 
+def test_openai_ada_002_gets_the_weaviate_model_name_on_a_regional_openai_url():
+    # Weaviate validates the model name for every base URL that contains
+    # api.openai.com, not only the default one.
+    v, _ = vectorizer_for(
+        known("openai", model_name=ADA_002, api_base="https://eu.api.openai.com/v1")
+    )
+    assert v is not None
+    assert v.options == {"model": "ada", "base_url": "https://eu.api.openai.com"}
+
+
 @pytest.mark.parametrize("model", ["text-embedding-3-small", "text-embedding-3-large"])
 @pytest.mark.parametrize("api_base", [None, "https://proxy.example.com/v1"])
 def test_openai_v3_models_keep_their_name(model, api_base):

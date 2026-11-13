@@ -219,11 +219,12 @@ def vectorizer_for(
             )
     # On OpenAI's own endpoint Weaviate accepts this model only as `ada`,
     # which with its default modelVersion 002 requests text-embedding-ada-002.
-    # With a base_url Weaviate sends the model name unchanged.
+    # Weaviate takes every base_url that contains api.openai.com as OpenAI's
+    # endpoint. With any other base_url it sends the model name unchanged.
     if (
         function.module == "text2vec-openai"
-        and "base_url" not in options
         and model == OPENAI_ADA_002
+        and "api.openai.com" in options.get("base_url", "api.openai.com")
     ):
         options["model"] = "ada"
     return VectorizerPlan(module=function.module, options=options), notes
