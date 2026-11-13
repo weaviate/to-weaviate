@@ -2957,6 +2957,76 @@ def test_copy_reports_the_server_factor_when_the_factor_of_auto_is_refused():
     ]
 
 
+@pytest.mark.parametrize("command", ["copy", "sync"])
+@pytest.mark.parametrize("server_factor", [1, 3])
+def test_a_factor_chosen_without_the_node_count_is_a_warning(command, server_factor):
+    fakes = _replicated(FakeSchema(node_count=None, server_factor=server_factor))
+    r = invoke(fakes, command, "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["warnings"] == [
+        {
+            "code": "unknown_node_count",
+            "collection": "Docs",
+            "message": "the API key may not read the nodes of the cluster, so "
+            f"the server chose replication factor {server_factor} for the new "
+            "collection. Weaviate cannot raise it through the schema. For "
+            "another factor, delete the collection, set replication_factor to a "
+            "number in the plan and copy it again with another --dir",
+        }
+    ]
+    r = invoke(fakes, command, "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["warnings"] == []
+
+
+def test_copy_prints_the_warning_about_an_unknown_node_count_without_json():
+    r = invoke(_replicated(FakeSchema(node_count=None)), "copy")
+    assert r.exit_code == 0, r.output
+    assert any(
+        line.startswith("warning unknown_node_count Docs: ")
+        for line in r.stdout.splitlines()
+    )
+
+
+@pytest.mark.parametrize(("nodes", "server_factor"), [(3, 1), (3, 2), (2, 1)])
+def test_a_server_factor_below_the_factor_of_auto_is_a_warning(nodes, server_factor):
+    schema = FakeSchema(
+        node_count=nodes, server_factor=server_factor, refuse_factor="not now"
+    )
+    r = invoke(_replicated(schema), "copy", "--json")
+    assert r.exit_code == 0, r.output
+    sent = min(nodes, 3)
+    assert json.loads(r.stdout)["warnings"] == [
+        {
+            "code": "low_replication_factor",
+            "collection": "Docs",
+            "message": f"Weaviate refused replication factor {sent} and the "
+            f"server chose replication factor {server_factor} for the new "
+            f"collection on a cluster of {nodes} nodes. Weaviate cannot raise it "
+            "through the schema. For another factor, delete the collection, set "
+            "replication_factor to a number in the plan and copy it again with "
+            "another --dir",
+        }
+    ]
+
+
+@pytest.mark.parametrize(("nodes", "server_factor"), [(3, 3), (3, 5), (1, 1)])
+def test_a_server_factor_from_the_factor_of_auto_up_is_no_warning(nodes, server_factor):
+    schema = FakeSchema(
+        node_count=nodes, server_factor=server_factor, refuse_factor="not now"
+    )
+    r = invoke(_replicated(schema), "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["warnings"] == []
+
+
+@pytest.mark.parametrize(("nodes", "factor"), [(1, "auto"), (3, "auto"), (3, 1)])
+def test_a_factor_of_the_nodes_or_of_the_plan_is_no_warning(nodes, factor):
+    r = invoke(_replicated(FakeSchema(node_count=nodes), factor), "copy", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["warnings"] == []
+
+
 def test_sync_reports_a_collection_that_it_creates():
     r = invoke(_replicated(FakeSchema(node_count=3)), "sync", "--json")
     assert r.exit_code == 0, r.output
@@ -2997,10 +3067,18 @@ def test_check_warns_when_it_cannot_compare_a_factor_with_the_nodes():
     ]
 
 
-@pytest.mark.parametrize("nodes", [None, 1, 3])
+@pytest.mark.parametrize("nodes", [1, 3])
 def test_check_has_no_replication_finding_for_auto_and_a_new_collection(nodes):
     code, d = _check(_replicated(FakeSchema(node_count=nodes)))
     assert code == 0 and d["warnings"] == []
+
+
+def test_check_warns_about_auto_when_it_cannot_read_the_nodes():
+    code, d = _check(_replicated(FakeSchema(node_count=None)))
+    assert code == 0, d
+    assert [(w["code"], w["collection"]) for w in d["warnings"]] == [
+        ("unknown_node_count", "Docs")
+    ]
 
 
 def test_check_warns_about_an_existing_collection_with_factor_1_on_more_nodes():

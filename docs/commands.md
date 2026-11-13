@@ -84,14 +84,17 @@ exit 2, `invalid_plan`. A warning does not stop `copy` or `sync`.
   `not_replicated` (with `replication_factor: auto`, an existing collection
   has factor 1 on a cluster of more than one node), and `unknown_node_count`
   (the key may not read the nodes, so `check` did not compare a planned
-  factor with the node count).
+  factor with the node count, or `auto` has no node count for a collection
+  that does not exist yet).
 
 ## `copy`
 
 `copy` creates the target collections, then copies the records page by page.
 It prints the [replication factor](weaviate.md#replication) of each
 collection it creates and lists them under `created_collections` in its JSON
-document.
+document. With `replication_factor: auto`, it warns when the server chose the
+factor and the key may not read the nodes (`unknown_node_count`), or the
+factor is below the one that `auto` sent (`low_replication_factor`).
 
 | Option | Effect |
 |---|---|
@@ -446,7 +449,10 @@ A successful `sync --prune`:
 `created_collections` lists the collections that the run created. `chosen_by`
 is `plan` for a factor of the plan, `nodes` for the factor that `auto` took
 from the node count `nodes`, and `server` when the request sent no factor.
-`nodes` is `null` when the run did not read the node count.
+`server` has two cases. With `nodes` `null`, the key may not read the nodes.
+With a number in `nodes`, the server refused the factor that `auto` took from
+that node count. `nodes` is also `null` for `plan`: the run does not read the
+node count for a factor of the plan.
 
 `copied` counts the records written; `unchanged` the records whose stored
 hash matched. The `prune_limit` and `rejects` error documents hold the same

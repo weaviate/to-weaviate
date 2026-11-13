@@ -661,16 +661,32 @@ def test_auto_warns_about_an_existing_collection_with_factor_1_on_more_nodes(nod
             "Docs",
             f"the collection exists with replication factor 1 and the cluster "
             f"has {nodes} nodes; copy does not change the factor of an existing "
-            "collection",
+            "collection. To replicate it, delete the collection and copy it "
+            "again with another --dir; copy then creates it with replication "
+            f"factor {min(nodes, 3)}",
         )
     ]
 
 
 @pytest.mark.parametrize(
-    ("nodes", "existing"), [(1, 1), (None, 1), (3, 2), (3, 3), (3, None), (None, None)]
+    ("nodes", "existing"), [(1, 1), (None, 1), (3, 2), (3, 3), (3, None)]
 )
 def test_auto_has_no_finding_otherwise(nodes, existing):
     assert replication(factor_entry("auto"), nodes, existing) == ([], [])
+
+
+def test_auto_without_a_readable_node_count_warns_about_a_new_collection():
+    errors, warnings = replication(factor_entry("auto"), None, None)
+    assert errors == []
+    assert warnings == [
+        Finding(
+            "unknown_node_count",
+            "Docs",
+            "the API key may not read the nodes of the cluster, so copy sends no "
+            "replication factor and the server chooses it. Set replication_factor "
+            "to a number, or give the key the permission to read the nodes",
+        )
+    ]
 
 
 def test_entries_of_one_collection_with_other_factors_conflict():

@@ -1229,6 +1229,9 @@ def _writing(
                         "nodes": made.nodes,
                     }
                 )
+                finding = _server_factor_finding(made)
+                if finding is not None:
+                    warnings.append(finding)
 
             for name, group in selected.items():
                 schema.ensure(group, report)
@@ -1270,6 +1273,34 @@ def _created_text(made: Created) -> str:
     return (
         f"Created {made.name} without a replication factor, because {reason}; "
         f"the server chose replication factor {made.factor}"
+    )
+
+
+def _server_factor_finding(made: Created) -> Finding | None:
+    """A warning when the server chose a factor that `auto` would not send."""
+    if made.chosen_by != "server":
+        return None
+    if made.nodes is None:
+        code = "unknown_node_count"
+        cause = (
+            "the API key may not read the nodes of the cluster, so the server "
+            f"chose replication factor {made.factor} for the new collection"
+        )
+    elif made.factor < auto_factor(made.nodes):
+        code = "low_replication_factor"
+        cause = (
+            f"Weaviate refused replication factor {auto_factor(made.nodes)} and "
+            f"the server chose replication factor {made.factor} for the new "
+            f"collection on a cluster of {_plural(made.nodes, 'node')}"
+        )
+    else:
+        return None
+    return Finding(
+        code,
+        made.name,
+        f"{cause}. Weaviate cannot raise it through the schema. For another "
+        "factor, delete the collection, set replication_factor to a number in "
+        "the plan and copy it again with another --dir",
     )
 
 

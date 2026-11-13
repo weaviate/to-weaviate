@@ -26,6 +26,7 @@ from to_weaviate.target.schema import (
     PROPERTY_TYPES,
     USERINFO_TEXT,
     PlanMismatch,
+    auto_factor,
     cleaned_options,
     collection_kwargs,
     module_names,
@@ -732,7 +733,21 @@ def replication_findings(
                         name,
                         "the collection exists with replication factor 1 and the "
                         f"cluster has {nodes} nodes; copy does not change the "
-                        "factor of an existing collection",
+                        "factor of an existing collection. To replicate it, delete "
+                        "the collection and copy it again with another --dir; copy "
+                        "then creates it with replication factor "
+                        f"{auto_factor(nodes)}",
+                    )
+                )
+            elif stored is None and nodes is None:
+                warnings.append(
+                    Finding(
+                        "unknown_node_count",
+                        name,
+                        "the API key may not read the nodes of the cluster, so "
+                        "copy sends no replication factor and the server chooses "
+                        "it. Set replication_factor to a number, or give the key "
+                        "the permission to read the nodes",
                     )
                 )
         elif stored is not None:

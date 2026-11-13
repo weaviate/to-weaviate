@@ -45,10 +45,11 @@ reads the schema and the tenants, counts the objects and reads them. A key
 without the permission for one of these steps makes the command stop with
 `auth_failed`, exit 3.
 
-`check`, `copy` and `sync` also read the nodes of the cluster, to choose and
-to check the [replication factor](#replication). With role-based access
-control, that is the permission to read the nodes with minimal verbosity
-(`read_nodes`). A key without it does not stop them.
+`check` reads the nodes of the cluster, to check the
+[replication factor](#replication). `copy` and `sync` read them only when
+they create a collection with `replication_factor: auto`. With role-based
+access control, that is the permission to read the nodes with minimal
+verbosity (`read_nodes`). A key without it does not stop them.
 
 `copy` and `sync` create every target collection before they write the
 first object. When the key may not create a collection, they stop before
@@ -78,13 +79,22 @@ With `auto`:
 
 - A key that may not read the nodes makes `copy` send no factor. The server
   then applies its own: its `REPLICATION_MINIMUM_FACTOR`, which is 1 unless
-  the server sets it. `copy` prints the factor that the server chose.
+  the server sets it. `check` warns before the collection exists, and `copy`
+  prints the factor that the server chose and warns
+  (`unknown_node_count`). To choose the factor, set `replication_factor` to
+  a number, or give the key the permission to read the nodes.
 - When the server refuses the factor, `copy` creates the collection once
   more without a factor and prints the factor that the server chose. A
-  server refuses a factor below its `REPLICATION_MINIMUM_FACTOR`.
+  server refuses a factor below its `REPLICATION_MINIMUM_FACTOR`. `copy`
+  warns when the server chose a lower factor than the refused one
+  (`low_replication_factor`).
 - An existing collection is accepted with the factor it has. `check` warns
   when that factor is 1 and the cluster has more than one node
   (`not_replicated`).
+
+To change the factor of a collection that exists, delete the collection and
+copy it again with another `--dir`. `copy` then creates it with the factor of
+the plan.
 
 With a number:
 
