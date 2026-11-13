@@ -143,7 +143,9 @@ read before it stops. It also retries:
 
 - a batch of more than one object in which Weaviate refused every object. A
   batch of one refused object is a reject, unless the error is about a node
-  outage or a busy model provider;
+  outage or a busy model provider. When a model provider answered an object
+  of the batch with another status than 401, 403, 429 or 5xx, `copy` does
+  not retry the batch. It sends the objects one by one;
 - an object that Weaviate refused with an error about a node, a shard or a
   deadline, as it does while a node restarts;
 - an object that Weaviate could not embed because the model provider
@@ -157,8 +159,13 @@ When the retries run out, `copy` stops with `source_unreachable` or
 that page. A provider that still answers 429 or 5xx after the retries also
 ends the run with `target_unreachable`, and the message holds the provider's
 status: wait for the rate limit to reset, or lower `--parallelism`, then run
-`copy` again. A refused API key is not retried: `copy` stops with
-`auth_failed`, exit 3.
+`copy` again. `copy` has no option that skips a page or a record. While the
+provider answers a record of a page with 5xx, every run stops at that page.
+The message holds the provider's status and text. It does not hold the id of
+the record. Read the provider's text for the cause and solve it at the
+provider. To copy the other collections in the meantime, run `copy` with
+`--collection` for each of them. A refused API key is not retried: `copy`
+stops with `auth_failed`, exit 3.
 
 ### Existing collections and the recorded target
 

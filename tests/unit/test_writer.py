@@ -524,6 +524,65 @@ def test_a_single_object_that_a_provider_refuses_with_a_400_is_a_reject_at_once(
     assert len(data.calls) == 1
 
 
+def test_a_batch_that_a_provider_refuses_with_a_400_is_a_reject_per_object():
+    data = FakeData([all_failed(PROVIDER_400)] * 10)
+    sleeps: list[float] = []
+    writer = WeaviateWriter(FakeClient(data), sleep=sleeps.append)  # type: ignore[arg-type]
+    rejects = writer.write(ENTRY_EMBED, objects(3))
+    assert [r.source_id for r in rejects] == ["s0", "s1", "s2"]
+    assert all(PROVIDER_400 in r.reason for r in rejects)
+    assert [[o.uuid for o in call] for call in data.calls] == [
+        ["u0", "u1", "u2"],
+        ["u0"],
+        ["u1"],
+        ["u2"],
+    ]
+    assert sleeps == []
+
+
+def test_a_batch_refused_with_a_400_and_a_429_is_sent_object_by_object():
+    data = FakeData(
+        [
+            all_failed(PROVIDER_429 + "\n" + PROVIDER_400),
+            all_failed(PROVIDER_400),
+            all_failed(PROVIDER_429),
+            SimpleNamespace(errors={}),
+        ]
+    )
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    rejects = writer.write(ENTRY_EMBED, objects(2))
+    assert [r.source_id for r in rejects] == ["s0"]
+    assert [[o.uuid for o in call] for call in data.calls] == [
+        ["u0", "u1"],
+        ["u0"],
+        ["u1"],
+        ["u1"],
+    ]
+
+
+def test_a_batch_refused_with_a_400_and_a_401_is_a_refused_key():
+    data = FakeData([all_failed(PROVIDER_400 + "\n" + PROVIDER_401)] * 10)
+    writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]
+    with pytest.raises(ProviderRefused):
+        writer.write(ENTRY_EMBED, objects(2))
+    assert len(data.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("reason", "busy"),
+    [
+        (PROVIDER_429, True),
+        (PROVIDER_503, True),
+        (PROVIDER_NO_REFRESH, True),
+        (PROVIDER_400, False),
+        (OUTAGE_ERRORS[0], False),
+        ("bad vector", False),
+    ],
+)
+def test_a_refused_batch_tells_whether_a_provider_was_busy(reason, busy):
+    assert BatchRefused(3, "My_docs", reason, 1).provider_busy is busy
+
+
 def test_a_refused_key_next_to_a_busy_provider_stops_the_batch_without_a_retry():
     data = FakeData([partial((0, PROVIDER_429), (1, PROVIDER_401))] * 10)
     writer = WeaviateWriter(FakeClient(data), sleep=lambda s: None)  # type: ignore[arg-type]

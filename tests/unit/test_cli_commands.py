@@ -2339,7 +2339,12 @@ def test_a_provider_that_keeps_limiting_one_object_is_target_unreachable(tmp_pat
     r = invoke(fakes, "copy", "--parallelism", "1", "--json")
     assert r.exit_code == 4, r.output
     d = json.loads(r.stdout)
-    assert (d["code"], d["hint"]) == ("target_unreachable", BATCH_HINT)
+    assert (d["code"], d["hint"]) == (
+        "target_unreachable",
+        "Wait for the provider's rate limit to reset or for the provider to "
+        "answer again, or lower --parallelism. Then run to-weaviate copy again. "
+        "It resumes at this page.",
+    )
     assert d["message"] == (
         f"Weaviate refused 1 object of a batch of 10 in Docs: {PROVIDER_429}"
     )

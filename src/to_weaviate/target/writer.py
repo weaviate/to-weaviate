@@ -113,6 +113,19 @@ def provider_busy(message: str) -> bool:
     return status == 429 or 500 <= status <= 599
 
 
+def provider_declined(message: str) -> bool:
+    """Whether `message` holds an answer of a model provider that a retry
+    does not change: any status other than 401, 403, 429 and 5xx.
+
+    `message` can hold the errors of several objects.
+    """
+    for match in PROVIDER_STATUS.finditer(message):
+        status = int(match["status"])
+        if status not in (401, 403, 429) and not 500 <= status <= 599:
+            return True
+    return False
+
+
 def _sent_again(message: str) -> bool:
     return node_outage(message) or provider_busy(message)
 
@@ -121,7 +134,8 @@ class BatchRefused(Exception):
     """Weaviate refused objects of a chunk on every attempt.
 
     `refused` is the number of objects refused on the last attempt, or None
-    when Weaviate refused the chunk as a whole.
+    when Weaviate refused the chunk as a whole. `provider_busy` tells whether
+    the reason is a model provider that answered 429 or 5xx.
     """
 
     def __init__(
@@ -135,6 +149,7 @@ class BatchRefused(Exception):
         super().__init__(
             f"Weaviate refused {what} of a batch of {size} in {collection}: {reason}"
         )
+        self.provider_busy = provider_busy(reason)
 
 
 @dataclass(frozen=True)
@@ -219,10 +234,14 @@ def chunks(
 def _refused_or_transient(exc: Exception) -> float | None:
     """`transient`, which also accepts a refusal of every object of a batch.
 
-    A provider that refused the key does not accept it on a retry.
+    A provider that refused the key does not accept it on a retry, and
+    neither does a provider that answered an object with another status
+    than 429 or 5xx.
     """
     if isinstance(exc, WeaviateInsertManyAllFailedError):
-        return None if provider_refusal(str(exc)) else 0.0
+        message = str(exc)
+        final = provider_refusal(message) or provider_declined(message)
+        return None if final else 0.0
     return transient(exc)
 
 
@@ -262,7 +281,9 @@ class WeaviateWriter:
         """Insert `objects` and return the objects that Weaviate refused.
 
         A chunk of more than one object that Weaviate refuses as a whole is
-        retried like a transient error. An object that Weaviate refuses with
+        retried like a transient error, unless a model provider answered an
+        object of it with a status other than 401, 403, 429 and 5xx: its
+        objects are then sent one by one. An object that Weaviate refuses with
         an error of a node outage, or because a model provider answered 429 or
         5xx, is sent again, with the others of its chunk that it refused so,
         after a delay. When the retries are used up, this
@@ -311,6 +332,11 @@ class WeaviateWriter:
                     raise refused_key from None
                 if single and not _sent_again(reason):
                     rejects.append(Reject(_source_id(pending[0]), str(exc)))
+                    return rejects
+                if not single and provider_declined(reason):
+                    # The error does not tell which object got which answer.
+                    for obj in pending:
+                        rejects.extend(self._write_chunk(collection, name, [obj]))
                     return rejects
                 refused = None if len(pending) == len(chunk) else len(pending)
                 raise BatchRefused(len(chunk), name, reason, refused) from exc
