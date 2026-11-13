@@ -150,7 +150,8 @@ that page. A refused API key is not retried: `copy` stops with
 `auth_failed`, exit 3. Another request that the source refuses, with HTTP
 501 or a 4xx status other than 408 and 429, is not retried either: `copy`
 stops with `source_rejected`, exit 2, because the same request is refused
-again until an input changes.
+again until an input changes. HTTP 408 is not retried either: `copy` stops
+with `source_unreachable`, exit 4.
 
 ### Existing collections and the recorded target
 

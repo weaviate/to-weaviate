@@ -272,7 +272,8 @@ def test_a_403_on_the_database_list_names_the_database_settings():
     assert d["message"] == "Chroma refused the request: the API key lacks a permission."
     assert d["hint"] == (
         "Check CHROMA_API_KEY in the environment or in .env. A key for one "
-        "database cannot list the databases: set CHROMA_DATABASE or use --database."
+        "database cannot list the databases: set CHROMA_DATABASE or use --database. "
+        "If the server reads the token from another header, set CHROMA_TOKEN_HEADER."
     )
 
 
@@ -330,6 +331,35 @@ def test_a_server_without_the_route_names_chroma_url_and_the_version(answer):
         "a path such as /api/v2. The server must be Chroma 0.5.16 or later.",
     }
     assert fakes.sleeps == []
+
+
+def test_a_404_page_that_is_not_json_names_chroma_url():
+    server = ChromaServer(records(0, 10))
+    page = "<html><body><h1>404 Not Found</h1></body></html>"
+    server.faults["identity"] = [httpx.Response(404, html=page)]
+    r = invoke(ServerFactories(server), "inspect", "chroma", "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"]) == (
+        "source_rejected",
+        "Chroma returned HTTP 404: no route for GET /api/v2/auth/identity",
+    )
+    assert "CHROMA_URL" in d["hint"]
+
+
+def test_a_404_of_a_missing_database_names_the_tenant_and_database_settings():
+    server = ChromaServer(records(0, 10))
+    body = {"error": "NotFoundError", "message": "Database [nope] not found"}
+    server.faults["databases"] = [httpx.Response(404, json=body)]
+    r = invoke(ServerFactories(server), "inspect", "chroma", "--json")
+    assert r.exit_code == 2, r.output
+    assert json.loads(r.stdout) == {
+        "status": "error",
+        "code": "source_rejected",
+        "message": "Chroma returned HTTP 404: Database [nope] not found",
+        "hint": "Check CHROMA_TENANT, CHROMA_DATABASE and --database. The message "
+        "names what Chroma did not find.",
+    }
 
 
 def test_a_request_that_chroma_refuses_during_copy_is_not_retried():
