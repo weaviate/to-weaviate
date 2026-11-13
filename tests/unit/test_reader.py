@@ -275,7 +275,7 @@ def test_source_ids_yields_every_pair_across_a_transient_error():
         (str(objects[2].uuid), "c"),
     ]
     assert client.collection.calls == [
-        ("iterator", {"return_properties": ["source_id"]})
+        ("iterator", {"return_properties": ["source_id"], "cache_size": 1000})
     ]
 
 

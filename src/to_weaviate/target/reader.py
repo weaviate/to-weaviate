@@ -15,6 +15,9 @@ from to_weaviate.target.writer import TargetObject
 T = TypeVar("T")
 
 FETCH_BATCH = 100
+# Objects per request of the id listing. The server refuses a request above
+# QUERY_MAXIMUM_RESULTS (default 10,000).
+LIST_PAGE = 1000
 SOURCE_ID = "source_id"
 # HOT is the name of ACTIVE before Weaviate 1.26.
 ACTIVE = (TenantActivityStatus.ACTIVE, TenantActivityStatus.HOT)
@@ -158,6 +161,10 @@ class WeaviateReader:
     def source_ids(self, entry: CollectionPlan) -> Iterator[tuple[str, str | None]]:
         # The client's iterator keeps its cursor when a page request raises,
         # so a retried next() asks for the same page again.
-        objects = iter(self._collection(entry).iterator(return_properties=[SOURCE_ID]))
+        objects = iter(
+            self._collection(entry).iterator(
+                return_properties=[SOURCE_ID], cache_size=LIST_PAGE
+            )
+        )
         while (obj := self._call(lambda: next(objects, None))) is not None:
             yield str(obj.uuid), _source_id(obj)
