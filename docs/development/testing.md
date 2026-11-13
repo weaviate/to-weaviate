@@ -159,7 +159,7 @@ values to every child process, and the target refuses them.
 
 A manual run is "Run workflow" on the CI workflow page, or
 `gh workflow run ci.yml --ref <branch>`. `.github/workflows/release.yml`
-runs the `acceptance` job on the tagged commit. See [Releasing](releasing.md).
+runs the `unit` and the `acceptance` job on the tagged commit. See [Releasing](releasing.md).
 
 Every job except `unit (lowest deps)` installs the versions in `uv.lock` with
 `uv sync --locked --extra test`, which fails when `uv.lock` does not match

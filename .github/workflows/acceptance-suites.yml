@@ -1,4 +1,4 @@
-# Both setups of the acceptance tests, each one call of acceptance.yml per
+# Both setups of the acceptance tests, with one call of acceptance.yml per
 # runner. ci.yml and release.yml call this workflow; the job "cluster result"
 # is the result of the cluster suite.
 #
