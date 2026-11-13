@@ -370,6 +370,13 @@ that the parser refuses exits 2 with its message on stderr, and Ctrl-C exits
 }
 ```
 
+The document of a successful `inspect chroma` has `plan`, `collections`,
+`total`, `decisions` and `notes`. `notes` is a list of text lines about the
+inspection as a whole. It is empty unless the Chroma server cannot list its
+databases. Then it holds one line that names the databases `inspect` read;
+see [Supported Chroma versions](sources/chroma.md#supported-chroma-versions).
+The same line goes to stderr.
+
 A successful `copy`:
 
 ```json

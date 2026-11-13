@@ -164,7 +164,7 @@ source conforms; nothing checks it at run time.
 | `wait_compacted(collection, waiting)`, `compaction_state(collection)` | `copy`, `sync` and `verify`, before the first page and after the last read. |
 | `tenant`, `searched_namespaces` | `inspect`, for the message when it finds no collection. |
 | `namespaces()` | The source's own `inspect`, when no namespace is given. |
-| `namespaces_note` | `inspect`, which prints the line when the source could not list every namespace. |
+| `namespaces_note` | `inspect`, which prints the line and adds it to `notes` of its JSON document when the source could not list every namespace. |
 | `name`, `capabilities`, `vector_search`, `filter_equal` | Declared by the protocol; no command calls them. |
 
 ### What the copy engine expects of a source

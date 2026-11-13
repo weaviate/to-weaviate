@@ -407,8 +407,9 @@ def identity_answer(tenant: str, databases: Any) -> httpx.Response:
 
 UNLISTED = (
     "The Chroma server cannot list databases (HTTP 405, as Chroma before 0.6.3 "
-    "answers). Searched only default_database, from the server's identity answer. "
-    "Pass --database or set CHROMA_DATABASE to search another database."
+    "answers). Searched only default_database. The server's identity answer names "
+    "no other database. Pass --database or set CHROMA_DATABASE to search another "
+    "database."
 )
 
 
@@ -431,6 +432,31 @@ def test_the_line_about_the_database_listing_goes_to_stderr_with_json():
     assert r.exit_code == 0, r.output
     assert json.loads(r.stdout)["status"] == "success"
     assert UNLISTED in r.stderr.splitlines()
+
+
+def test_the_json_document_holds_the_line_about_the_database_listing():
+    server = ChromaServer(records(0, 10))
+    server.faults["databases"] = [no_database_listing()]
+    r = invoke(ServerFactories(server), "inspect", "chroma", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["notes"] == [UNLISTED]
+
+
+def test_the_json_document_holds_no_note_when_the_server_lists_its_databases():
+    server = ChromaServer(records(0, 10))
+    r = invoke(ServerFactories(server), "inspect", "chroma", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["notes"] == []
+
+
+def test_a_chroma_error_after_the_identity_databases_prints_the_line_too():
+    server = ChromaServer(records(0, 10))
+    server.faults["databases"] = [no_database_listing()]
+    server.faults["collections"] = [httpx.Response(403, json={"error": "Forbidden"})]
+    r = invoke(ServerFactories(server), "inspect", "chroma", "--json")
+    assert r.exit_code != 0, r.output
+    assert json.loads(r.stdout)["status"] == "error"
+    assert r.stderr.splitlines().count(UNLISTED) == 1
 
 
 def test_inspect_prints_no_line_about_the_listing_when_it_is_not_used():

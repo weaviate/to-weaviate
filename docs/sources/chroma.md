@@ -49,7 +49,8 @@ Limits of the versions older than 1.0.6:
 - **0.5.16 to 0.6.2: no database listing.** These servers cannot list the
   databases of a tenant. Without `--database` and `CHROMA_DATABASE`,
   `inspect` reads the databases that the server's identity answer names,
-  and prints a line that names them. That answer holds `default_database`
+  and prints a line that names them. With `--json`, the line is also in
+  the document under `notes`. That answer holds `default_database`
   only, also when the tenant has more databases. Pass `--database` or set
   `CHROMA_DATABASE` to read another database. When the identity answer
   names no database, `inspect` stops with a `usage` error that asks for
@@ -283,9 +284,9 @@ variables.
 - `inspect` lists the tenant's databases when neither `--database` nor
   `CHROMA_DATABASE` names one. When the listing answers HTTP 405,
   `ChromaSource.namespaces` takes the databases of `/api/v2/auth/identity`
-  instead and sets `namespaces_note`, which `inspect` prints. No other
-  request depends on the server version. `inspect` then lists the
-  collections of each database in pages of 1,000. For each collection it reads the count and pages of
+  instead and sets `namespaces_note`, which `inspect` prints. `inspect`
+  then lists the collections of each database in pages of 1,000. For each
+  collection it reads the count and pages of
   metadata to collect each key's types. It then reads the first page and up
   to 10 spread pages of documents to estimate the document size.
 - `read` uses `/get` with an offset and a limit of at most 300. Chroma

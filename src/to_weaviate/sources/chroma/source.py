@@ -186,9 +186,9 @@ class ChromaSource:
         if not named:
             raise DatabasesNotListed
         self._namespaces_note = (
-            f"{DATABASES_NOT_LISTED}. Searched only {', '.join(named)}, from the "
-            "server's identity answer. Pass --database or set CHROMA_DATABASE to "
-            "search another database."
+            f"{DATABASES_NOT_LISTED}. Searched only {', '.join(named)}. The "
+            "server's identity answer names no other database. Pass --database or "
+            "set CHROMA_DATABASE to search another database."
         )
         return named
 
