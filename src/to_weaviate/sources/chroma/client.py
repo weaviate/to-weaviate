@@ -26,6 +26,24 @@ COLLECTION_GONE_HINT = (
     "The collection is gone from Chroma, or it was created again with a new id. "
     "Run to-weaviate inspect chroma --force to inspect it again."
 )
+NO_ROUTE_HINT = (
+    "Set CHROMA_URL to the root address of the Chroma server, without a path "
+    "such as /api/v2. The server must be Chroma 0.5.16 or later."
+)
+NOT_FOUND_HINT = (
+    "Check CHROMA_TENANT, CHROMA_DATABASE and --database. The message names "
+    "what Chroma did not find."
+)
+QUOTA_HINT = (
+    "The request exceeds a quota of Chroma Cloud. The message names the quota. "
+    "Ask Chroma to raise it."
+)
+# Chroma Cloud answers a request over a quota with HTTP 422 and this text.
+QUOTA_TEXT = "exceeded quota limit"
+# Chroma 0.5 and 0.6 answer a missing collection with HTTP 400 and this error
+# name. Chroma 1.x answers HTTP 404.
+INVALID_COLLECTION = "InvalidCollection"
+NO_BODY = "the answer has no body"
 # Single-node Chroma 1.5.9 answers indexing_status with HTTP 500 and
 # "Method scout_logs is not implemented".
 NOT_IMPLEMENTED = "is not implemented"
@@ -53,22 +71,91 @@ class ChromaError(Exception):
         self.hint = hint
 
 
-def _message(response: httpx.Response, secrets: list[str]) -> str:
+def _json(response: httpx.Response) -> Any:
+    try:
+        return response.json()
+    except ValueError:
+        return None
+
+
+def _detail(detail: Any) -> str | None:
+    """The text of the `detail` field of a Chroma 0.5 or 0.6 error body.
+
+    The field is a string, or a list of validation errors with `loc` and
+    `msg`. None when it holds no text.
+    """
+    if isinstance(detail, str):
+        return detail or None
+    if not isinstance(detail, list):
+        return None
+    parts: list[str] = []
+    for item in detail:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict) and isinstance(item.get("msg"), str):
+            loc = item.get("loc")
+            where = ".".join(str(part) for part in loc) if isinstance(loc, list) else ""
+            parts.append(f"{where}: {item['msg']}" if where else item["msg"])
+    return "; ".join(parts) or None
+
+
+def _message(response: httpx.Response, body: Any, secrets: list[str]) -> str:
     """The error text of `response`, redacted and then cut.
 
     A cut before the redaction would leave a part of a secret that `redact`
     no longer matches.
     """
-    try:
-        body = response.json()
-    except ValueError:
-        body = None
     text = response.text
     if isinstance(body, dict):
         found = body.get("message") or body.get("error")
-        if isinstance(found, str) and found:
+        if not (isinstance(found, str) and found):
+            found = _detail(body.get("detail"))
+        if found:
             text = found
+    if not text.strip():
+        text = NO_BODY
     return redact(text, secrets)[:MAX_MESSAGE_CHARS]
+
+
+def _no_route(response: httpx.Response, body: Any) -> bool:
+    """Whether the server has no route for the request.
+
+    Chroma 1.x answers 404 or 405 with an empty body. Chroma 0.5 and 0.6
+    answer 404 with `{"detail": "Not Found"}`. Their 405 has a JSON body and
+    does not count: Chroma 0.5.16 to 0.6.2 answer it for the database list of
+    a correct CHROMA_URL. A 404 or 405 whose body is not JSON comes from a
+    proxy or another server, since Chroma answers an error of an existing
+    route with JSON.
+    """
+    if response.status_code not in (404, 405):
+        return False
+    if body is None:
+        return True
+    return response.status_code == 404 and body == {"detail": "Not Found"}
+
+
+def _error(
+    response: httpx.Response, secrets: list[str], on_collection: bool
+) -> ChromaError:
+    """The ChromaError of an answer with HTTP 400 or higher."""
+    status = response.status_code
+    body = _json(response)
+    retry_after = _retry_after(response)
+    if _no_route(response, body):
+        request = response.request
+        route = redact(f"no route for {request.method} {request.url.path}", secrets)
+        return ChromaError(
+            status, route[:MAX_MESSAGE_CHARS], retry_after, NO_ROUTE_HINT
+        )
+    hint = None
+    invalid = isinstance(body, dict) and body.get("error") == INVALID_COLLECTION
+    if on_collection and (status == 404 or (status == 400 and invalid)):
+        hint = COLLECTION_GONE_HINT
+    elif status == 404:
+        hint = NOT_FOUND_HINT
+    elif status == 422 and QUOTA_TEXT in response.text:
+        hint = QUOTA_HINT
+    return ChromaError(status, _message(response, body, secrets), retry_after, hint)
 
 
 def _redirect_message(response: httpx.Response, secrets: list[str]) -> str:
@@ -164,16 +251,13 @@ class ChromaClient:
         method: str,
         path: str,
         transient: Callable[[Exception], float | None] = _transient,
+        on_collection: bool = False,
         **kwargs: Any,
     ) -> Any:
         def call() -> Any:
             response = self._http.request(method, path, **kwargs)
             if response.status_code >= 400:
-                raise ChromaError(
-                    response.status_code,
-                    _message(response, self._secrets),
-                    _retry_after(response),
-                )
+                raise _error(response, self._secrets, on_collection)
             if response.status_code >= 300:
                 raise ChromaError(
                     response.status_code,
@@ -224,10 +308,12 @@ class ChromaClient:
         transient: Callable[[Exception], float | None] = _transient,
         **kwargs: Any,
     ) -> Any:
-        """`_request` on a collection path. A 404 means the collection id is gone."""
-        return self._hinted_request(
-            404, COLLECTION_GONE_HINT, method, path, transient, **kwargs
-        )
+        """`_request` on a collection path.
+
+        A 404 of an existing route, or a 400 `InvalidCollection`, means the
+        collection id is gone.
+        """
+        return self._request(method, path, transient, on_collection=True, **kwargs)
 
     def identity(self) -> dict[str, Any]:
         result: dict[str, Any] = self._request("GET", "/api/v2/auth/identity")

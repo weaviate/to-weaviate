@@ -15,7 +15,8 @@
 set -eu
 
 # The pins of Chroma release 1.5.9. The tag holds the chart and the config
-# files. The service images on Docker Hub carry the short commit of the tag.
+# files. Chroma's service images on Docker Hub carry the short commit of the
+# tag.
 # The release's MinIO image, minio/minio:latest, is gone from Docker Hub, so
 # MinIO is the digest that Chroma's CI pins after the release.
 CHROMA_TAG=1.5.9
@@ -24,6 +25,17 @@ MINIO_IMAGE=ghcr.io/chroma-core/ci-minio@sha256:14cea493d9a34af32f524e538b8346cf
 # Built from k8s/test/postgres of the tag. A tag other than latest keeps the
 # pull policy IfNotPresent, so the nodes use the loaded image.
 POSTGRES_IMAGE=chroma-postgres:15
+# Chroma publishes query-service and compactor-service built with AVX-512,
+# and both exit with SIGILL on a CPU without it, which part of the
+# ubuntu-latest runners have. These two are builds of the tag without
+# AVX-512, pushed by .github/workflows/chroma-images.yml. Their packages are
+# private, so up needs a docker login to ghcr.io that can read them. The
+# nodes of the kind cluster have no such login: up pulls each image by its
+# digest and loads it into the cluster under its tag.
+QUERY_IMAGE=ghcr.io/weaviate/to-weaviate/chroma-query-service:$CHROMA_TAG
+QUERY_DIGEST=sha256:a1c30e2a0ccaa98805a2c1a67c57c83d57267844bec16d7dd3a241b96c13be36
+COMPACTOR_IMAGE=ghcr.io/weaviate/to-weaviate/chroma-compactor-service:$CHROMA_TAG
+COMPACTOR_DIGEST=sha256:36133a524588a48c4fc06616b7ac11da9434ceac8de8cbdf46b518ebeb587aca
 REPOSITORY=https://github.com/chroma-core/chroma.git
 NAMESPACE=chroma
 PORT=8001
@@ -103,9 +115,8 @@ pull_failures() {
 }
 
 # exit_codes: the last exit code of each pod of the namespace that is not
-# ready and has not succeeded. On some runners query-service and
-# compaction-service exit with 132 and empty logs, and a rerun on another
-# runner passes.
+# ready and has not succeeded. A service whose image uses an instruction the
+# runner's CPU lacks exits with 132 and empty logs.
 exit_codes() {
     echo "--- the last exit codes of the pods of namespace $NAMESPACE that are not ready"
     pods=$(kubectl -n "$NAMESPACE" get pods -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{" "}{.status.containerStatuses[*].ready}{"\n"}{end}' 2>/dev/null) || pods=
@@ -192,7 +203,7 @@ check_images() {
     images=$(sed -n 's/^[[:space:]-]*image:[[:space:]]*//p' "$@" | tr -d "\"'" | sort -u | paste -s -d ' ' -)
     for image in $images; do
         case "$image" in
-        chromadb/*:"$CHROMA_COMMIT" | "$POSTGRES_IMAGE" | "$MINIO_IMAGE") ;;
+        chromadb/*:"$CHROMA_COMMIT" | "$QUERY_IMAGE" | "$COMPACTOR_IMAGE" | "$POSTGRES_IMAGE" | "$MINIO_IMAGE") ;;
         *)
             echo "The manifests name the image $image, which is not a pin of chroma-k8s.sh. Nothing was applied." >&2
             exit 1
@@ -230,10 +241,10 @@ render() {
         --set compactionService.resources.limits.cpu="$COMPACTION_CPU_LIMIT" \
         --set-string rustFrontendService.image.repository=chromadb/rust-frontend-service-oss \
         --set-string rustFrontendService.image.tag="$CHROMA_COMMIT" \
-        --set-string queryService.image.repository=chromadb/query-service \
-        --set-string queryService.image.tag="$CHROMA_COMMIT" \
-        --set-string compactionService.image.repository=chromadb/compactor-service \
-        --set-string compactionService.image.tag="$CHROMA_COMMIT" \
+        --set-string queryService.image.repository="${QUERY_IMAGE%:*}" \
+        --set-string queryService.image.tag="$CHROMA_TAG" \
+        --set-string compactionService.image.repository="${COMPACTOR_IMAGE%:*}" \
+        --set-string compactionService.image.tag="$CHROMA_TAG" \
         --set-string rustLogService.image.repository=chromadb/rust-log-service \
         --set-string rustLogService.image.tag="$CHROMA_COMMIT" \
         --set-string sysdb.image.repository=chromadb/sysdb-service \
@@ -248,6 +259,19 @@ render() {
     sed "s#image: minio/minio:latest\$#image: $MINIO_IMAGE#" \
         "$src/k8s/test/minio.yaml" >"$1/minio.yaml"
     check_images "$1/chroma.yaml" "$1/postgres.yaml" "$1/minio.yaml"
+}
+
+# load_pinned IMAGE DIGEST: pulls IMAGE by DIGEST and loads it into the kind
+# cluster as IMAGE. The chart's pull policy is IfNotPresent, so the nodes use
+# the loaded image.
+load_pinned() {
+    pinned=${1%:*}@$2
+    if ! docker pull --quiet "$pinned"; then
+        echo "docker cannot pull $pinned. The package is private: log in first (docker login ghcr.io) with a token that can read the packages of weaviate/to-weaviate. Nothing was applied." >&2
+        exit 1
+    fi
+    docker tag "$pinned" "$1"
+    kind load docker-image "$1" --name "$CLUSTER"
 }
 
 # answers: whether any server answers on PORT.
@@ -293,6 +317,8 @@ up() {
     trap 'rm -rf "$work"' EXIT
     echo "Rendering the manifests of Chroma $CHROMA_TAG ($CHROMA_COMMIT)."
     render "$work"
+    load_pinned "$QUERY_IMAGE" "$QUERY_DIGEST"
+    load_pinned "$COMPACTOR_IMAGE" "$COMPACTOR_DIGEST"
     docker build --quiet -t "$POSTGRES_IMAGE" "$work/chroma/k8s/test/postgres"
     kind load docker-image "$POSTGRES_IMAGE" --name "$CLUSTER"
     kubectl apply -f "$work/chroma/k8s/distributed-chroma/crds/memberlist_crd.yaml"
