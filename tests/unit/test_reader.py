@@ -17,6 +17,15 @@ from to_weaviate.sources.base import Record
 from to_weaviate.target.reader import FETCH_BATCH, WeaviateReader
 from to_weaviate.target.writer import TargetObject, to_object
 
+# The text of adapters/repos/db/search.go in the Weaviate server, as the client
+# wraps it for a gRPC search.
+REFUSED_LIMIT = (
+    "query maximum results exceeded: the total limit calculated from the "
+    "provided offset '0' and limit '{limit}' exceeds the configured value for "
+    "QUERY_MAXIMUM_RESULTS '{maximum}'. If you've supplied a negative offset or "
+    "limit, this may be an underflow error"
+)
+
 
 def make_entry(tenant: str | None = None) -> p.CollectionPlan:
     return p.CollectionPlan(
@@ -102,6 +111,8 @@ class FakeCollection:
             fetch_objects=self._fetch_objects, near_vector=self._near_vector
         )
         self.iterator_fail_at: int | None = None
+        self.iterator_error: Exception | None = None
+        self.maximum_results: int | None = None
         self.tenant_names: set[str] = set()
         self.tenant_status: dict[str, TenantActivityStatus] = {}
         self.tenants = SimpleNamespace(
@@ -150,7 +161,13 @@ class FakeCollection:
 
     def iterator(self, **kwargs: Any) -> FakeIterator:
         self.calls.append(("iterator", kwargs))
-        error = WeaviateConnectionError("connection lost")
+        limit = kwargs.get("cache_size") or 100
+        if self.maximum_results is not None and limit > self.maximum_results:
+            text = REFUSED_LIMIT.format(limit=limit, maximum=self.maximum_results)
+            return FakeIterator(
+                self.objects, 0, WeaviateQueryError(text, "GRPC search")
+            )
+        error = self.iterator_error or WeaviateConnectionError("connection lost")
         return FakeIterator(self.objects, self.iterator_fail_at, error)
 
 
@@ -277,6 +294,46 @@ def test_source_ids_yields_every_pair_across_a_transient_error():
     assert client.collection.calls == [
         ("iterator", {"return_properties": ["source_id"], "cache_size": 1000})
     ]
+
+
+def test_source_ids_uses_the_client_page_size_when_the_target_refuses_1000():
+    objects = [stored("a"), stored("b")]
+    client = FakeClient(objects)
+    client.collection.maximum_results = 500
+    pairs = list(reader(client).source_ids(make_entry(tenant="t1")))
+    assert pairs == [(str(objects[0].uuid), "a"), (str(objects[1].uuid), "b")]
+    assert client.collection.calls == [
+        ("iterator", {"return_properties": ["source_id"], "cache_size": 1000}),
+        ("iterator", {"return_properties": ["source_id"]}),
+    ]
+    assert client.collection.applied_tenants == ["t1"]
+
+
+def test_source_ids_raises_when_the_target_refuses_the_client_page_size():
+    client = FakeClient([stored("a")])
+    client.collection.maximum_results = 50
+    with pytest.raises(WeaviateQueryError, match="limit '100' exceeds"):
+        list(reader(client).source_ids(ENTRY))
+
+
+def test_source_ids_raises_another_query_error_of_the_first_page():
+    client = FakeClient([stored("a")])
+    client.collection.iterator_fail_at = 0
+    client.collection.iterator_error = WeaviateQueryError("no such prop", "GRPC search")
+    with pytest.raises(WeaviateQueryError, match="no such prop"):
+        list(reader(client).source_ids(ENTRY))
+    assert len(client.collection.calls) == 1
+
+
+def test_source_ids_raises_a_refused_limit_after_the_first_object():
+    client = FakeClient([stored("a"), stored("b")])
+    client.collection.iterator_fail_at = 1
+    client.collection.iterator_error = WeaviateQueryError(
+        REFUSED_LIMIT.format(limit=1000, maximum=500), "GRPC search"
+    )
+    with pytest.raises(WeaviateQueryError, match="QUERY_MAXIMUM_RESULTS"):
+        list(reader(client).source_ids(ENTRY))
+    assert len(client.collection.calls) == 1
 
 
 def test_transient_errors_are_retried_and_others_raised():
