@@ -28,6 +28,7 @@ from weaviate.exceptions import (
     WeaviateQueryError,
     WeaviateRetryError,
     WeaviateTenantGetError,
+    WeaviateTimeoutError,
 )
 
 from to_weaviate import plan as p
@@ -635,6 +636,104 @@ def test_ensure_collection_does_not_retry_other_errors():
 
 def _status_error(status: int) -> UnexpectedStatusCodeError:
     return UnexpectedStatusCodeError("x", httpx.Response(status))
+
+
+def _already_exists() -> UnexpectedStatusCodeError:
+    body = {"error": [{"message": 'class name "My_docs" already exists'}]}
+    return UnexpectedStatusCodeError("refused", httpx.Response(422, json=body))
+
+
+def _applied_then_lost(client: FakeClient, cfg: Any, lost: Exception) -> None:
+    """The first create stores a collection with `cfg` and raises `lost`.
+
+    Every later create is refused with 422 "already exists".
+    """
+    calls: list[dict[str, Any]] = []
+
+    def create(**kwargs: Any) -> FakeCollection:
+        calls.append(kwargs)
+        if len(calls) == 1:
+            client.collections.existing = FakeCollection(cfg)
+            raise lost
+        raise _already_exists()
+
+    client.collections.create = create  # type: ignore[method-assign]
+
+
+@pytest.mark.parametrize(
+    "lost", [WeaviateTimeoutError("read timeout"), WeaviateConnectionError("reset")]
+)
+def test_a_create_applied_before_its_answer_was_lost_counts_as_created(lost):
+    client = FakeClient(None)
+    _applied_then_lost(client, config(tenancy=True), lost)
+    schema_ = WeaviateSchema(client, sleep=lambda s: None)  # type: ignore[arg-type]
+    assert schema_.ensure([entry(tenant="a")]) == "created"
+    assert client.collections.existing.tenants.created == [["a"]]  # type: ignore[union-attr]
+
+
+def test_a_lost_create_that_left_another_collection_is_a_plan_mismatch():
+    client = FakeClient(None)
+    _applied_then_lost(
+        client, config(properties={"year": "text"}), WeaviateTimeoutError("t")
+    )
+    with pytest.raises(PlanMismatch, match="property year: type is text"):
+        WeaviateSchema(client, sleep=lambda s: None).ensure([entry()])  # type: ignore[arg-type]
+
+
+def test_the_read_after_a_refused_retried_create_is_retried():
+    client = FakeClient(None)
+    _applied_then_lost(client, config(), WeaviateTimeoutError("read timeout"))
+    exists = client.collections.exists
+    fail: list[Exception] = [WeaviateConnectionError("reset")]
+
+    def flaky_exists(name: str) -> bool:
+        if client.collections.existing is not None and fail:
+            raise fail.pop(0)
+        return exists(name)
+
+    client.collections.exists = flaky_exists  # type: ignore[method-assign]
+    schema_ = WeaviateSchema(client, sleep=lambda s: None)  # type: ignore[arg-type]
+    assert schema_.ensure([entry()]) == "created"
+    assert fail == []
+
+
+def test_a_recovered_collection_gets_the_planned_properties_it_lacks():
+    client = FakeClient(None)
+    cfg = config()
+    cfg.properties = [x for x in cfg.properties if x.name != "year"]
+    _applied_then_lost(client, cfg, WeaviateTimeoutError("read timeout"))
+    schema_ = WeaviateSchema(client, sleep=lambda s: None)  # type: ignore[arg-type]
+    assert schema_.ensure([entry()]) == "created"
+    added = client.collections.existing.added  # type: ignore[union-attr]
+    assert [(x.name, x.dataType.value) for x in added] == [("year", "int")]
+
+
+def test_already_exists_on_the_first_create_attempt_is_schema_rejected():
+    client = FakeClient(None)
+
+    def create(**kwargs: Any) -> FakeCollection:
+        client.collections.existing = FakeCollection(config())
+        raise _already_exists()
+
+    client.collections.create = create  # type: ignore[method-assign]
+    with pytest.raises(SchemaRejected, match="already exists"):
+        WeaviateSchema(client, sleep=lambda s: None).ensure([entry()])  # type: ignore[arg-type]
+
+
+def test_a_create_refused_for_another_reason_after_a_lost_answer_is_schema_rejected():
+    client = FakeClient(None)
+    body = {"error": [{"message": "vector index dynamic needs async indexing"}]}
+    # Under `replication_factor: auto` a refused create is sent once more
+    # without a factor, so the server refuses two creates.
+    client.collections.fail = [
+        WeaviateTimeoutError("read timeout"),
+        UnexpectedStatusCodeError("refused", httpx.Response(422, json=body)),
+        UnexpectedStatusCodeError("refused", httpx.Response(422, json=body)),
+    ]
+    with pytest.raises(SchemaRejected) as info:
+        WeaviateSchema(client, sleep=lambda s: None).ensure([entry()])  # type: ignore[arg-type]
+    assert str(info.value) == "vector index dynamic needs async indexing"
+    assert client.collections.existing is None
 
 
 @pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
@@ -1573,6 +1672,46 @@ def test_auto_reports_the_refusal_of_the_create_without_a_factor():
         WeaviateSchema(client, sleep=lambda s: None).ensure([entry()])  # type: ignore[arg-type]
     assert str(info.value) == "second refusal"
     assert len(client.collections.fail) == 1 and client.collections.created == []
+
+
+def _count_creates(client: FakeClient) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    create = client.collections.create
+
+    def counted(**kwargs: Any) -> FakeCollection:
+        calls.append(kwargs)
+        return create(**kwargs)
+
+    client.collections.create = counted  # type: ignore[method-assign]
+    return calls
+
+
+def test_auto_counts_a_create_applied_before_its_answer_was_lost_as_created():
+    client = FakeClient(None, nodes=3)
+    _applied_then_lost(client, config(factor=3), WeaviateTimeoutError("read timeout"))
+    calls = _count_creates(client)
+    assert ensure_reported(client, [entry()]) == [Created("My_docs", 3, "nodes", 3)]
+    assert [kwargs["replication_config"].factor for kwargs in calls] == [3, 3]
+
+
+def test_auto_without_a_factor_counts_a_lost_create_as_created():
+    client = FakeClient(None, nodes=3)
+    client.cluster.fail = [_forbidden()]
+    _applied_then_lost(client, config(factor=2), WeaviateTimeoutError("read timeout"))
+    calls = _count_creates(client)
+    assert ensure_reported(client, [entry()]) == [Created("My_docs", 2, "server", None)]
+    assert ["replication_config" in kwargs for kwargs in calls] == [False, False]
+
+
+def test_auto_lost_create_that_left_another_collection_is_a_plan_mismatch():
+    client = FakeClient(None, nodes=3)
+    _applied_then_lost(
+        client, config(properties={"year": "text"}), WeaviateTimeoutError("t")
+    )
+    calls = _count_creates(client)
+    with pytest.raises(PlanMismatch, match="property year: type is text"):
+        ensure_reported(client, [entry()])
+    assert len(calls) == 2
 
 
 def test_auto_does_not_create_again_after_another_status():

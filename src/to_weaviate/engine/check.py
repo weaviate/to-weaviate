@@ -32,6 +32,7 @@ from to_weaviate.target.schema import (
     module_names,
 )
 from to_weaviate.target.writer import unmapped_key_text
+from to_weaviate.types import has_large_int
 
 # Vectorizer module to the Weaviate header that carries its provider key and
 # the environment variable that `weaviate_settings` reads it from.
@@ -403,16 +404,51 @@ def _vectorizers(plan: Plan) -> Iterator[tuple[CollectionPlan, VectorizerPlan]]:
                 yield entry, vector.vectorizer
 
 
+def _sampled_types(
+    entry: CollectionPlan,
+    key: str,
+    inspected: Mapping[str, SourceCollection] | None,
+) -> dict[str, int] | None:
+    collection = inspected.get(entry.source.ref) if inspected else None
+    for field in collection.fields if collection else []:
+        if field.key == key:
+            return field.types
+    return None
+
+
 def _type_counts(
     entry: CollectionPlan,
     key: str,
     inspected: Mapping[str, SourceCollection] | None,
 ) -> str | None:
-    collection = inspected.get(entry.source.ref) if inspected else None
-    for field in collection.fields if collection else []:
-        if field.key == key:
-            return ", ".join(f"{t}: {n}" for t, n in sorted(field.types.items()))
-    return None
+    types = _sampled_types(entry, key, inspected)
+    if types is None:
+        return None
+    return ", ".join(f"{t}: {n}" for t, n in sorted(types.items()))
+
+
+def _large_int_findings(
+    entry: CollectionPlan,
+    prop: PropertyPlan,
+    inspected: Mapping[str, SourceCollection] | None,
+) -> list[Finding]:
+    """An int or number property whose key had an int above 2**53 in the sample."""
+    if prop.type.removesuffix("[]") not in ("int", "number"):
+        return []
+    if not has_large_int(_sampled_types(entry, prop.source_key, inspected) or ()):
+        return []
+    return [
+        Finding(
+            "large_ints",
+            entry.target.name,
+            f"key {prop.source_key} has ints above 2**53 in magnitude in the "
+            f"inspected sample and type {prop.type} cannot hold them exactly; "
+            "copy rejects each record that has one. Set the type to text, or "
+            "text[] for a list. An existing collection keeps its property "
+            "types: to change one, copy with another --dir into a target name "
+            "that does not exist, or delete the collection first.",
+        )
+    ]
 
 
 def _coerced(
@@ -464,6 +500,10 @@ def _model(vectorizer: VectorizerPlan) -> str:
     return vectorizer.module if model is None else f"{vectorizer.module} {model}"
 
 
+# On OpenAI's endpoint Weaviate accepts this model only under the name `ada`.
+_OPENAI_ADA_002 = "text-embedding-ada-002"
+
+
 def _keep_model_findings(
     entry: CollectionPlan, vectorizer_for: VectorizerMapper
 ) -> list[Finding]:
@@ -485,14 +525,25 @@ def _keep_model_findings(
             source_model is None or planned.options.get("model") == source_model
         ):
             continue
+        hint = (
+            "use embed mode to re-vectorize the documents, or set the "
+            "vectorizer to the source model"
+        )
+        if planned.module == source.module == "text2vec-openai":
+            models = (source_model, planned.options.get("model"))
+            if models == (_OPENAI_ADA_002, "ada"):
+                continue
+            if models == ("ada", _OPENAI_ADA_002):
+                hint = (
+                    f"ada is Weaviate's name for {_OPENAI_ADA_002}; set model: "
+                    "ada, or run inspect again"
+                )
         out.append(
             Finding(
                 "keep_model_mismatch",
                 entry.target.name,
                 f"vector {vector.name} keeps vectors made by {_model(source)}, "
-                f"but queries would be vectorized with {_model(planned)}; use "
-                "embed mode to re-vectorize the documents, or set the "
-                "vectorizer to the source model",
+                f"but queries would be vectorized with {_model(planned)}; {hint}",
             )
         )
     return out
@@ -843,6 +894,7 @@ def plan_findings(
                         _coerced(entry, prop, inspected),
                     )
                 )
+            warnings.extend(_large_int_findings(entry, prop, inspected))
         for dropped in entry.target.dropped:
             warnings.append(
                 Finding(

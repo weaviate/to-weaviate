@@ -648,13 +648,14 @@ def _create(
 
     `auto` sends min(3, nodes). It sends no factor when the key may not read
     the nodes. When the server refuses the factor with 400 or 422, it creates
-    once more without a factor; the error of that create is raised.
+    once more without a factor; the error of that create is raised. A 400 or
+    422 after a retried attempt is a refusal of the factor only when no
+    collection exists; `_send_create` handles the other cases.
     """
     name = group[0].target.name
 
     def create(auto: int | None) -> None:
-        kwargs = collection_kwargs(group, auto)
-        with_retry(lambda: client.collections.create(**kwargs), transient, sleep=sleep)
+        _send_create(client, group, auto, sleep)
 
     planned = group[0].target.replication_factor
     if isinstance(planned, int):
@@ -710,6 +711,44 @@ def _add_property(
                 _server_message(exc), f"add the property {prop.name} to {name}"
             ) from exc
         raise
+
+
+def _send_create(
+    client: weaviate.WeaviateClient,
+    group: list[CollectionPlan],
+    auto: int | None,
+    sleep: Callable[[float], None],
+) -> None:
+    """Send the create of the collection of `group`, with `auto` as its factor.
+
+    The server can apply a create whose answer does not arrive. The attempt
+    after it is then refused, because the collection exists. A 400 or 422
+    after a retried attempt is therefore judged by the collection that exists:
+    none re-raises, one that matches the plan counts as created, another
+    raises PlanMismatch. A matching collection can come from another writer,
+    so the planned properties it lacks are added.
+    """
+    kwargs = collection_kwargs(group, auto)
+    retried = False
+
+    def judge(exc: Exception) -> float | None:
+        nonlocal retried
+        delay = transient(exc)
+        retried = retried or delay is not None
+        return delay
+
+    try:
+        with_retry(lambda: client.collections.create(**kwargs), judge, sleep=sleep)
+    except UnexpectedStatusCodeError as exc:
+        if not retried or exc.status_code not in (400, 422):
+            raise
+        found = with_retry(lambda: differences(client, group), transient, sleep=sleep)
+        if found is None:
+            raise
+        if found:
+            raise PlanMismatch("; ".join(found)) from exc
+        for prop in _missing_properties(client, group):
+            _add_property(client, group[0].target.name, prop, sleep)
 
 
 def ensure_collection(

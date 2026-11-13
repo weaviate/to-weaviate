@@ -245,6 +245,10 @@ PRUNE_HINT = (
     "to the collection. To delete them, run to-weaviate sync --prune --force."
 )
 SYNC_BATCH_HINT = "Fix the cause and run to-weaviate sync again."
+PROVIDER_BUSY_HINT = (
+    "Wait for the provider's rate limit to reset or for the provider to "
+    "answer again, or lower --parallelism. Then run to-weaviate {command} again."
+)
 FOREIGN_HINT = (
     "Copy into another collection or tenant, or, when these objects may be "
     "deleted, run the same command with --yes."
@@ -412,7 +416,12 @@ def _as_cli_error(exc: Exception) -> CliError:
             ADD_PROPERTY_HINT if isinstance(exc, PropertyRejected) else SCHEMA_HINT,
         )
     if isinstance(exc, BatchRefused):
-        return CliError("target_unreachable", str(exc), BATCH_HINT)
+        hint = BATCH_HINT
+        if exc.provider_busy:
+            hint = (
+                PROVIDER_BUSY_HINT.format(command="copy") + " It resumes at this page."
+            )
+        return CliError("target_unreachable", str(exc), hint)
     if isinstance(exc, PlanMismatch):
         return CliError(
             "plan_mismatch",
@@ -1590,7 +1599,10 @@ def _sync_error(
             f"Run {command} again.",
             fields={"collection": entry.source.name},
         )
-    return CliError("target_unreachable", str(exc), SYNC_BATCH_HINT)
+    hint = SYNC_BATCH_HINT
+    if exc.provider_busy:
+        hint = PROVIDER_BUSY_HINT.format(command="sync")
+    return CliError("target_unreachable", str(exc), hint)
 
 
 def _status(directory: Path, json_output: bool) -> None:

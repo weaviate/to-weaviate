@@ -131,7 +131,10 @@ jobs:
         uses: actions/setup-python@v5
         with: {python-version: "3.13"}
       - if: steps.cpu.outputs.unsupported != 'true'
-        run: pip install -e ".[test]" && pytest tests/acceptance -v --junitxml=/tmp/acceptance-junit.xml
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: {python-version: "3.13"}
+      - if: steps.cpu.outputs.unsupported != 'true'
+        run: uv sync --locked --extra test && uv run --no-sync pytest tests/acceptance -v --junitxml=/tmp/acceptance-junit.xml
       # A case can record measurements as test properties, which only the XML
       # holds on a pass. At most one attempt of a setup reaches this step, so
       # no other upload uses the name.

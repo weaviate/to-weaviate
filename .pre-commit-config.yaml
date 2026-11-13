@@ -10,4 +10,12 @@ repos:
     hooks:
       - id: mypy
         files: ^src/
-        additional_dependencies: [typer, pydantic>=2, types-PyYAML, httpx, python-dotenv, weaviate-client]
+        # pre-commit installs these apart from uv.lock. Each bound is the one
+        # in pyproject.toml, and tests/unit/test_dependency_bounds.py checks it.
+        additional_dependencies:
+          - "weaviate-client>=4.24.1,<5"
+          - "httpx>=0.26.0"
+          - "typer>=0.28.0"
+          - "pydantic>=2.12.0"
+          - "python-dotenv>=1.0.0"
+          - types-PyYAML

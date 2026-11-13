@@ -119,6 +119,7 @@ SUITE_COLLECTIONS = [
     "Rejects",
     "Tiny_l2_renamed",
     "Openai_proxy",
+    "Openai_ada",
     "Resume",
     "Empty",
     "Edge",

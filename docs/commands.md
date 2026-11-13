@@ -79,13 +79,15 @@ exit 2, `invalid_plan`. A warning does not stop `copy` or `sync`.
   [replication](weaviate.md#replication).
 - Warnings: `missing_property` (an existing collection lacks a planned
   property; `copy` adds it), `coerced_keys` (a metadata key with mixed types
-  whose values `copy` converts), `quantizer_training` (a trained
-  quantizer whose training limit is above the record count of the source),
-  `not_replicated` (with `replication_factor: auto`, an existing collection
-  has factor 1 on a cluster of more than one node), and `unknown_node_count`
-  (the key may not read the nodes, so `check` did not compare a planned
-  factor with the node count, or `auto` has no node count for a collection
-  that does not exist yet).
+  whose values `copy` converts), `large_ints` (an `int` or `number` property
+  for a key that holds ints above 2**53, which `copy`
+  [rejects](plan-file.md#types-and-conversion)), `quantizer_training` (a
+  trained quantizer whose training limit is above the record count of the
+  source), `not_replicated` (with `replication_factor: auto`, an existing
+  collection has factor 1 on a cluster of more than one node), and
+  `unknown_node_count` (the key may not read the nodes, so `check` did not
+  compare a planned factor with the node count, or `auto` has no node count
+  for a collection that does not exist yet).
 
 ## `copy`
 
@@ -119,19 +121,33 @@ operating system releases the lock when the process ends. On a system without
 ### Records added or deleted between runs
 
 Each run also copies the records added to the source since the last run. It
-finds its place from the last two records the previous run read:
+finds its place from the last two records the previous run read. A run that
+continues a stopped copy does the same for each part of the collection that
+is not finished, before it reads that part's next page:
 
 - When deletions in the source moved those records, the run finds them at
-  their new position and reads what follows.
-- When one of them is gone, the run reads again from an earlier record.
-  When it finds no earlier record either, it reads from the start and warns
-  "the source changed since the last run; re-reading from the start".
+  their new position and reads what follows. After a stopped copy, a record
+  that the deletions moved from one part of the collection into another can
+  be written twice, unchanged, and is then counted twice as copied.
+- When one of them is gone, the run reads again from a lower position: after
+  the last two records of an earlier finished part, when it finds them. When
+  it finds none, an unfinished part reads again from the end of the nearest
+  unfinished part before it. When there is no such part, the run reads from
+  the start of the collection and warns, once per collection, "the source
+  changed since the last run; re-reading from the start".
+  A part that copies records added after the first run reads from the start
+  of the collection when one of its own last two records is gone.
   Records read again are written again unchanged.
-  The JSON document of such a run gives the position it read from as
-  `reread_from`.
+  The JSON document of such a run gives the lowest position it read again
+  from as `reread_from`.
 - When the two records were deleted and added back with the same ids, the run
-  cannot tell them apart from the originals and can skip the records added in
-  between. Run the full `verify` after the last copy of a source that changed.
+  cannot tell them apart from the originals. It can then skip records that
+  no run copied: the records added in between, and after a stopped copy also
+  records that were not read yet. It gives no warning. The `ids` check of the
+  full `verify` names the skipped records, and `sync` writes them. The
+  `count` check alone can miss them when Weaviate still holds objects of
+  deleted records. Run the full `verify` after the last copy of a source
+  that changed.
 
 ### Rejects
 
@@ -149,19 +165,37 @@ the last `sync` and of the `copy` runs after it.
 `copy` retries a transient error: a network error, a timeout, HTTP 429,
 500, 502, 503 or 504, and the matching gRPC statuses. It tries up to 7 times
 and waits 15.75 s to 31.5 s in total between the attempts. A `Retry-After`
-header from the source raises each wait to its value, up to 30 s. It also
-retries:
+header from the source raises each wait to its value, up to 30 s. The
+Weaviate client also retries a gRPC `UNAVAILABLE` answer inside each attempt,
+for 15 s on a write and 63 s on a read. While Weaviate answers `UNAVAILABLE`,
+`copy` can therefore wait about 2 minutes on a write and about 8 minutes on a
+read before it stops. It also retries:
 
 - a batch of more than one object in which Weaviate refused every object. A
   batch of one refused object is a reject, unless the error is about a node
-  outage;
+  outage or a busy model provider. When a model provider answered an object
+  of the batch with another status than 401, 403, 429 or 5xx, `copy` does
+  not retry the batch. It sends the objects one by one;
 - an object that Weaviate refused with an error about a node, a shard or a
-  deadline, as it does while a node restarts.
+  deadline, as it does while a node restarts;
+- an object that Weaviate could not embed because the model provider
+  answered HTTP 429 or 5xx, or because the provider's rate limit resets too
+  late for the batch. Weaviate does not repeat that request itself. The
+  objects of the batch that Weaviate stored are not sent again. Another
+  answer of the provider, such as HTTP 400, makes the object a reject at once.
 
 When the retries run out, `copy` stops with `source_unreachable` or
 `target_unreachable`, exit 4, and stores no reject. The next run starts at
-that page. A refused API key is not retried: `copy` stops with
-`auth_failed`, exit 3.
+that page. A provider that still answers 429 or 5xx after the retries also
+ends the run with `target_unreachable`, and the message holds the provider's
+status: wait for the rate limit to reset, or lower `--parallelism`, then run
+`copy` again. `copy` has no option that skips a page or a record. While the
+provider answers a record of a page with 5xx, every run stops at that page.
+The message holds the provider's status and text. It does not hold the id of
+the record. Read the provider's text for the cause and solve it at the
+provider. To copy the other collections in the meantime, run `copy` with
+`--collection` for each of them. A refused API key is not retried: `copy`
+stops with `auth_failed`, exit 3.
 
 ### Existing collections and the recorded target
 
@@ -317,6 +351,18 @@ The JSON document is under [JSON output](#json-output).
 | `count` | The record count of the source and the object count of Weaviate. |
 | `ids` | The full list of ids on both sides. It counts the missing and the extra ids and names up to 20 of each. |
 | `records` | A random sample of records: every property, and each kept source vector, rounded to float32, within 1e-5. |
+
+A sampled record that the plan rejects is not compared. When the target
+holds no object for it, `records` counts it under `rejects skipped`. When
+the target holds one, the record counts as differing, and the detail gives
+the reason of the reject. The object was written under another plan or
+before the record changed. Fix the cause of the reject and run `sync`.
+
+An existing collection keeps its property types, so a reject that needs
+another property type is not fixed by an edit of `plan.yaml`: `sync` stops
+with `plan_mismatch`. Copy into a new collection instead. Use another
+`--dir`, and give the target a name that does not exist, or delete the
+collection first.
 
 A failed check exits 1, `verification_failed`. Its detail names the cause,
 and the fix where there is one. Extra objects with a `source_id` lost their

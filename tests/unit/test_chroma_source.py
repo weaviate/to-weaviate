@@ -187,6 +187,20 @@ def test_inspect_scans_all_metadata(fake_client):
     assert all("embeddings" not in call.include for call in fake_client.calls)
 
 
+def test_inspect_counts_an_int_above_2_to_the_53_as_its_own_type(collection):
+    values = [2**53, -(2**53), 2**53 + 1, -(2**53) - 1, 2**63 - 1, 2.0**60, True]
+    records = make_records(len(values))
+    for record, value in zip(records, values, strict=True):
+        record["metadata"] = {"stamp": value, "stamps": [1, value]}
+    c = ChromaSource(FakeClient(collection, records), tenant="t").inspect(
+        None, None, None
+    )[0]
+    assert {f.key: f.types for f in c.fields} == {
+        "stamp": {"int": 2, "large_int": 3, "number": 1, "boolean": 1},
+        "stamps": {"int[]": 2, "large_int[]": 3, "text[]": 2},
+    }
+
+
 def test_inspect_collection_fields(inspected):
     assert inspected.ref == "5b2f1c1e-0f0a-4f5e-9a39-2f6f6d5d0a11"
     assert inspected.namespace == "db"

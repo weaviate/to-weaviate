@@ -53,8 +53,8 @@ COLLECTIONS = (
 )
 # Collections whose names need a change for Weaviate, made in this order.
 RENAMED_COLLECTIONS = ("Mixed-Case", "mixed-case", "1-leading-digit", "class")
-# Values at the limits of their type. Its records with the int 2**63 - 1 are
-# rejects by design, so it is not in COLLECTIONS.
+# Values at the limits of their type. It is not in COLLECTIONS: one test
+# copies it with a plan that makes its ints above 2**53 rejects.
 EDGE = "edge"
 # The large collection. seed makes it, but it is not in COLLECTIONS, so the
 # test that copies every collection does not copy it.
@@ -237,8 +237,8 @@ def resume(rng: random.Random) -> list[Record]:
 
 
 # Values at the limits of their type. Chroma returns -0.0 as 0.0. Weaviate
-# 1.40.4 returns an int above 2**53 rounded to a double. copy rejects
-# 2**63 - 1, whose double is 2**63.
+# 1.40.4 keeps an int as a double, so an int above 2**53 is text in the
+# drafted plan and a reject for an int property.
 INT_EDGES = (0, -1, 2**53 + 1, 2**63 - 1, -(2**63))
 FLOAT_EDGES = (1e308, -1e308, -0.0, 5e-324, 0.1)
 FLAGS = (True, False, "true", "false")
@@ -392,6 +392,27 @@ OPENAI_PROXY_FUNCTION = {
         "api_version": "2024-02-01",
         "deployment_id": "b8-deployment",
         "default_headers": {"X-Proxy-Token": PROXY_HEADER_TOKEN},
+        "dimensions": None,
+    },
+}
+
+
+# The collection of test_openai_ada_002_plan_is_accepted_by_the_target, with
+# the configuration that chromadb 1.5.9 sends for an OpenAIEmbeddingFunction
+# made without arguments.
+OPENAI_ADA = "openai-ada"
+OPENAI_ADA_FUNCTION = {
+    "type": "known",
+    "name": "openai",
+    "config": {
+        "api_key_env_var": "CHROMA_OPENAI_API_KEY",
+        "model_name": "text-embedding-ada-002",
+        "organization_id": None,
+        "api_base": None,
+        "api_type": None,
+        "api_version": None,
+        "deployment_id": None,
+        "default_headers": None,
         "dimensions": None,
     },
 }
@@ -596,14 +617,19 @@ def restore_tiny_l2(records: list[Record]) -> None:
         _recreate(http, "tiny.l2", None, records)
 
 
-def make_collection(name: str, records: list[Record], batch_size: int) -> None:
+def make_collection(
+    name: str,
+    records: list[Record],
+    batch_size: int,
+    embedding_function: dict[str, Any] | None = None,
+) -> None:
     """Delete the collection `name` and make it again with `records`, in their order.
 
     The records go in adds of `batch_size`. The collection has Chroma's
     default distance.
     """
     with _test_server() as http:
-        _recreate(http, name, None, records, batch_size=batch_size)
+        _recreate(http, name, None, records, embedding_function, batch_size)
 
 
 def add_records(name: str, records: list[Record]) -> None:
