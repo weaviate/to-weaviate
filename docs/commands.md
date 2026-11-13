@@ -135,19 +135,37 @@ the last `sync` and of the `copy` runs after it.
 `copy` retries a transient error: a network error, a timeout, HTTP 429,
 500, 502, 503 or 504, and the matching gRPC statuses. It tries up to 7 times
 and waits 15.75 s to 31.5 s in total between the attempts. A `Retry-After`
-header from the source raises each wait to its value, up to 30 s. It also
-retries:
+header from the source raises each wait to its value, up to 30 s. The
+Weaviate client also retries a gRPC `UNAVAILABLE` answer inside each attempt,
+for 15 s on a write and 63 s on a read. While Weaviate answers `UNAVAILABLE`,
+`copy` can therefore wait about 2 minutes on a write and about 8 minutes on a
+read before it stops. It also retries:
 
 - a batch of more than one object in which Weaviate refused every object. A
   batch of one refused object is a reject, unless the error is about a node
-  outage;
+  outage or a busy model provider. When a model provider answered an object
+  of the batch with another status than 401, 403, 429 or 5xx, `copy` does
+  not retry the batch. It sends the objects one by one;
 - an object that Weaviate refused with an error about a node, a shard or a
-  deadline, as it does while a node restarts.
+  deadline, as it does while a node restarts;
+- an object that Weaviate could not embed because the model provider
+  answered HTTP 429 or 5xx, or because the provider's rate limit resets too
+  late for the batch. Weaviate does not repeat that request itself. The
+  objects of the batch that Weaviate stored are not sent again. Another
+  answer of the provider, such as HTTP 400, makes the object a reject at once.
 
 When the retries run out, `copy` stops with `source_unreachable` or
 `target_unreachable`, exit 4, and stores no reject. The next run starts at
-that page. A refused API key is not retried: `copy` stops with
-`auth_failed`, exit 3.
+that page. A provider that still answers 429 or 5xx after the retries also
+ends the run with `target_unreachable`, and the message holds the provider's
+status: wait for the rate limit to reset, or lower `--parallelism`, then run
+`copy` again. `copy` has no option that skips a page or a record. While the
+provider answers a record of a page with 5xx, every run stops at that page.
+The message holds the provider's status and text. It does not hold the id of
+the record. Read the provider's text for the cause and solve it at the
+provider. To copy the other collections in the meantime, run `copy` with
+`--collection` for each of them. A refused API key is not retried: `copy`
+stops with `auth_failed`, exit 3.
 
 ### Existing collections and the recorded target
 

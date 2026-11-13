@@ -4,10 +4,12 @@
 [![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](https://github.com/weaviate/to-weaviate/blob/main/LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://github.com/weaviate/to-weaviate/blob/main/pyproject.toml)
 
-`to-weaviate` migrates collections from other vector databases into
-[Weaviate](https://weaviate.io). It copies each record's id, vector, text and
-metadata, resumes where it stopped, and checks the copy against the source.
-It only reads from the source.
+`to-weaviate` migrates collections from another vector database into
+[Weaviate](https://weaviate.io).
+
+> [!NOTE]
+> Chroma is the only supported source. To ask for another one,
+> [open an issue](https://github.com/weaviate/to-weaviate/issues/new).
 
 ![to-weaviate inspect reads a Chroma collection of 5,000 records with 1536-dimension vectors, the start of plan.yaml shows the source and target, then check and copy run, sync --prune writes the 10 records that changed since the copy and deletes the 5 whose source record is gone, and verify prints PASS for the count, ids and records checks](https://raw.githubusercontent.com/weaviate/to-weaviate/main/docs/demo/demo.gif)
 
@@ -19,29 +21,28 @@ The Weaviate team maintains it.
 |---|---|---|---|
 | Chroma | Chroma Cloud, distributed Chroma, single-node Chroma, a Chroma directory on disk | `inspect chroma` | [Chroma](https://github.com/weaviate/to-weaviate/blob/main/docs/sources/chroma.md) |
 
-To ask for another source, [open an issue](https://github.com/weaviate/to-weaviate/issues/new).
-
 ## Features
 
 - **Read-only on the source.** No command writes to it or deletes from it.
 - **A plan you review first.** `inspect` drafts `plan.yaml`; nothing reaches
   Weaviate until you run `copy` or `sync`.
-- **Your vectors or new ones.** Keep the source vectors, or let a Weaviate
-  vectorizer embed the text.
-- **Resumable.** A rerun of `copy` continues at the page where the last run
-  stopped, and copies the records added since.
-- **A final sync.** `sync` writes the records that changed since the copy;
-  `sync --prune` deletes the objects whose source record is gone.
-- **No duplicates.** Each object's UUID comes from its source id.
+- **Safe to rerun.** A rerun of `copy` continues at the page where the last
+  run stopped. Each object's UUID comes from its source id, so a rerun
+  writes no duplicate.
 - **Verified.** `verify` compares counts, ids, and a sample of records with
-  their vectors.
-- **Built for scripts.** `--json` output and one exit code per failure class.
+  their vectors, and writes a report.
 - **No secrets in output.** Keys come from the environment, and no output or
   file holds one.
 
-## Install
+## Requirements & Installation
 
-You need Python 3.10 or newer.
+- Python 3.10 or newer.
+- A Weaviate instance: a [Weaviate Cloud](https://console.weaviate.cloud)
+  cluster, or a [server you run yourself](https://docs.weaviate.io/deploy).
+  A free (sandbox) Weaviate Cloud cluster accepts only the index type
+  `hfresh`; for one, run `inspect` with `--index hfresh`.
+  [Weaviate target](https://github.com/weaviate/to-weaviate/blob/main/docs/weaviate.md) has the details.
+- Read access to the source. See the [source guide](https://github.com/weaviate/to-weaviate/blob/main/docs/sources/README.md).
 
 ```bash
 pip install to-weaviate
@@ -54,11 +55,9 @@ uvx to-weaviate --help
 ```
 
 Each [GitHub release](https://github.com/weaviate/to-weaviate/releases) also
-carries the wheel and the sdist, the exact files of that version, to pin or
-to mirror. `pip install` accepts the wheel's URL; the dependencies still come
-from PyPI.
+carries the wheel and the sdist of that version.
 
-## How a migration works
+## Migration steps
 
 ```mermaid
 flowchart LR
@@ -66,47 +65,64 @@ flowchart LR
     copy -. "run again to resume" .-> copy
 ```
 
-1. `to-weaviate inspect <source>` reads the source and writes a draft `plan.yaml`.
-2. You review the plan and edit names, types or vector settings.
-3. `to-weaviate check` validates the plan against Weaviate. It creates nothing.
-4. `to-weaviate copy` creates the collections and copies the records. Some
-   sources need the writes to them paused while `copy` and `sync` run; the
-   "Writes during a copy" section of each [source guide](https://github.com/weaviate/to-weaviate/blob/main/docs/sources/README.md)
-   says which.
-5. Stop the writes to the source and run `to-weaviate sync --prune`. It
-   writes the records that changed since the copy and deletes the objects
-   whose source record is gone.
-6. `to-weaviate verify` compares Weaviate with the source and writes
-   `report.md`. Then switch your application to Weaviate.
+1. Run `to-weaviate inspect <source>`. It reads the source and writes a
+   draft `plan.yaml`.
+2. Review the plan. Edit the names, types or vector settings you want to
+   change.
+3. Run `to-weaviate check`. It validates the plan against Weaviate and
+   creates nothing.
+4. Run `to-weaviate copy`. It creates the collections and copies the
+   records. If it stops, run it again to resume. Some sources need the
+   writes to them paused while `copy` and `sync` run; the "Writes during a
+   copy" section of each [source guide](https://github.com/weaviate/to-weaviate/blob/main/docs/sources/README.md) says which.
+5. Optional: run `to-weaviate sync` to write the records that are new or
+   changed since the copy. Run it as often as you like before the last step.
+6. Stop the writes to the source, then run `to-weaviate sync --prune`. It
+   writes the records that are new or changed since the last run and
+   deletes the objects whose source record is gone.
+7. Run `to-weaviate verify`. It compares Weaviate with the source and writes
+   `report.md`. When every check passes, switch your application to
+   Weaviate.
 
-`to-weaviate status` shows the copy progress at any time and needs no
+Run `to-weaviate status` at any time to see the copy progress. It needs no
 credentials. Every command uses one migration directory, `./.to-weaviate`
 unless you pass `--dir`.
 
-## Quickstart
+## Example
 
-This example migrates the Chroma collection `support-articles` to Weaviate.
-Replace the collection name and the settings with your own.
-[`docs/demo/seed.py`](https://github.com/weaviate/to-weaviate/blob/main/docs/demo/seed.py) creates this collection: 5,000
-records with 1536-dimension vectors.
+This example migrates one collection from Chroma Cloud to Weaviate Cloud.
+It assumes:
 
-### Configure the source
+- The Chroma Cloud collection is `support-articles`: 5,000 records with
+  1536-dimension vectors.
+- The Weaviate Cloud cluster is not a free (sandbox) cluster.
+- The application does not write to the collection while `copy` and `sync`
+  run. Chroma Cloud needs that.
+- You run every command in one directory, and the settings are in a `.env`
+  file there or exported.
 
-`inspect` reads only the settings of its source. Put them in a `.env` file in
-the directory where you run the tool, or export them:
+For a server you run yourself, the [Chroma guide](https://github.com/weaviate/to-weaviate/blob/main/docs/sources/chroma.md)
+and [Weaviate target](https://github.com/weaviate/to-weaviate/blob/main/docs/weaviate.md) list the settings.
+
+### Configure
 
 ```dotenv
-CHROMA_URL=http://localhost:8001
+CHROMA_API_KEY=<Chroma Cloud API key>
+WEAVIATE_URL=https://my-cluster.weaviate.cloud
+WEAVIATE_API_KEY=<Weaviate API key>
 ```
 
-Each [source guide](https://github.com/weaviate/to-weaviate/blob/main/docs/sources/README.md) lists the settings of its source,
-with an example for each deployment.
+`WEAVIATE_URL` and `WEAVIATE_API_KEY` are the URL and an API key of the
+Weaviate Cloud cluster. Both are in the
+[Weaviate Cloud console](https://console.weaviate.cloud). `CHROMA_API_KEY`
+is a Chroma Cloud API key. The [Chroma guide](https://github.com/weaviate/to-weaviate/blob/main/docs/sources/chroma.md) lists
+the other Chroma settings.
 
-### Inspect
+### Inspect and review the plan
 
 ```console
 $ to-weaviate inspect chroma --collection support-articles
-Inspecting Chroma at http://localhost:8001
+Inspecting Chroma at https://api.trychroma.com
 support-articles -> Support_articles
   count: 5000
   dimension: 1536
@@ -116,8 +132,6 @@ Decisions:
   support-articles (vector_mode): No Weaviate vectorizer matches the source embedding function. Either supply query vectors from the application, or run inspect with --vectors embed to re-vectorize the documents in Weaviate.
 Review .to-weaviate/plan.yaml, then run to-weaviate check.
 ```
-
-### Review the plan
 
 Each entry of `.to-weaviate/plan.yaml` maps one source collection to one
 Weaviate collection. An excerpt:
@@ -148,29 +162,11 @@ collections:
 
 [The plan file](https://github.com/weaviate/to-weaviate/blob/main/docs/plan-file.md) lists the edits you can make.
 
-### Configure Weaviate
-
-`check`, `copy`, `sync` and `verify` also need the Weaviate settings. For a Weaviate
-server on your machine, add:
-
-```dotenv
-WEAVIATE_URL=http://localhost:8099
-WEAVIATE_GRPC_URL=http://localhost:50099
-WEAVIATE_API_KEY=<Weaviate API key>
-```
-
-Leave `WEAVIATE_API_KEY` unset for a server without authentication. For a
-Weaviate Cloud cluster, set `WEAVIATE_URL` to the cluster URL and
-`WEAVIATE_API_KEY` to an API key of the cluster from the
-[Weaviate Cloud console](https://console.weaviate.cloud), and leave
-`WEAVIATE_GRPC_URL` unset. [Weaviate target](https://github.com/weaviate/to-weaviate/blob/main/docs/weaviate.md) has the
-details.
-
 ### Check and copy
 
 ```console
 $ to-weaviate check
-Checking the target at http://localhost:8099
+Checking the target at https://my-cluster.weaviate.cloud
 No errors, 0 warnings.
 
 $ to-weaviate copy
@@ -180,16 +176,10 @@ support-articles -> Support_articles: copied 5000 of 5000, rejects 0, done
 Total: 5000 records
 ```
 
-Some sources need the writes to them paused while `copy` and `sync` run; the
-"Writes during a copy" section of each [source guide](https://github.com/weaviate/to-weaviate/blob/main/docs/sources/README.md)
-says which.
-
 ### Sync, verify and switch
 
-Stop the writes to the source. `sync --prune` then writes the records that
-are new or changed since the copy and deletes the objects whose source
-record is gone. Here the source gained 5 records, 5 changed and 5 were
-deleted after the copy:
+Stop the writes to the source. Here the source gained 5 records, 5 changed
+and 5 were deleted after the copy:
 
 ```console
 $ to-weaviate sync --prune
@@ -207,9 +197,6 @@ PASS Support_articles records: sampled 300, compared 300, rejects skipped 0, dif
 
 Now switch your application to Weaviate. Do not run `sync` against this
 target afterwards: the source no longer holds the current data.
-
-With both servers on the machine that ran the tool, `copy` took 4.3 s,
-`sync --prune` 4.2 s and `verify` 1.0 s.
 
 ## Commands
 

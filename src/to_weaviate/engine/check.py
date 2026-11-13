@@ -441,6 +441,10 @@ def _model(vectorizer: VectorizerPlan) -> str:
     return vectorizer.module if model is None else f"{vectorizer.module} {model}"
 
 
+# On OpenAI's endpoint Weaviate accepts this model only under the name `ada`.
+_OPENAI_ADA_002 = "text-embedding-ada-002"
+
+
 def _keep_model_findings(
     entry: CollectionPlan, vectorizer_for: VectorizerMapper
 ) -> list[Finding]:
@@ -462,14 +466,25 @@ def _keep_model_findings(
             source_model is None or planned.options.get("model") == source_model
         ):
             continue
+        hint = (
+            "use embed mode to re-vectorize the documents, or set the "
+            "vectorizer to the source model"
+        )
+        if planned.module == source.module == "text2vec-openai":
+            models = (source_model, planned.options.get("model"))
+            if models == (_OPENAI_ADA_002, "ada"):
+                continue
+            if models == ("ada", _OPENAI_ADA_002):
+                hint = (
+                    f"ada is Weaviate's name for {_OPENAI_ADA_002}; set model: "
+                    "ada, or run inspect again"
+                )
         out.append(
             Finding(
                 "keep_model_mismatch",
                 entry.target.name,
                 f"vector {vector.name} keeps vectors made by {_model(source)}, "
-                f"but queries would be vectorized with {_model(planned)}; use "
-                "embed mode to re-vectorize the documents, or set the "
-                "vectorizer to the source model",
+                f"but queries would be vectorized with {_model(planned)}; {hint}",
             )
         )
     return out

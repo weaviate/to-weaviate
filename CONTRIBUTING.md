@@ -26,7 +26,8 @@ To install the newest versions that `pyproject.toml` allows instead, run
 Each dependency in `pyproject.toml` has a lower bound that the unit tests
 pass on. The CI job `unit (lowest deps)` installs those lower bounds. After
 a change to the dependencies in `pyproject.toml`, run `uv lock` and commit
-`uv.lock`. Dependabot opens a weekly pull request that updates `uv.lock`.
+`uv.lock`. The mypy hook does not read `uv.lock`, so copy a changed bound to
+`additional_dependencies` in `.pre-commit-config.yaml` too. Dependabot opens a weekly pull request that updates `uv.lock`.
 
 ## Before you open a pull request
 
