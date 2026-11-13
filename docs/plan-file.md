@@ -147,6 +147,10 @@ Every other `source_key` is a metadata key. A property has these fields:
   type, for example `text[]` for `text` and `text[]` values.
 - A list with mixed element types becomes `text[]`, a list of ints and
   numbers too. An empty list counts as `text[]`.
+- A key with an int above 2**53 in magnitude becomes `text`, or `text[]`
+  for lists. `inspect` counts such a value as the type `large_int`
+  (`large_int[]` for a list that holds one), which is not a property
+  type, and adds a note to the plan entry.
 
 When the chosen type differs from a type that the source holds,
 `coerced_from` lists the source types other than the chosen one, and `check`
@@ -156,9 +160,9 @@ and `copy` show the warning `coerced_keys`.
 
 | Property type | Accepts |
 |---|---|
-| `text` | Any scalar. A boolean becomes `true` or `false`. |
-| `number` | An int or a number. |
-| `int` | An int, or a number without a fractional part. |
+| `text` | Any scalar. A boolean becomes `true` or `false`, an int its decimal digits. |
+| `number` | A number, or an int up to 2**53 in magnitude. |
+| `int` | An int, or a number without a fractional part, up to 2**53 in magnitude. |
 | `boolean` | A boolean. |
 
 Any other scalar is a reject with the reason "<key>: cannot convert ...
@@ -166,11 +170,35 @@ without losing data". A list or a mapping for a property that is not an
 array type is a reject with the reason "<key>: cannot convert <type> value
 to <type>". An array type converts each element the same way.
 
-Weaviate stores an `int` property as a double. An int above 2**53 in
-magnitude is stored rounded, and `verify` compares the rounded value. An int
-that rounds to 2**63 or above is a reject, because whether the server takes
-it depends on its CPU. To keep every digit of such values, set the type to
-`text`.
+Weaviate stores an `int` and a `number` property as a double, which holds
+every int from -2**53 to 2**53 (9007199254740992). A larger int, for example
+a 64-bit hash, a snowflake id or a timestamp in nanoseconds, would be stored
+rounded. `copy` does not write it: for an `int` or `number` property the
+record is a reject with the reason "<key>: int <value> is above 2**53 in
+magnitude and Weaviate would store it rounded; set the property type to
+text, or text[] for a list". A `text` property holds every digit, and
+`inspect` drafts `text` for a key where it read such a value. An existing
+collection keeps its property types: to change one, copy with another
+`--dir` into a target name that does not exist, or delete the collection
+first.
+
+A number without a fractional part above that magnitude is a reject for an
+`int` property, with the reason "<key>: number <value> is above 2**53 in
+magnitude, which an int property does not hold; set the property type to
+number or text".
+
+`check` and `copy` show the warning `large_ints` when the plan types a key
+as `int` or `number` and `inspect.json` counted a `large_int` for it. The
+warning is missing when the sample that `--sample-pages` limits did not read
+the value, and when an earlier version of the tool wrote `inspect.json`,
+because it counted every int as `int`. `inspect --force` counts again and
+replaces `plan.yaml`. Without the warning, `copy` still reports the rejects.
+
+`verify` compares the value of an `int` or `int[]` property digit by digit,
+and the value of a `number` or `number[]` property with a relative tolerance
+of 1e-9. When the target holds an object for a record that the plan rejects,
+for example an int that an earlier copy stored rounded, the `records` check
+fails and names the record.
 
 ## Vector modes
 

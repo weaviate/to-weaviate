@@ -573,3 +573,36 @@ def test_draft_notes_a_source_without_vectors(count, dimension, vectors, noted):
     source = replace(make(), count=count, dimension=dimension)
     entry = draft_plan(SRC, [source], vectors).collections[0]
     assert (NO_VECTORS_NOTE in entry.notes) is noted
+
+
+LARGE_INT_NOTE = (
+    "key {key} holds ints above 2**53 in magnitude, which Weaviate would store "
+    "rounded as int or number; the property is typed {type} and holds the "
+    "decimal digits"
+)
+
+
+def test_draft_types_a_key_with_an_int_above_2_to_the_53_as_text_and_notes_it():
+    fields = [
+        FieldStats("hash", {"large_int": 10}),
+        FieldStats("mixed", {"int": 9, "large_int": 1}),
+        FieldStats("stamps", {"large_int[]": 10}),
+        FieldStats("year", {"int": 10}),
+    ]
+    entry = draft_plan(SRC, [make(fields=fields)], "keep").collections[0]
+    drafted = {
+        x.source_key: (x.type, x.tokenization, x.range_filters, x.coerced_from)
+        for x in entry.target.properties
+        if not x.source_key.startswith("#")
+    }
+    assert drafted == {
+        "hash": ("text", "field", False, ["large_int"]),
+        "mixed": ("text", "field", False, ["int", "large_int"]),
+        "stamps": ("text[]", "field", False, ["large_int[]"]),
+        "year": ("int", None, True, []),
+    }
+    assert entry.notes == [
+        LARGE_INT_NOTE.format(key="hash", type="text"),
+        LARGE_INT_NOTE.format(key="mixed", type="text"),
+        LARGE_INT_NOTE.format(key="stamps", type="text[]"),
+    ]
