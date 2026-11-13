@@ -318,7 +318,7 @@ def test_secret_in_a_progress_line_of_verify_is_redacted():
 
 LONG_KEY = (
     "".join(chr(ord("a") + i * 7 % 26) for i in range(230))
-    + "é"
+    + "\\"
     + "".join(chr(ord("A") + i * 11 % 26) for i in range(230))
 )
 
@@ -375,6 +375,63 @@ def test_key_with_a_control_character_is_a_usage_error(cmd, var, mode):
         assert f"Error: {message}" in r.stderr
     for part in ("B5-MADE", "UP\\nKEY", "KEY-VALUE"):
         assert part not in r.output
+
+
+@pytest.mark.parametrize("mode", [[], ["--json"]])
+@pytest.mark.parametrize(
+    ("cmd", "var"),
+    [
+        (["check"], "WEAVIATE_API_KEY"),
+        (["check"], "OPENAI_API_KEY"),
+        (["inspect", "chroma", "--force"], "CHROMA_API_KEY"),
+    ],
+)
+def test_key_with_a_non_ascii_character_is_a_usage_error(cmd, var, mode):
+    key = "\u2018B5-MADE-UP-KEY-VALUE\u2019"
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    error = UnicodeEncodeError("ascii", key, 0, 1, "ordinal not in range(128)")
+    fakes.source_error = fakes.target_error = error
+    r = invoke(fakes, *cmd, *mode, TO_WEAVIATE_DEBUG="1", **{var: key})
+    assert r.exit_code == 2, r.output
+    message = f"{var} holds a character that is not ASCII."
+    if mode:
+        d = json.loads(r.stdout)
+        assert (d["code"], d["message"]) == ("usage", message)
+        assert "curly quote" in d["hint"]
+    else:
+        assert f"Error: {message}" in r.stderr
+    for part in ("B5-MADE", "KEY-VALUE", "\u2018", "\u2019"):
+        assert part not in r.output
+
+
+@pytest.mark.parametrize(
+    ("url", "hint"),
+    [
+        (
+            None,
+            "Set CHROMA_API_KEY in the environment or in .env. Without CHROMA_URL "
+            "the source is Chroma Cloud. For a self-hosted Chroma server, set "
+            "CHROMA_URL to its address.",
+        ),
+        (
+            "https://api.trychroma.com",
+            "Set CHROMA_API_KEY in the environment or in .env.",
+        ),
+    ],
+)
+def test_missing_chroma_key_hint_names_the_cloud_default(url, hint):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    r = invoke(
+        fakes, "inspect", "chroma", "--json", CHROMA_URL=url, CHROMA_API_KEY=None
+    )
+    assert r.exit_code == 3, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"], d["hint"]) == (
+        "missing_credential",
+        "CHROMA_API_KEY is not set",
+        hint,
+    )
 
 
 def test_url_password_is_not_stored_or_printed(tmp_path):

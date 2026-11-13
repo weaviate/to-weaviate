@@ -25,6 +25,17 @@ def test_cloud_url_requires_key():
     with pytest.raises(MissingCredential) as e:
         chroma_settings({})
     assert e.value.var == "CHROMA_API_KEY"
+    assert e.value.hint == (
+        "Set CHROMA_API_KEY in the environment or in .env. Without CHROMA_URL "
+        "the source is Chroma Cloud. For a self-hosted Chroma server, set "
+        "CHROMA_URL to its address."
+    )
+
+
+def test_cloud_url_that_is_set_keeps_the_default_hint():
+    with pytest.raises(MissingCredential) as e:
+        chroma_settings({"CHROMA_URL": "https://api.trychroma.com"})
+    assert e.value.var == "CHROMA_API_KEY" and e.value.hint is None
 
 
 def test_custom_url_needs_no_key():
@@ -89,8 +100,28 @@ def test_key_with_a_control_character_is_refused(var, value):
 
 @pytest.mark.parametrize("var", KEY_VARIABLES)
 @pytest.mark.parametrize(
+    "value", ["made\u2019up", "\u201cmade-up\u201d", "mad\u00e9-up"]
+)
+def test_key_with_a_non_ascii_character_is_refused(var, value):
+    env = {
+        "WEAVIATE_URL": "http://localhost:8099",
+        "WEAVIATE_GRPC_URL": "localhost:50099",
+        var: value,
+    }
+    load = chroma_settings if var == "CHROMA_API_KEY" else weaviate_settings
+    with pytest.raises(InvalidSetting) as e:
+        load(env)
+    assert str(e.value) == f"{var} holds a character that is not ASCII."
+    assert e.value.hint == (
+        f"Set {var} again. A value pasted from formatted text can hold a curly "
+        "quote."
+    )
+
+
+@pytest.mark.parametrize("var", KEY_VARIABLES)
+@pytest.mark.parametrize(
     ("value", "expected"),
-    [("made up", "made up"), ("madé-up", "madé-up"), ("", None), (" \n ", None)],
+    [("made up", "made up"), ("made~up!", "made~up!"), ("", None), (" \n ", None)],
 )
 def test_key_without_a_control_character_is_kept(var, value, expected):
     env = {
