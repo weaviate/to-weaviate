@@ -96,7 +96,8 @@ property that an existing collection lacks. `check` writes nothing.
      source without compaction;
    - splits the collection with `Source.partitions`, and reads the pending
      partitions with `Source.read` in a pool of `--parallelism` threads, one
-     task per partition;
+     task per partition. In a run that continues a stopped copy, each task
+     first checks the partition's stored position with `Source.ids_at`;
    - converts each page with `target/writer` and writes it, then advances
      the partition's position in `state.sqlite`;
    - reads `Source.count` again and copies the records added since in a tail
@@ -156,7 +157,7 @@ source conforms; nothing checks it at run time.
 | `inspect(namespaces, collections, sample_pages)` | `inspect`. The result goes to `inspect.json` and into the draft plan. |
 | `partitions(collection, parallelism)` | `copy`, once per collection in every run. `state.sqlite` keeps the partitions of the first run until a `sync` replaces them with its own. |
 | `read(collection, partition, cursor, with_vectors)` | `copy`, in a pool of `--parallelism` threads, one task per partition. Returns a `Page`; `next_cursor` `None` ends the partition. |
-| `ids_at(collection, offset, limit)`, `page_size` | `copy`, after the stored partitions finish: one call checks that no record before the end moved. After a move, `copy` reads ids backwards, `page_size` at a time, to find where the tail starts. |
+| `ids_at(collection, offset, limit)`, `page_size` | `copy`, after the stored partitions finish: one call checks that no record before the end moved. After a move, `copy` reads ids backwards, `page_size` at a time, to find where the tail starts. A run that continues a stopped copy makes the same check for each pending partition before its first page, from the thread of that partition: at most one call when nothing moved. After a move, that partition also reads ids backwards, `page_size` at a time, until it finds its place, down to offset 0 when the records it looks for are gone. A first or fresh copy makes no such call. |
 | `count(collection)` | `copy` (the live total and the tail), `sync` (the guard of `--prune`) and `verify` (the `count` check). |
 | `ids(collection)` | `verify`, the `ids` check, and `sync`, the stale objects. |
 | `get(collection, ids, with_vectors)` | `sync`: the records without a target object, and the stale records before `--prune` deletes their objects. |
@@ -173,7 +174,7 @@ source conforms; nothing checks it at run time.
 | `partitions` returns ranges of decimal offsets that cover `[0, count)`, each with a `stop`, and `[]` for an empty collection. | `engine/copy.py` parses the offsets to know what is copied. |
 | Cursors are decimal offsets. A tail partition (`stop` is `None`) reads until an empty page. | The tail starts where the last run ended. |
 | Records come in insertion order. A deletion moves later records one position down; an addition goes after the last record. | Resuming and finding new records depend on this order. |
-| `read` is safe to call from up to 8 threads for different partitions of one collection. | `copy --parallelism` runs up to 8 reads of one collection at once. |
+| `read` and `ids_at` are safe to call from up to 8 threads for different partitions of one collection. | `copy --parallelism` runs up to 8 reads of one collection at once, and each thread checks its partition's position with `ids_at`. |
 | A vector that holds a non-number arrives as NaN. | The engine turns such a record into a reject. |
 | `count` equals the number of records `read` returns and the number of ids `ids` lists. | `verify`'s `count` check compares it with Weaviate; `sync --prune` stops with `source_writing` when it differs from the listing. |
 | `get` returns the records of the ids it holds and leaves out the others. | `sync --prune` keeps the object of every record that `get` returns. |
