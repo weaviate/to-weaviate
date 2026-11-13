@@ -63,7 +63,7 @@ jobs:
           model=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n 1)
           if grep -q -w avx512f /proc/cpuinfo; then flag=with; else flag=without; fi
           echo "The runner's CPU is $model, $flag avx512f."
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: echo "WEAVIATE_VERSION=$(cat tests/acceptance/weaviate-version)" >> "$GITHUB_ENV"
       # The action runs its own checkout, so it comes before any step that
       # writes to the workspace.
