@@ -4,12 +4,6 @@
 the tool copies its id, document, URI and metadata, and its embedding when
 the plan keeps the source vector. It never writes to Chroma.
 
-> [!IMPORTANT]
-> Chroma Cloud stops accepting writes on 2026-12-07 and stops serving reads
-> on 2026-12-22. Migrate from Chroma Cloud before 2026-12-22. After that you
-> can migrate only from a Chroma server you run yourself, for example one
-> that serves a [Chroma directory on disk](#a-chroma-directory-on-disk).
-
 ## Deployments
 
 | Deployment | Notes |
