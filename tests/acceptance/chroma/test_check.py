@@ -1,5 +1,20 @@
 import pytest
-from conftest import enabled_vectorizer, run, weaviate_modules
+from chroma.seed import (
+    ADD_BATCH,
+    OPENAI_ADA,
+    OPENAI_ADA_FUNCTION,
+    delete_collection,
+    make_collection,
+    order_records,
+)
+from conftest import (
+    enabled_vectorizer,
+    read_plan,
+    run,
+    weaviate_config,
+    weaviate_count,
+    weaviate_modules,
+)
 
 # Neither variable reaches the command from the shell.
 NO_OPENAI_KEY = {"OPENAI_APIKEY": "", "OPENAI_API_KEY": ""}
@@ -54,3 +69,29 @@ def test_check_needs_the_provider_key_and_an_enabled_module(seeded, tmp_path):
         f"module {disabled} is not enabled on the target"
     ), message
     assert enabled_vectorizer() in message.partition("enabled modules: ")[2]
+
+
+def test_openai_ada_002_plan_is_accepted_by_the_target(tmp_path):
+    """The drafted vectorizer of an ada-002 collection passes check and copy.
+
+    Weaviate validates the model name when it creates the collection. A copy
+    that keeps the vectors sends no request to OpenAI, so a made-up key serves.
+    """
+    key = {**NO_OPENAI_KEY, "OPENAI_API_KEY": MADE_UP_OPENAI_KEY}
+    records = order_records(0, 10)
+    try:
+        make_collection(OPENAI_ADA, records, ADD_BATCH, OPENAI_ADA_FUNCTION)
+        r = run(["inspect", "chroma", "--collection", OPENAI_ADA], tmp_path)
+        assert r.exit_code == 0, r
+        (vector,) = read_plan(tmp_path)["collections"][0]["target"]["vectors"]
+        assert vector["vectorizer"]["module"] == "text2vec-openai", vector
+        assert vector["vectorizer"]["options"] == {"model": "ada"}, vector
+        for command in (["check"], ["copy"], ["verify"]):
+            r = run(command, tmp_path, env=key)
+            assert r.exit_code == 0 and r.data["status"] == "success", r
+        vectorizer = weaviate_config("Openai_ada").vector_config["default"].vectorizer
+        assert vectorizer.vectorizer.value == "text2vec-openai"
+        assert vectorizer.model["model"] == "ada"
+        assert weaviate_count("Openai_ada") == len(records)
+    finally:
+        delete_collection(OPENAI_ADA)

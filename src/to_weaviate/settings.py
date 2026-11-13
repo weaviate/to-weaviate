@@ -10,6 +10,11 @@ from dotenv import dotenv_values
 DEFAULT_CHROMA_URL = "https://api.trychroma.com"
 DEFAULT_TOKEN_HEADER = "x-chroma-token"
 CHROMA_CLOUD_DOMAIN = "trychroma.com"
+CLOUD_DEFAULT_HINT = (
+    "Set CHROMA_API_KEY in the environment or in .env. Without CHROMA_URL the "
+    "source is Chroma Cloud. For a self-hosted Chroma server, set CHROMA_URL to "
+    "its address."
+)
 
 # Provider environment variable to Weaviate header. Copied from
 # agent-skills/skills/weaviate/scripts/weaviate_conn.py. When both the
@@ -230,9 +235,12 @@ def url_passwords(url: str) -> list[str]:
 
 
 class MissingCredential(Exception):
-    def __init__(self, var: str) -> None:
+    """`hint` replaces the hint that names only `var`."""
+
+    def __init__(self, var: str, hint: str | None = None) -> None:
         super().__init__(f"{var} is not set")
         self.var = var
+        self.hint = hint
 
 
 @dataclass(frozen=True)
@@ -320,7 +328,9 @@ def _key(env: Mapping[str, str], name: str) -> str | None:
     A key is refused when it holds a character for which `str.isprintable()`
     is false, or when it has leading or trailing whitespace. Such a value
     reaches h11, whose error text shows the header value in an escaped form
-    that `redact` may not match. An empty or blank value is not set.
+    that `redact` may not match. A key with a character that is not ASCII is
+    refused too: httpx encodes a header value as ASCII and raises
+    UnicodeEncodeError. An empty or blank value is not set.
     """
     raw = env.get(name, "")
     value = raw.strip()
@@ -330,6 +340,12 @@ def _key(env: Mapping[str, str], name: str) -> str | None:
             f"Set {name} without control characters or leading and trailing "
             "whitespace.",
         )
+    if not value.isascii():
+        raise InvalidSetting(
+            f"{name} holds a character that is not ASCII.",
+            f"Set {name} again. A value pasted from formatted text can hold a "
+            "curly quote.",
+        )
     return value or None
 
 
@@ -338,15 +354,16 @@ def _is_chroma_cloud(host: str) -> bool:
 
 
 def chroma_settings(env: Mapping[str, str]) -> ChromaSettings:
+    url = _get(env, "CHROMA_URL")
     settings = ChromaSettings(
-        url=_get(env, "CHROMA_URL") or DEFAULT_CHROMA_URL,
+        url=url or DEFAULT_CHROMA_URL,
         api_key=_key(env, "CHROMA_API_KEY"),
         tenant=_get(env, "CHROMA_TENANT"),
         database=_get(env, "CHROMA_DATABASE"),
         token_header=_get(env, "CHROMA_TOKEN_HEADER") or DEFAULT_TOKEN_HEADER,
     )
     if settings.api_key is None and _is_chroma_cloud(settings.host):
-        raise MissingCredential("CHROMA_API_KEY")
+        raise MissingCredential("CHROMA_API_KEY", None if url else CLOUD_DEFAULT_HINT)
     return settings
 
 

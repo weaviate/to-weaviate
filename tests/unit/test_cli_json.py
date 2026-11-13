@@ -37,7 +37,12 @@ from to_weaviate.cli import app
 from to_weaviate.output import ERROR_EXIT, CliError
 from to_weaviate.plan import load_plan, save_plan
 from to_weaviate.sources.base import SourceNotCompacted
-from to_weaviate.sources.chroma.client import ChromaClient, ChromaError
+from to_weaviate.sources.chroma.client import (
+    COLLECTION_GONE_HINT,
+    NOT_JSON_HINT,
+    ChromaClient,
+    ChromaError,
+)
 from to_weaviate.target.connect import VersionUnreadable
 from to_weaviate.target.schema import collection_kwargs
 from to_weaviate.target.writer import WeaviateWriter
@@ -319,7 +324,7 @@ def test_secret_in_a_progress_line_of_verify_is_redacted():
 
 LONG_KEY = (
     "".join(chr(ord("a") + i * 7 % 26) for i in range(230))
-    + "é"
+    + "\\"
     + "".join(chr(ord("A") + i * 11 % 26) for i in range(230))
 )
 
@@ -376,6 +381,63 @@ def test_key_with_a_control_character_is_a_usage_error(cmd, var, mode):
         assert f"Error: {message}" in r.stderr
     for part in ("B5-MADE", "UP\\nKEY", "KEY-VALUE"):
         assert part not in r.output
+
+
+@pytest.mark.parametrize("mode", [[], ["--json"]])
+@pytest.mark.parametrize(
+    ("cmd", "var"),
+    [
+        (["check"], "WEAVIATE_API_KEY"),
+        (["check"], "OPENAI_API_KEY"),
+        (["inspect", "chroma", "--force"], "CHROMA_API_KEY"),
+    ],
+)
+def test_key_with_a_non_ascii_character_is_a_usage_error(cmd, var, mode):
+    key = "\u2018B5-MADE-UP-KEY-VALUE\u2019"
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    error = UnicodeEncodeError("ascii", key, 0, 1, "ordinal not in range(128)")
+    fakes.source_error = fakes.target_error = error
+    r = invoke(fakes, *cmd, *mode, TO_WEAVIATE_DEBUG="1", **{var: key})
+    assert r.exit_code == 2, r.output
+    message = f"{var} holds a character that is not ASCII."
+    if mode:
+        d = json.loads(r.stdout)
+        assert (d["code"], d["message"]) == ("usage", message)
+        assert "curly quote" in d["hint"]
+    else:
+        assert f"Error: {message}" in r.stderr
+    for part in ("B5-MADE", "KEY-VALUE", "\u2018", "\u2019"):
+        assert part not in r.output
+
+
+@pytest.mark.parametrize(
+    ("url", "hint"),
+    [
+        (
+            None,
+            "Set CHROMA_API_KEY in the environment or in .env. Without CHROMA_URL "
+            "the source is Chroma Cloud. For a self-hosted Chroma server, set "
+            "CHROMA_URL to its address.",
+        ),
+        (
+            "https://api.trychroma.com",
+            "Set CHROMA_API_KEY in the environment or in .env.",
+        ),
+    ],
+)
+def test_missing_chroma_key_hint_names_the_cloud_default(url, hint):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    r = invoke(
+        fakes, "inspect", "chroma", "--json", CHROMA_URL=url, CHROMA_API_KEY=None
+    )
+    assert r.exit_code == 3, r.output
+    d = json.loads(r.stdout)
+    assert (d["code"], d["message"], d["hint"]) == (
+        "missing_credential",
+        "CHROMA_API_KEY is not set",
+        hint,
+    )
 
 
 def test_url_password_is_not_stored_or_printed(tmp_path):
@@ -834,18 +896,48 @@ def test_auth_error_of_a_batch_does_not_repeat_the_server_text():
     )
 
 
+REFUSED = "will refuse it again"
+
+
 @pytest.mark.parametrize(
     ("error", "code", "named"),
     [
         (ChromaError(401, "bad key"), "auth_failed", "CHROMA_API_KEY"),
         (ChromaError(403, "forbidden"), "auth_failed", "CHROMA_API_KEY"),
-        (ChromaError(404, "no such tenant"), "source_unreachable", "CHROMA_URL"),
+        (ChromaError(403, "forbidden"), "auth_failed", "CHROMA_TOKEN_HEADER"),
+        (ChromaError(404, "Tenant [nope] not found"), "source_rejected", REFUSED),
+        (ChromaError(400, "Invalid where clause"), "source_rejected", REFUSED),
+        (ChromaError(405, "Method Not Allowed"), "source_rejected", REFUSED),
+        (ChromaError(409, "already exists"), "source_rejected", REFUSED),
+        (ChromaError(410, "The v1 API is deprecated"), "source_rejected", REFUSED),
+        (ChromaError(413, "length limit exceeded"), "source_rejected", REFUSED),
+        (ChromaError(415, "Expected request with"), "source_rejected", REFUSED),
+        (ChromaError(422, "expected u32"), "source_rejected", REFUSED),
+        (ChromaError(501, "Unimplemented"), "source_rejected", REFUSED),
+        (ChromaError(404, "gone", hint="inspect again"), "source_rejected", "inspect"),
+        (
+            ChromaError(200, "another id", hint=COLLECTION_GONE_HINT),
+            "source_rejected",
+            "inspect chroma --force",
+        ),
+        (
+            ChromaError(200, "the answer is not JSON", hint=NOT_JSON_HINT),
+            "source_unreachable",
+            "CHROMA_URL",
+        ),
+        (ChromaError(408, "request timeout"), "source_unreachable", "CHROMA_URL"),
+        (ChromaError(429, "rate limit"), "source_unreachable", "CHROMA_URL"),
+        (ChromaError(500, "boom"), "source_unreachable", "CHROMA_URL"),
+        (ChromaError(502, "bad gateway"), "source_unreachable", "CHROMA_URL"),
+        (ChromaError(503, "unavailable"), "source_unreachable", "CHROMA_URL"),
+        (ChromaError(504, "gateway timeout"), "source_unreachable", "CHROMA_URL"),
         (
             ChromaError(None, "ConnectError: refused"),
             "source_unreachable",
             "CHROMA_URL",
         ),
     ],
+    ids=lambda value: str(value.status) if isinstance(value, ChromaError) else None,
 )
 def test_source_errors_map_to_codes(error, code, named):
     fakes = FakeFactories(FakeSource(cli_records(10)), source_error=error)
@@ -853,6 +945,20 @@ def test_source_errors_map_to_codes(error, code, named):
     assert r.exit_code == ERROR_EXIT[code]
     d = json.loads(r.stdout)
     assert (d["status"], d["code"]) == ("error", code) and named in d["hint"]
+
+
+def test_a_rejected_source_request_exits_2_with_the_server_text():
+    error = ChromaError(400, "Invalid where clause")
+    fakes = FakeFactories(FakeSource(cli_records(10)), source_error=error)
+    r = invoke(fakes, "inspect", "chroma", "--json")
+    assert r.exit_code == 2, r.output
+    assert json.loads(r.stdout) == {
+        "status": "error",
+        "code": "source_rejected",
+        "message": "Chroma returned HTTP 400: Invalid where clause",
+        "hint": "Chroma refused the request and will refuse it again when the "
+        "command runs again. The message holds the reason.",
+    }
 
 
 @pytest.mark.parametrize(
@@ -1054,6 +1160,7 @@ def test_error_exit_covers_every_code():
         "missing_credential": 3,
         "auth_failed": 3,
         "source_unreachable": 4,
+        "source_rejected": 2,
         "target_unreachable": 4,
         "source_compacting": 4,
         "source_writing": 4,

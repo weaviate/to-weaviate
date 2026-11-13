@@ -23,9 +23,10 @@ def _assert_read_only_message(message: str) -> None:
     """The server's text for a READONLY shard depends on the replication factor.
 
     On one node the shard refuses the write itself. Above factor 1, the
-    coordinator of the write wraps the refusal of each replica. Both CI setups
-    set the factor to the node count. copy without --consistency writes with
-    the server's default, QUORUM.
+    coordinator of the write wraps the refusal of each replica. copy creates
+    the collection with min(3, nodes) replicas, which is the node count in both
+    CI setups. copy without --consistency writes with the server's default,
+    QUORUM.
     """
     if nodes() == 1:
         expected = f"{READ_ONLY_PREFIX}store is read-only due to: manually set by user"

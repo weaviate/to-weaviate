@@ -58,6 +58,7 @@ from to_weaviate.engine.check import (
     module_findings,
     plan_findings,
     provider_keys,
+    replication_findings,
     target_groups,
     userinfo_only,
     version_findings,
@@ -127,7 +128,11 @@ from to_weaviate.sources.base import (
     SourceCollection,
     SourceNotCompacted,
 )
-from to_weaviate.sources.chroma.client import ChromaClient, ChromaError
+from to_weaviate.sources.chroma.client import (
+    COLLECTION_GONE_HINT,
+    ChromaClient,
+    ChromaError,
+)
 from to_weaviate.sources.chroma.mapping import stored_embedding, vectorizer_for
 from to_weaviate.sources.chroma.source import ChromaSource
 from to_weaviate.state import (
@@ -144,11 +149,13 @@ from to_weaviate.target.deleter import DeleteFailed, Deleter, WeaviateDeleter
 from to_weaviate.target.reader import SOURCE_ID, TargetReader, WeaviateReader
 from to_weaviate.target.schema import (
     USERINFO_TEXT,
+    Created,
     PlanMismatch,
     PropertyRejected,
     Schema,
     SchemaRejected,
     WeaviateSchema,
+    auto_factor,
     nearest_grpc_status,
 )
 from to_weaviate.target.versions import MINIMUM_VERSION, version_text
@@ -194,6 +201,14 @@ UTF8_HINT = (
     "it again."
 )
 CHROMA_HINT = "Check CHROMA_URL and that the Chroma server is running."
+CHROMA_REJECTED_HINT = (
+    "Chroma refused the request and will refuse it again when the command runs "
+    "again. The message holds the reason."
+)
+# Chroma 0.5 and 0.6 answer 403 for a right token in the wrong header.
+CHROMA_TOKEN_HEADER_HINT = (
+    "If the server reads the token from another header, set CHROMA_TOKEN_HEADER."
+)
 CHANGED_HINT = "Stop the writes to the collection, then run the command again."
 NOT_COMPACTED_HINT = (
     "Stop the writes to the collection and run the command again once Chroma "
@@ -254,6 +269,10 @@ PRUNE_HINT = (
     "to the collection. To delete them, run to-weaviate sync --prune --force."
 )
 SYNC_BATCH_HINT = "Fix the cause and run to-weaviate sync again."
+PROVIDER_BUSY_HINT = (
+    "Wait for the provider's rate limit to reset or for the provider to "
+    "answer again, or lower --parallelism. Then run to-weaviate {command} again."
+)
 FOREIGN_HINT = (
     "Copy into another collection or tenant, or, when these objects may be "
     "deleted, run the same command with --yes."
@@ -320,6 +339,15 @@ def _version_unreadable(reported: str | None) -> CliError:
     return CliError("target_version_unsupported", message, NO_RELEASE_HINT)
 
 
+def _source_rejected(status: int) -> bool:
+    """Whether the source answers the same request with HTTP `status` again.
+
+    408, 429 and every 5xx but 501 can pass on a later run. A 3xx and a 200
+    that is not JSON stay source_unreachable: the address is not a Chroma API.
+    """
+    return status == 501 or (400 <= status < 500 and status not in (408, 429))
+
+
 def _as_cli_error(exc: Exception) -> CliError:
     """The CliError for `exc`. An exception outside the table is internal_error.
 
@@ -332,7 +360,7 @@ def _as_cli_error(exc: Exception) -> CliError:
         return CliError(
             "missing_credential",
             str(exc),
-            f"Set {exc.var} in the environment or in .env.",
+            exc.hint or f"Set {exc.var} in the environment or in .env.",
         )
     if isinstance(exc, InvalidSetting):
         return CliError("usage", str(exc), exc.hint)
@@ -385,10 +413,17 @@ def _as_cli_error(exc: Exception) -> CliError:
             refused = _refused("Chroma", "CHROMA_API_KEY", exc.status == 403)
             if exc.hint is not None:
                 refused.hint = exc.hint
+            if exc.status == 403:
+                refused.hint = f"{refused.hint} {CHROMA_TOKEN_HEADER_HINT}"
             return refused
         if exc.status is None:
             return CliError(
                 "source_unreachable", f"Chroma could not be reached: {exc}", CHROMA_HINT
+            )
+        # A collection created again under its name is reported with HTTP 200.
+        if _source_rejected(exc.status) or exc.hint == COLLECTION_GONE_HINT:
+            return CliError(
+                "source_rejected", str(exc), exc.hint or CHROMA_REJECTED_HINT
             )
         return CliError("source_unreachable", str(exc), exc.hint or CHROMA_HINT)
     if isinstance(exc, httpx.TransportError):
@@ -447,7 +482,12 @@ def _as_cli_error(exc: Exception) -> CliError:
             ADD_PROPERTY_HINT if isinstance(exc, PropertyRejected) else SCHEMA_HINT,
         )
     if isinstance(exc, BatchRefused):
-        return CliError("target_unreachable", str(exc), BATCH_HINT)
+        hint = BATCH_HINT
+        if exc.provider_busy:
+            hint = (
+                PROVIDER_BUSY_HINT.format(command="copy") + " It resumes at this page."
+            )
+        return CliError("target_unreachable", str(exc), hint)
     if isinstance(exc, PlanMismatch):
         return CliError(
             "plan_mismatch",
@@ -948,6 +988,10 @@ def _check(factories: _Factories, directory: Path, json_output: bool) -> None:
             Finding("missing_property", name, f"property {prop}: {MISSING_TEXT}")
             for prop in schema.missing_properties(group)
         )
+    factors = {name: schema.replication_factor(group) for name, group in groups.items()}
+    found = replication_findings(groups, schema.nodes(), factors)
+    errors.extend(found[0])
+    warnings.extend(found[1])
     if errors:
         raise _plan_errors(errors, warnings)
     lines = _findings_text(errors, warnings)
@@ -1153,6 +1197,7 @@ class _Run:
     events: Events
     targets: dict[str, Target]
     added: list[dict[str, str]]
+    created: list[dict[str, Any]]
 
 
 @contextmanager
@@ -1253,8 +1298,24 @@ def _writing(
                     fields=_findings_document([], warnings),
                 )
             added: list[dict[str, str]] = []
+            created: list[dict[str, Any]] = []
+
+            def report(made: Created) -> None:
+                _info(json_output, _created_text(made))
+                created.append(
+                    {
+                        "collection": made.name,
+                        "replication_factor": made.factor,
+                        "chosen_by": made.chosen_by,
+                        "nodes": made.nodes,
+                    }
+                )
+                finding = _server_factor_finding(made)
+                if finding is not None:
+                    warnings.append(finding)
+
             for name, group in selected.items():
-                schema.ensure(group)
+                schema.ensure(group, report)
                 for prop in missing[name]:
                     _info(json_output, f"Added the property {prop} to {name}")
                     added.append({"collection": name, "property": prop})
@@ -1271,9 +1332,57 @@ def _writing(
                 Events(directory / EVENTS_FILE),
                 targets,
                 added,
+                created,
             )
         finally:
             state.close()
+
+
+def _created_text(made: Created) -> str:
+    if made.chosen_by == "plan":
+        return f"Created {made.name} with replication factor {made.factor}"
+    if made.chosen_by == "nodes":
+        nodes = _plural(made.nodes or 0, "node")
+        return f"Created {made.name} with replication factor {made.factor} ({nodes})"
+    if made.nodes is None:
+        reason = "the API key may not read the nodes of the cluster"
+    else:
+        reason = (
+            f"Weaviate refused replication factor {auto_factor(made.nodes)}: "
+            f"{made.refused}"
+        )
+    return (
+        f"Created {made.name} without a replication factor, because {reason}; "
+        f"the server chose replication factor {made.factor}"
+    )
+
+
+def _server_factor_finding(made: Created) -> Finding | None:
+    """A warning when the server chose a factor that `auto` would not send."""
+    if made.chosen_by != "server":
+        return None
+    if made.nodes is None:
+        code = "unknown_node_count"
+        cause = (
+            "the API key may not read the nodes of the cluster, so the server "
+            f"chose replication factor {made.factor} for the new collection"
+        )
+    elif made.factor < auto_factor(made.nodes):
+        code = "low_replication_factor"
+        cause = (
+            f"Weaviate refused replication factor {auto_factor(made.nodes)} and "
+            f"the server chose replication factor {made.factor} for the new "
+            f"collection on a cluster of {_plural(made.nodes, 'node')}"
+        )
+    else:
+        return None
+    return Finding(
+        code,
+        made.name,
+        f"{cause}. Weaviate cannot raise it through the schema. For another "
+        "factor, delete the collection, set replication_factor to a number in "
+        "the plan and copy it again with another --dir",
+    )
 
 
 def _interactive() -> bool:
@@ -1398,6 +1507,7 @@ def _copy(
             row["reread_from"] = rereads[row["ref"]]
     document, text = _progress_output(run.entries, rows)
     document["added_properties"] = run.added
+    document["created_collections"] = run.created
     document["warnings"] = _findings_document([], run.warnings)["warnings"]
     text = "\n".join([*_findings_text([], run.warnings), text])
     rejects = sum(row["rejects"] for row in rows)
@@ -1513,6 +1623,7 @@ def _sync(
             results[ref] = result
     document, text = _sync_output(run.entries, results, prune)
     document["added_properties"] = run.added
+    document["created_collections"] = run.created
     document["warnings"] = _findings_document([], run.warnings)["warnings"]
     text = "\n".join([*_findings_text([], run.warnings), text])
     refused = [
@@ -1560,7 +1671,10 @@ def _sync_error(
             f"Run {command} again.",
             fields={"collection": entry.source.name},
         )
-    return CliError("target_unreachable", str(exc), SYNC_BATCH_HINT)
+    hint = SYNC_BATCH_HINT
+    if exc.provider_busy:
+        hint = PROVIDER_BUSY_HINT.format(command="sync")
+    return CliError("target_unreachable", str(exc), hint)
 
 
 def _status(directory: Path, json_output: bool) -> None:

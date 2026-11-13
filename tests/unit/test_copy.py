@@ -1,6 +1,7 @@
 import hashlib
 import json
 import math
+from collections import Counter
 from dataclasses import replace
 
 import pytest
@@ -23,6 +24,7 @@ from to_weaviate.sources.base import (
     SourceNotCompacted,
 )
 from to_weaviate.state import State
+from to_weaviate.target.writer import to_object
 
 
 def make_records(n: int, start: int = 0) -> list[Record]:
@@ -456,6 +458,354 @@ def test_a_copy_in_progress_in_an_older_state_resumes_without_a_reread(
     assert _warnings(tmp_path) == []
 
 
+class RefusesCall(FakeWriter):
+    """FakeWriter whose call numbered `refused` raises and stores nothing."""
+
+    refused: int | None = None
+
+    def write(self, entry, objects):
+        if self.calls + 1 == self.refused:
+            self.calls += 1
+            raise RuntimeError("connection reset")
+        return super().write(entry, objects)
+
+
+def _stopped_run(
+    src: FakeSource, state: State, writer: FakeWriter, read_to: list[int]
+) -> None:
+    """The state and target of a run that stopped with partition i read to `read_to[i]`.
+
+    One partition per item of `read_to`. An offset equal to the partition's
+    start leaves it not started, and one equal to its stop finishes it.
+    """
+    state.init_collection(C.ref, src.partitions(C, len(read_to)), C.count)
+    for partition, end in zip(state.partitions(C.ref), read_to, strict=True):
+        records = src.records[int(partition.start or 0) : end]
+        if not records:
+            continue
+        writer.write(ENTRY, [to_object(r, ENTRY) for r in records])
+        state.advance(
+            C.ref,
+            partition.key,
+            None if str(end) == partition.stop else str(end),
+            len(records),
+            last_id=records[-1].id,
+            previous_id=records[-2].id,
+        )
+
+
+def _delete(src: FakeSource, *numbers: int) -> None:
+    gone = {f"id-{n}" for n in numbers}
+    src.records = [r for r in src.records if r.id not in gone]
+
+
+def _missing(src: FakeSource, writer: FakeWriter) -> list[str]:
+    return [r.id for r in src.records if to_uuid(r.id) not in writer.objects]
+
+
+def _written_twice(writer: FakeWriter) -> set[str]:
+    twice = {u for u, n in writer.writes_per_uuid.items() if n > 1}
+    return {f"id-{n}" for n in range(1000) if to_uuid(f"id-{n}") in twice}
+
+
+def test_a_resume_after_a_deletion_below_the_cursor_skips_no_record(
+    src, state, events, tmp_path
+):
+    writer = RefusesCall()
+    writer.refused = 3
+    with pytest.raises(RuntimeError, match="connection reset"):
+        copy_collection(src, writer, state, events, ENTRY, C, 1)
+    # The run stopped at offset 200. id-50 was copied.
+    _delete(src, 50)
+    writer.refused = None
+    result = copy_collection(src, writer, state, events, ENTRY, C, 1)
+    assert _missing(src, writer) == []
+    assert set(writer.writes_per_uuid.values()) == {1}
+    assert result == CopyResult(copied=1000, rejects=0, written=800)
+    assert _warnings(tmp_path) == []
+
+
+def test_a_resume_checks_every_pending_partition(src, state, events, tmp_path):
+    writer = FakeWriter()
+    # 0-250 finished, 250-500 stopped at 400, 500-750 not started, 750-1000
+    # stopped at 850. id-10 is in the finished partition.
+    _stopped_run(src, state, writer, [250, 400, 500, 850])
+    _delete(src, 10)
+    result = copy_collection(src, writer, state, events, ENTRY, C, 4)
+    assert _missing(src, writer) == []
+    # id-750 moved from the last partition, which read it, into 500-750.
+    assert _written_twice(writer) == {"id-750"}
+    assert result.reread_from is None and _warnings(tmp_path) == []
+
+
+def test_a_partition_that_never_started_is_checked_against_the_one_before(
+    src, state, events, tmp_path
+):
+    writer = FakeWriter()
+    _stopped_run(src, state, writer, [250, 250, 500, 750])
+    # id-250, the first record of 250-500, moves to offset 249.
+    _delete(src, 100)
+    result = copy_collection(src, writer, state, events, ENTRY, C, 4)
+    assert _missing(src, writer) == []
+    assert set(writer.writes_per_uuid.values()) == {1}
+    assert result.reread_from is None and _warnings(tmp_path) == []
+
+
+def test_a_resume_follows_a_shift_to_below_the_start_of_its_partition(
+    src, state, events, tmp_path
+):
+    writer = FakeWriter()
+    _stopped_run(src, state, writer, [250, 300, 500, 750])
+    # id-299, the last record that 250-500 read, moves to offset 149.
+    _delete(src, *range(150))
+    result = copy_collection(src, writer, state, events, ENTRY, C, 4)
+    assert _missing(src, writer) == []
+    assert set(writer.writes_per_uuid.values()) == {1}
+    assert result.reread_from is None and _warnings(tmp_path) == []
+
+
+@pytest.mark.parametrize("deleted", [399, 398], ids=["last", "previous"])
+def test_a_deleted_mark_makes_the_partition_read_from_the_end_of_the_one_before(
+    src, state, events, tmp_path, deleted
+):
+    writer = FakeWriter()
+    _stopped_run(src, state, writer, [250, 400, 500, 750])
+    _delete(src, deleted)
+    result = copy_collection(src, writer, state, events, ENTRY, C, 4)
+    assert _missing(src, writer) == []
+    # id-249, the last record of 0-250, is still at offset 249.
+    assert result.reread_from == 250 and _warnings(tmp_path) == []
+    # The records of 250-500 read again are counted once.
+    assert result.copied == 999
+
+
+def test_a_deleted_mark_after_a_pending_partition_reads_from_the_partition_start(
+    src, state, events, tmp_path
+):
+    writer = FakeWriter()
+    _stopped_run(src, state, writer, [100, 400, 500, 750])
+    _delete(src, 399)
+    reads = src.read_calls
+    result = copy_collection(src, writer, state, events, ENTRY, C, 4)
+    assert _missing(src, writer) == []
+    assert result.reread_from == 250 and _warnings(tmp_path) == []
+    # 2 pages of 0-250, 3 pages each of the other partitions, 1 of the tail.
+    assert src.read_calls - reads == 12
+    assert result.copied == 999
+
+
+def test_a_deleted_mark_of_the_first_partition_reads_from_the_start(
+    src, state, events, tmp_path
+):
+    writer = FakeWriter()
+    _stopped_run(src, state, writer, [100, 250, 500, 750])
+    _delete(src, 99)
+    warned: list[str] = []
+    result = copy_collection(
+        src, writer, state, events, ENTRY, C, 4, warn=warned.append
+    )
+    assert _missing(src, writer) == []
+    assert result.reread_from == 0 and result.copied == 999
+    assert [(e["event"], e["message"]) for e in _warnings(tmp_path)] == [
+        ("source_changed", SOURCE_CHANGED)
+    ]
+    assert warned == [SOURCE_CHANGED]
+
+
+def test_reread_from_stays_0_when_a_later_tail_reads_again_from_above(
+    src, state, events, tmp_path
+):
+    writer = FakeWriter()
+    _stopped_run(src, state, writer, [100, 500, 750, 1000])
+    # Without id-99, 0-250 reads from offset 0. Without id-999, the tail
+    # reads again from after id-749.
+    _delete(src, 99, 999)
+    result = copy_collection(src, writer, state, events, ENTRY, C, 4)
+    assert _missing(src, writer) == []
+    assert result.reread_from == 0
+    assert state.partitions(C.ref)[-1].start == "749"
+
+
+def test_a_run_warns_once_when_a_partition_and_the_tail_read_from_the_start(
+    src, state, events, tmp_path
+):
+    _stopped_run(src, state, FakeWriter(), [100])
+    src.records = []
+    warned: list[str] = []
+    result = copy_collection(
+        src, FakeWriter(), state, events, ENTRY, C, 1, warn=warned.append
+    )
+    assert result.reread_from == 0
+    assert [e["event"] for e in _warnings(tmp_path)] == ["source_changed"]
+    assert warned == [SOURCE_CHANGED]
+
+
+def test_a_run_stopped_after_the_check_and_before_a_page_checks_again(
+    src, state, events, tmp_path
+):
+    writer = RefusesCall()
+    _stopped_run(src, state, writer, [250, 400, 500, 750])
+    _delete(src, 399)
+    writer.refused = writer.calls + 1
+    with pytest.raises(RuntimeError, match="connection reset"):
+        copy_collection(src, writer, state, events, ENTRY, C, 1)
+    # 250-500 keeps its cursor and its mark. Its count is 0, because the
+    # stopped run was going to read its records again.
+    assert [(part.key, cursor) for part, cursor in state.pending(C.ref)] == [
+        ("250-500", "400"),
+        ("500-750", None),
+        ("750-1000", None),
+    ]
+    assert state.last_ids(C.ref)["250-500"] == "id-399"
+    assert state.progress()[0].copied == 250
+    writer.refused = None
+    result = copy_collection(src, writer, state, events, ENTRY, C, 4)
+    assert _missing(src, writer) == []
+    assert result.reread_from == 250 and result.copied == 999
+    assert _warnings(tmp_path) == []
+
+
+@pytest.mark.parametrize("deleted", [[], [10]], ids=["added", "deleted and added"])
+def test_a_resume_copies_the_records_added_since_the_stop(
+    src, state, events, tmp_path, deleted
+):
+    writer = FakeWriter()
+    _stopped_run(src, state, writer, [250, 400, 500, 850])
+    _delete(src, *deleted)
+    src.records.extend(make_records(50, start=1000))
+    result = copy_collection(src, writer, state, events, ENTRY, C, 4)
+    assert _missing(src, writer) == []
+    # After the deletion, id-750 moved into 500-750 and is written again.
+    assert _written_twice(writer) == ({"id-750"} if deleted else set())
+    assert result.copied == 1050 + len(deleted)
+    assert result.reread_from is None and _warnings(tmp_path) == []
+    assert state.progress()[0].total == 1050 - len(deleted)
+
+
+def test_a_stopped_tail_is_checked_on_resume(src, state, events, tmp_path):
+    writer = RefusesCall()
+    copy_collection(src, writer, state, events, ENTRY, C, 2)
+    src.records.extend(make_records(250, start=1000))
+    writer.refused = writer.calls + 2
+    with pytest.raises(RuntimeError, match="connection reset"):
+        copy_collection(src, writer, state, events, ENTRY, C, 2)
+    # The tail stopped at offset 1100.
+    _delete(src, 50)
+    writer.refused = None
+    result = copy_collection(src, writer, state, events, ENTRY, C, 2)
+    assert _missing(src, writer) == []
+    assert set(writer.writes_per_uuid.values()) == {1}
+    assert result.reread_from is None and _warnings(tmp_path) == []
+
+
+@pytest.mark.parametrize("deleted", [50, 999], ids=["below", "mark"])
+def test_a_tail_stopped_before_its_first_page_is_checked_on_resume(
+    src, state, events, tmp_path, deleted
+):
+    writer = RefusesCall()
+    copy_collection(src, writer, state, events, ENTRY, C, 2)
+    src.records.extend(make_records(250, start=1000))
+    writer.refused = writer.calls + 1
+    with pytest.raises(RuntimeError, match="connection reset"):
+        copy_collection(src, writer, state, events, ENTRY, C, 2)
+    assert state.pending(C.ref) == [(Partition("1000-", "1000", None), None)]
+    # The tail got the mark of the record below its start when it was added.
+    assert state.last_ids(C.ref)["1000-"] == "id-999"
+    _delete(src, deleted)
+    writer.refused = None
+    copy_collection(src, writer, state, events, ENTRY, C, 2)
+    assert _missing(src, writer) == []
+
+
+def test_a_partition_read_again_by_another_keeps_no_mark(state, events):
+    src = FakeSource(make_records(7), page_size=1)
+    writer = RefusesCall()
+
+    def run(refused: int | None = None) -> CopyResult:
+        writer.refused = None if refused is None else writer.calls + refused
+        collection = replace(C, count=len(src.records))
+        return copy_collection(src, writer, state, events, ENTRY, collection, 1)
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        run(refused=5)
+    src.records.extend(make_records(3, start=7))
+    with pytest.raises(RuntimeError, match="connection reset"):
+        run(refused=6)
+    # 0-7 is finished. The tail 7- stopped at offset 9.
+    assert state.pending(C.ref) == [(Partition("7-", "7", None), "9")]
+    _delete(src, 2, 7)
+    # id-8, the mark of the tail, has no id-7 below it: the tail reads from 0.
+    assert run() == CopyResult(copied=8, rejects=0, reread_from=0, written=8)
+    assert state.last_ids(C.ref) == {"7-": "id-9"}
+    assert state.previous_ids(C.ref) == {"7-": "id-8"}
+    _delete(src, 1, 3, 9)
+    src.records.extend(make_records(3, start=10))
+    result = run()
+    assert _missing(src, writer) == []
+    assert result.copied == len(src.records) == 8
+
+
+def test_a_search_for_a_mark_starts_at_the_source_count(src, state, events):
+    writer = FakeWriter()
+    _stopped_run(src, state, writer, [250, 400, 500, 850])
+    _delete(src, *range(100, 1000))
+    copy_collection(src, writer, state, events, ENTRY, C, 1)
+    assert _missing(src, writer) == []
+    # 250-500, 750-1000 and the tail each read one id page for the check and
+    # one for the search below offset 100.
+    assert src.id_reads == 3 * 2
+
+
+def test_a_resume_of_an_unchanged_source_costs_one_id_read_per_checked_partition(
+    src, state, events
+):
+    writer = FakeWriter()
+    _stopped_run(src, state, writer, [250, 400, 500, 850])
+    result = copy_collection(src, writer, state, events, ENTRY, C, 4)
+    # 250-500 and 750-1000 check their own mark. 500-750 follows a pending
+    # partition and reads no id. The last id read is the check before the tail.
+    assert Counter(src.calls) == {
+        "wait_compacted": 1,
+        "ids_at": 2 + 1,
+        "read": 1 + 3 + 2,
+        "count": 1,
+    }
+    assert set(writer.writes_per_uuid.values()) == {1}
+    assert result == CopyResult(copied=1000, rejects=0, written=500)
+
+
+def test_a_resume_checks_a_partition_that_never_started_with_one_id_read(
+    src, state, events
+):
+    writer = FakeWriter()
+    _stopped_run(src, state, writer, [250, 250, 500, 750])
+    copy_collection(src, writer, state, events, ENTRY, C, 4)
+    # 250-500 checks the mark of 0-250. The partitions after it follow a
+    # pending partition.
+    assert src.id_reads == 1 + 1 and src.read_calls == 9
+    assert set(writer.writes_per_uuid.values()) == {1}
+
+
+@pytest.mark.parametrize("fresh", [False, True])
+def test_a_copy_from_the_start_reads_no_id_before_its_pages(state, events, fresh):
+    src = FakeSource(make_records(1000))
+    copy_collection(src, FakeWriter(), state, events, ENTRY, C, 4, fresh=fresh)
+    pages = sum(
+        math.ceil((int(part.stop) - int(part.start)) / src.page_size)
+        for part in src.partitions(C, 4)
+    )
+    # The one id read is the check before the tail.
+    assert src.calls == ["wait_compacted", *["read"] * pages, "count", "ids_at"]
+
+
+def test_a_fresh_copy_over_a_stopped_run_reads_no_id_before_its_pages(
+    src, state, events
+):
+    _stopped_run(src, state, FakeWriter(), [250, 400, 500, 850])
+    copy_collection(src, FakeWriter(), state, events, ENTRY, C, 4, fresh=True)
+    assert src.calls == ["wait_compacted", *["read"] * 12, "count", "ids_at"]
+
+
 def test_parallelism_is_bounded(state, events):
     src = FakeSource(make_records(1000), read_delay=0.005)
     # Partitions stored by an earlier run with parallelism 8.
@@ -543,6 +893,15 @@ def test_plan_hash_ignores_the_reason_of_a_dropped_key():
 def test_plan_hash_ignores_a_field_set_to_its_default():
     explicit = ENTRY.target.model_copy(update={"tenant": None, "dropped": []})
     assert plan_hash(ENTRY.model_copy(update={"target": explicit})) == plan_hash(ENTRY)
+
+
+@pytest.mark.parametrize("factor", ["auto", 1, 3])
+def test_plan_hash_ignores_the_replication_factor(factor):
+    document = ENTRY.target.model_dump(mode="json")
+    document.pop("replication_factor", None)
+    without = ENTRY.model_copy(update={"target": p.TargetPlan.model_validate(document)})
+    target = ENTRY.target.model_copy(update={"replication_factor": factor})
+    assert plan_hash(ENTRY.model_copy(update={"target": target})) == plan_hash(without)
 
 
 def test_plan_hash_follows_the_target_and_not_the_source():

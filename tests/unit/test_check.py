@@ -1,3 +1,4 @@
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -10,6 +11,7 @@ from to_weaviate.engine.check import (
     module_findings,
     plan_findings,
     provider_keys,
+    replication_findings,
     target_groups,
     version_findings,
 )
@@ -117,6 +119,83 @@ def test_keep_model_mismatch_for_a_plan_drafted_without_the_model(
     plan = plan_of(entry([keep(old_vectorizer)], embedding=embedding))
     errors, _ = plan_findings(plan, None, vectorizer_for)
     assert [e.code for e in errors] == ["keep_model_mismatch"]
+
+
+def _openai(model: str, **config: Any) -> dict[str, Any]:
+    return {
+        "type": "known",
+        "name": "openai",
+        "config": {"model_name": model, **config},
+    }
+
+
+ADA_002 = "text-embedding-ada-002"
+V3_SMALL = "text-embedding-3-small"
+PROXY = "https://proxy.example.com"
+
+
+@pytest.mark.parametrize(
+    ("embedding", "options", "codes"),
+    [
+        (_openai(ADA_002), {"model": "ada"}, []),
+        (_openai(ADA_002), {"model": ADA_002}, ["keep_model_mismatch"]),
+        (_openai(ADA_002), {"model": V3_SMALL}, ["keep_model_mismatch"]),
+        (
+            _openai(ADA_002, api_base=PROXY + "/v1"),
+            {"model": ADA_002, "base_url": PROXY},
+            [],
+        ),
+        (_openai(V3_SMALL), {"model": V3_SMALL}, []),
+        (_openai(V3_SMALL), {"model": "ada"}, ["keep_model_mismatch"]),
+    ],
+)
+def test_keep_model_for_openai_ada_002(embedding, options, codes):
+    vectorizer = p.VectorizerPlan(module="text2vec-openai", options=options)
+    plan = plan_of(entry([keep(vectorizer)], embedding=embedding))
+    errors, _ = plan_findings(plan, None, vectorizer_for)
+    assert [e.code for e in errors] == codes
+
+
+def test_keep_model_names_ada_as_the_same_model_as_ada_002():
+    vectorizer = p.VectorizerPlan(module="text2vec-openai", options={"model": ADA_002})
+    plan = plan_of(entry([keep(vectorizer)], embedding=_openai(ADA_002)))
+    errors, _ = plan_findings(plan, None, vectorizer_for)
+    assert [e.code for e in errors] == ["keep_model_mismatch"]
+    text = errors[0].message
+    assert "ada is Weaviate's name for text-embedding-ada-002" in text
+    assert "set model: ada" in text
+    assert "run inspect again" in text
+    assert "embed mode" not in text
+
+
+def test_keep_model_keeps_the_embed_hint_for_another_openai_model():
+    vectorizer = p.VectorizerPlan(module="text2vec-openai", options={"model": V3_SMALL})
+    plan = plan_of(entry([keep(vectorizer)], embedding=_openai(ADA_002)))
+    errors, _ = plan_findings(plan, None, vectorizer_for)
+    assert "embed mode" in errors[0].message
+
+
+def test_keep_model_accepts_ada_set_by_hand_for_ada_002_with_a_base_url():
+    # Weaviate refuses text-embedding-ada-002 for a base URL that holds
+    # api.openai.com outside the host. The plan then needs model: ada.
+    base = "https://proxy.example.com/api.openai.com"
+    vectorizer = p.VectorizerPlan(
+        module="text2vec-openai", options={"model": "ada", "base_url": base}
+    )
+    plan = plan_of(
+        entry([keep(vectorizer)], embedding=_openai(ADA_002, api_base=base + "/v1"))
+    )
+    errors, _ = plan_findings(plan, None, vectorizer_for)
+    assert errors == []
+
+
+def test_keep_model_passes_for_the_drafted_openai_ada_002_vectorizer():
+    embedding = _openai(ADA_002)
+    drafted, _ = vectorizer_for(embedding)
+    errors, _ = plan_findings(
+        plan_of(entry([keep(drafted)], embedding=embedding)), None, vectorizer_for
+    )
+    assert errors == []
 
 
 def test_module_findings_accept_the_legacy_google_name():
@@ -687,3 +766,172 @@ def test_a_version_that_cannot_be_read_is_a_warning_not_an_error(version, report
             )
         ],
     )
+
+
+def factor_entry(
+    factor: Any, tenant: str = "a", name: str = "Docs"
+) -> p.CollectionPlan:
+    made = tenant_entry(tenant)
+    target = made.target.model_copy(update={"replication_factor": factor, "name": name})
+    return made.model_copy(update={"target": target})
+
+
+def replication(
+    made: p.CollectionPlan, nodes: int | None, existing: int | None
+) -> tuple[list[Finding], list[Finding]]:
+    return replication_findings(target_groups([made]), nodes, {"Docs": existing})
+
+
+@pytest.mark.parametrize(("nodes", "factor"), [(1, 2), (2, 3), (3, 5)])
+def test_a_factor_above_the_node_count_is_an_error(nodes, factor):
+    errors, warnings = replication(factor_entry(factor), nodes, None)
+    assert errors == [
+        Finding(
+            "too_few_nodes",
+            "Docs",
+            f"replication_factor {factor} needs {factor} nodes and the cluster "
+            f"has {nodes}; lower replication_factor or set it to auto",
+        )
+    ]
+    assert warnings == []
+
+
+@pytest.mark.parametrize(("nodes", "factor"), [(1, 1), (3, 3), (5, 3), (3, 1)])
+def test_a_factor_up_to_the_node_count_has_no_finding(nodes, factor):
+    assert replication(factor_entry(factor), nodes, None) == ([], [])
+
+
+def test_a_factor_without_a_readable_node_count_is_a_warning():
+    errors, warnings = replication(factor_entry(3), None, None)
+    assert errors == []
+    assert warnings == [
+        Finding(
+            "unknown_node_count",
+            "Docs",
+            "check could not compare replication_factor 3 with the node count: "
+            "the API key may not read the nodes of the cluster",
+        )
+    ]
+
+
+@pytest.mark.parametrize("nodes", [1, None])
+def test_a_factor_is_not_compared_with_the_nodes_when_the_collection_exists(nodes):
+    assert replication(factor_entry(3), nodes, 3) == ([], [])
+
+
+@pytest.mark.parametrize("nodes", [2, 3, 5])
+def test_auto_warns_about_an_existing_collection_with_factor_1_on_more_nodes(nodes):
+    errors, warnings = replication(factor_entry("auto"), nodes, 1)
+    assert errors == []
+    assert warnings == [
+        Finding(
+            "not_replicated",
+            "Docs",
+            f"the collection exists with replication factor 1 and the cluster "
+            f"has {nodes} nodes; copy does not change the factor of an existing "
+            "collection. To replicate it, delete the collection and copy it "
+            "again with another --dir; copy then creates it with replication "
+            f"factor {min(nodes, 3)}",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("nodes", "existing"), [(1, 1), (None, 1), (3, 2), (3, 3), (3, None)]
+)
+def test_auto_has_no_finding_otherwise(nodes, existing):
+    assert replication(factor_entry("auto"), nodes, existing) == ([], [])
+
+
+def test_auto_without_a_readable_node_count_warns_about_a_new_collection():
+    errors, warnings = replication(factor_entry("auto"), None, None)
+    assert errors == []
+    assert warnings == [
+        Finding(
+            "unknown_node_count",
+            "Docs",
+            "the API key may not read the nodes of the cluster, so copy sends no "
+            "replication factor and the server chooses it. Set replication_factor "
+            "to a number, or give the key the permission to read the nodes",
+        )
+    ]
+
+
+def test_entries_of_one_collection_with_other_factors_conflict():
+    plan = plan_of(
+        factor_entry("auto", "a"), factor_entry(3, "b"), factor_entry("auto", "c")
+    )
+    errors, _ = plan_findings(plan, None, vectorizer_for)
+    assert errors == [
+        Finding(
+            "conflicting_replication_factor",
+            "Docs",
+            "replication_factor auto in docs -> Docs (tenant a), 3 in docs -> Docs "
+            "(tenant b); copy creates collection Docs with the factor of the "
+            "first entry, so give every entry of Docs the same replication_factor",
+        )
+    ]
+
+
+@pytest.mark.parametrize("factor", ["auto", 2])
+def test_entries_of_one_collection_with_one_factor_do_not_conflict(factor):
+    plan = plan_of(
+        factor_entry(factor, "a"),
+        factor_entry(factor, "b"),
+        factor_entry(3, "c", name="Other"),
+    )
+    assert plan_findings(plan, None, vectorizer_for)[0] == []
+
+
+def sampled(types: dict[str, int]) -> dict[str, SourceCollection]:
+    inspected = inspected_as(["title"], [])
+    fields = [FieldStats("title", types)]
+    return {"r": replace(inspected["r"], fields=fields)}
+
+
+@pytest.mark.parametrize(
+    ("kind", "types"),
+    [
+        ("int", {"int": 3, "large_int": 2}),
+        ("number", {"large_int": 2}),
+        ("int[]", {"large_int[]": 2}),
+        ("number[]", {"int[]": 3, "large_int": 2}),
+    ],
+)
+def test_an_int_property_for_a_key_with_ints_above_2_to_the_53_is_a_warning(
+    kind, types
+):
+    typed = prop("title").model_copy(update={"type": kind})
+    plan = plan_of(with_target(entry([keep()]), properties=[ID_PROPERTY, typed]))
+    errors, warnings = plan_findings(plan, sampled(types), voyage_mapper)
+    assert errors == []
+    assert warnings == [
+        Finding(
+            "large_ints",
+            "Docs",
+            "key title has ints above 2**53 in magnitude in the inspected sample "
+            f"and type {kind} cannot hold them exactly; copy rejects each record "
+            "that has one. Set the type to text, or text[] for a list. An "
+            "existing collection keeps its property types: to change one, copy "
+            "with another --dir into a target name that does not exist, or "
+            "delete the collection first.",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kind", "types", "inspected"),
+    [
+        ("text", {"large_int": 2}, True),
+        ("text[]", {"large_int[]": 2}, True),
+        ("int", {"int": 5}, True),
+        ("int", {"large_int": 2}, False),
+    ],
+)
+def test_other_types_and_samples_give_no_large_int_warning(kind, types, inspected):
+    typed = prop("title").model_copy(update={"type": kind})
+    plan = plan_of(with_target(entry([keep()]), properties=[ID_PROPERTY, typed]))
+    errors, warnings = plan_findings(
+        plan, sampled(types) if inspected else None, voyage_mapper
+    )
+    assert errors == [] and warnings == []

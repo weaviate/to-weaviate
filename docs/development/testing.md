@@ -6,9 +6,9 @@ each failure with the right exit code. They run at three levels.
 
 | Level | Where | Servers | Runs in CI |
 |---|---|---|---|
-| Unit | `tests/unit/` | None. Fakes stand in for the source and Weaviate. | Yes, on Python 3.10 and 3.13 |
-| Acceptance, API | `tests/acceptance/` | A real source and a real Weaviate, reached only through the `to-weaviate` command and the server APIs | Yes |
-| Acceptance, infra | `tests/acceptance/`, marker `infra` | Also restarts or deletes a server through Docker or kubectl | Yes |
+| Unit | `tests/unit/` | None. Fakes stand in for the source and Weaviate. | Yes, on Python 3.10, 3.13 and 3.14 |
+| Acceptance, API | `tests/acceptance/` | A real source and a real Weaviate, reached only through the `to-weaviate` command and the server APIs | On pull requests and releases |
+| Acceptance, infra | `tests/acceptance/`, marker `infra` | Also restarts or deletes a server through Docker or kubectl | On pull requests and releases |
 
 The API level also runs against a Weaviate Cloud cluster with
 `make acceptance-cloud`, by hand before a release. See
@@ -35,7 +35,7 @@ pieces are `tests/acceptance/conftest.py` and `tests/e2e.py`.
 ## Not covered
 
 - Chroma Cloud. No test account exists. The unit tests cover the tool's side
-  with fakes, and the CI job `acceptance (cluster)` covers distributed
+  with fakes, and the `cluster` setup of CI covers distributed
   Chroma, which Chroma Cloud runs. Its quotas, rate limits and sharded
   collections stay untested.
 - A Weaviate Cloud sandbox cluster, and Weaviate versions other than
@@ -148,22 +148,61 @@ values to every child process, and the target refuses them.
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every pull request and every push to
-`main`:
+`.github/workflows/ci.yml` runs these jobs:
 
-| Job | What it runs |
-|---|---|
-| `lint` | `pre-commit run --all-files`: ruff, ruff-format, mypy |
-| `unit` | `pytest tests/unit` on Python 3.10 and 3.13 |
-| `acceptance (single)` | The acceptance suite against one Weaviate node and the single-node Chroma |
-| `acceptance (cluster)` | The acceptance suite against three Weaviate nodes with replication factor 3 and distributed Chroma |
+| Job | What it runs | Pull request | Push to `main` | Manual run |
+|---|---|---|---|---|
+| `lint` | `pre-commit run --all-files`: ruff, ruff-format, mypy | Yes | Yes | Yes |
+| `unit` | `pytest tests/unit` on Python 3.10, 3.13 and 3.14 | Yes | Yes | Yes |
+| `unit (lowest deps)` | `pytest tests/unit` on Python 3.10 with the lower bound of each dependency in `pyproject.toml` | Yes | Yes | Yes |
+| `acceptance` | Both acceptance setups, through `.github/workflows/acceptance-suites.yml` | Yes | No | Yes |
 
-Both acceptance jobs run Weaviate in a kind cluster with `ASYNC_INDEXING`.
+A manual run is "Run workflow" on the CI workflow page, or
+`gh workflow run ci.yml --ref <branch>`. `.github/workflows/release.yml`
+runs the `unit` and the `acceptance` job on the tagged commit. See [Releasing](releasing.md).
+
+Every job except `unit (lowest deps)` installs the versions in `uv.lock` with
+`uv sync --locked --extra test`, which fails when `uv.lock` does not match
+`pyproject.toml`. The mypy hook is the exception inside `lint`: pre-commit
+installs the packages in `additional_dependencies` of
+`.pre-commit-config.yaml`, not the versions in `uv.lock`. Those entries carry
+the bounds of `pyproject.toml`.
+
+The `acceptance` job has two setups. Each runs Weaviate in a kind cluster
+with `ASYNC_INDEXING`.
+
+| Setup | Servers | Check that holds its result |
+|---|---|---|
+| `single` | One Weaviate node and the single-node Chroma | `acceptance / single / run` |
+| `cluster` | Three Weaviate nodes with replication factor 3 and distributed Chroma | `acceptance / cluster / run` |
+
 The tests in `tests/acceptance/chroma/test_cluster.py` run in the `cluster`
-job only. Each job uploads its JUnit XML as the artifact
+setup only. Each setup uploads its JUnit XML as the artifact
 `acceptance-junit-single` or `acceptance-junit-cluster`.
 `test_copy_during_compaction` records its measurements there as test
 properties.
+
+### The images of the cluster setup
+
+Chroma publishes its `query-service` and `compactor-service` images built
+with AVX-512. Part of GitHub's `ubuntu-latest` runners have a CPU without it,
+and both services exit with SIGILL there. The `cluster` setup uses builds of
+the same Chroma release without AVX-512, from two private packages of the
+repository: `chroma-query-service` and `chroma-compactor-service`.
+`tests/acceptance/chroma-k8s.sh` pins each by its digest.
+
+To move to another Chroma release, run the `Chroma images` workflow with the
+release tag. It takes about an hour. Its summary lists the two digests. Set
+`CHROMA_TAG`, `CHROMA_COMMIT` and the two digests in `chroma-k8s.sh`.
+
+A pull request from a fork cannot read the packages, so the `cluster` setup
+does not run there. The check `acceptance / cluster (not run on a fork)`
+says so with a warning. Before the merge, push the commits to a branch of
+`weaviate/to-weaviate` and run the `ci` workflow on it:
+
+```bash
+gh workflow run ci.yml --ref <branch>
+```
 
 ## Writing tests
 

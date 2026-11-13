@@ -573,3 +573,69 @@ def test_draft_notes_a_source_without_vectors(count, dimension, vectors, noted):
     source = replace(make(), count=count, dimension=dimension)
     entry = draft_plan(SRC, [source], vectors).collections[0]
     assert (NO_VECTORS_NOTE in entry.notes) is noted
+
+
+def test_the_draft_writes_the_replication_factor_auto(tmp_path):
+    plan = draft_plan(SRC, [make()], "keep")
+    assert target(plan).replication_factor == "auto"
+    save_plan(plan, tmp_path / "p.yaml")
+    saved = yaml.safe_load((tmp_path / "p.yaml").read_text())
+    assert saved["collections"][0]["target"]["replication_factor"] == "auto"
+
+
+def test_a_plan_without_a_replication_factor_loads_as_auto(tmp_path):
+    save_plan(draft_plan(SRC, [make()], "keep"), tmp_path / "p.yaml")
+    document = yaml.safe_load((tmp_path / "p.yaml").read_text())
+    document["collections"][0]["target"].pop("replication_factor", None)
+    (tmp_path / "p.yaml").write_text(yaml.safe_dump(document))
+    assert target(load_plan(tmp_path / "p.yaml")).replication_factor == "auto"
+
+
+@pytest.mark.parametrize("value", ["auto", 1, 3, 7])
+def test_replication_factor_accepts_auto_and_an_integer_from_1(value):
+    made = TargetPlan(name="A", vectors=[], properties=[], replication_factor=value)
+    assert made.replication_factor == value
+    assert type(made.replication_factor) is type(value)
+
+
+@pytest.mark.parametrize("value", [0, -1, True, False, "3", "AUTO", "none", 2.0, None])
+def test_replication_factor_refuses_other_values(value):
+    with pytest.raises(ValidationError) as e:
+        TargetPlan(name="A", vectors=[], properties=[], replication_factor=value)
+    assert [error["msg"] for error in e.value.errors()] == [
+        f"Value error, replication_factor={value!r} is not valid; use auto or an "
+        "integer of at least 1"
+    ]
+
+
+LARGE_INT_NOTE = (
+    "key {key} holds ints above 2**53 in magnitude, which Weaviate would store "
+    "rounded as int or number; the property is typed {type} and holds the "
+    "decimal digits"
+)
+
+
+def test_draft_types_a_key_with_an_int_above_2_to_the_53_as_text_and_notes_it():
+    fields = [
+        FieldStats("hash", {"large_int": 10}),
+        FieldStats("mixed", {"int": 9, "large_int": 1}),
+        FieldStats("stamps", {"large_int[]": 10}),
+        FieldStats("year", {"int": 10}),
+    ]
+    entry = draft_plan(SRC, [make(fields=fields)], "keep").collections[0]
+    drafted = {
+        x.source_key: (x.type, x.tokenization, x.range_filters, x.coerced_from)
+        for x in entry.target.properties
+        if not x.source_key.startswith("#")
+    }
+    assert drafted == {
+        "hash": ("text", "field", False, ["large_int"]),
+        "mixed": ("text", "field", False, ["int", "large_int"]),
+        "stamps": ("text[]", "field", False, ["large_int[]"]),
+        "year": ("int", None, True, []),
+    }
+    assert entry.notes == [
+        LARGE_INT_NOTE.format(key="hash", type="text"),
+        LARGE_INT_NOTE.format(key="mixed", type="text"),
+        LARGE_INT_NOTE.format(key="stamps", type="text[]"),
+    ]

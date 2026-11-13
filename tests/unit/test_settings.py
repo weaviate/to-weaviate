@@ -21,10 +21,22 @@ def test_chroma_defaults():
     assert s.url == "https://api.trychroma.com" and s.token_header == "x-chroma-token"
 
 
-def test_cloud_url_requires_key():
+@pytest.mark.parametrize("env", [{}, {"CHROMA_URL": "  "}])
+def test_cloud_url_requires_key(env):
     with pytest.raises(MissingCredential) as e:
-        chroma_settings({})
+        chroma_settings(env)
     assert e.value.var == "CHROMA_API_KEY"
+    assert e.value.hint == (
+        "Set CHROMA_API_KEY in the environment or in .env. Without CHROMA_URL "
+        "the source is Chroma Cloud. For a self-hosted Chroma server, set "
+        "CHROMA_URL to its address."
+    )
+
+
+def test_cloud_url_that_is_set_keeps_the_default_hint():
+    with pytest.raises(MissingCredential) as e:
+        chroma_settings({"CHROMA_URL": "https://api.trychroma.com"})
+    assert e.value.var == "CHROMA_API_KEY" and e.value.hint is None
 
 
 def test_custom_url_needs_no_key():
@@ -89,8 +101,28 @@ def test_key_with_a_control_character_is_refused(var, value):
 
 @pytest.mark.parametrize("var", KEY_VARIABLES)
 @pytest.mark.parametrize(
+    "value", ["made\u2019up", "\u201cmade-up\u201d", "mad\u00e9-up"]
+)
+def test_key_with_a_non_ascii_character_is_refused(var, value):
+    env = {
+        "WEAVIATE_URL": "http://localhost:8099",
+        "WEAVIATE_GRPC_URL": "localhost:50099",
+        var: value,
+    }
+    load = chroma_settings if var == "CHROMA_API_KEY" else weaviate_settings
+    with pytest.raises(InvalidSetting) as e:
+        load(env)
+    assert str(e.value) == f"{var} holds a character that is not ASCII."
+    assert e.value.hint == (
+        f"Set {var} again. A value pasted from formatted text can hold a curly "
+        "quote."
+    )
+
+
+@pytest.mark.parametrize("var", KEY_VARIABLES)
+@pytest.mark.parametrize(
     ("value", "expected"),
-    [("made up", "made up"), ("madé-up", "madé-up"), ("", None), (" \n ", None)],
+    [("made up", "made up"), ("made~up!", "made~up!"), ("", None), (" \n ", None)],
 )
 def test_key_without_a_control_character_is_kept(var, value, expected):
     env = {
@@ -112,6 +144,20 @@ def test_environ_wins_over_dotenv(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text("WEAVIATE_URL=from-file\n")
     monkeypatch.setenv("WEAVIATE_URL", "from-env")
     assert load_env(tmp_path)["WEAVIATE_URL"] == "from-env"
+
+
+def test_dotenv_keeps_a_hash_inside_a_value_and_drops_a_trailing_comment(
+    tmp_path, monkeypatch
+):
+    # python-dotenv below 0.10.5 cuts the key at the "#" or keeps the comment.
+    monkeypatch.delenv("WEAVIATE_API_KEY", raising=False)
+    monkeypatch.delenv("WEAVIATE_URL", raising=False)
+    (tmp_path / ".env").write_text(
+        "WEAVIATE_API_KEY=abc#def\nWEAVIATE_URL=http://host:8099 # local\n"
+    )
+    env = load_env(tmp_path)
+    assert env["WEAVIATE_API_KEY"] == "abc#def"
+    assert env["WEAVIATE_URL"] == "http://host:8099"
 
 
 @pytest.mark.parametrize(

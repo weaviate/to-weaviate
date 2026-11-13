@@ -73,19 +73,35 @@ exit 2, `invalid_plan`. A warning does not stop `copy` or `sync`.
 - An existing collection whose settings differ from the plan
   (`plan_mismatch`).
 - Plan entries that share a collection, one tenant each, with different
-  vectors, different settings for a shared property, or property names that
-  differ only in case. See
+  vectors, a different `replication_factor`
+  (`conflicting_replication_factor`), different settings for a shared
+  property, or property names that differ only in case. See
   [Edits you can make](plan-file.md#edits-you-can-make).
+- A `replication_factor` above the node count of the cluster, for a
+  collection that does not exist yet (`too_few_nodes`). See
+  [replication](weaviate.md#replication).
 - Warnings: `missing_property` (an existing collection lacks a planned
   property; `copy` adds it), `coerced_keys` (a metadata key with mixed types
-  whose values `copy` converts), `quantizer_training` (a trained
-  quantizer whose training limit is above the record count of the source),
-  and `server_version_unknown` (the server reported no version that can be
-  compared, so the minimum versions of the plan settings were not checked).
+  whose values `copy` converts), `large_ints` (an `int` or `number` property
+  for a key that holds ints above 2**53, which `copy`
+  [rejects](plan-file.md#types-and-conversion)), `quantizer_training` (a
+  trained quantizer whose training limit is above the record count of the
+  source), `not_replicated` (with `replication_factor: auto`, an existing
+  collection has factor 1 on a cluster of more than one node),
+  `unknown_node_count` (the key may not read the nodes, so `check` did not
+  compare a planned factor with the node count, or `auto` has no node count
+  for a collection that does not exist yet), and `server_version_unknown`
+  (the server reported no version that can be compared, so the minimum
+  versions of the plan settings were not checked).
 
 ## `copy`
 
 `copy` creates the target collections, then copies the records page by page.
+It prints the [replication factor](weaviate.md#replication) of each
+collection it creates and lists them under `created_collections` in its JSON
+document. With `replication_factor: auto`, it warns when the server chose the
+factor and the key may not read the nodes (`unknown_node_count`), or the
+factor is below the one that `auto` sent (`low_replication_factor`).
 
 | Option | Effect |
 |---|---|
@@ -110,19 +126,33 @@ operating system releases the lock when the process ends. On a system without
 ### Records added or deleted between runs
 
 Each run also copies the records added to the source since the last run. It
-finds its place from the last two records the previous run read:
+finds its place from the last two records the previous run read. A run that
+continues a stopped copy does the same for each part of the collection that
+is not finished, before it reads that part's next page:
 
 - When deletions in the source moved those records, the run finds them at
-  their new position and reads what follows.
-- When one of them is gone, the run reads again from an earlier record.
-  When it finds no earlier record either, it reads from the start and warns
-  "the source changed since the last run; re-reading from the start".
+  their new position and reads what follows. After a stopped copy, a record
+  that the deletions moved from one part of the collection into another can
+  be written twice, unchanged, and is then counted twice as copied.
+- When one of them is gone, the run reads again from a lower position: after
+  the last two records of an earlier finished part, when it finds them. When
+  it finds none, an unfinished part reads again from the end of the nearest
+  unfinished part before it. When there is no such part, the run reads from
+  the start of the collection and warns, once per collection, "the source
+  changed since the last run; re-reading from the start".
+  A part that copies records added after the first run reads from the start
+  of the collection when one of its own last two records is gone.
   Records read again are written again unchanged.
-  The JSON document of such a run gives the position it read from as
-  `reread_from`.
+  The JSON document of such a run gives the lowest position it read again
+  from as `reread_from`.
 - When the two records were deleted and added back with the same ids, the run
-  cannot tell them apart from the originals and can skip the records added in
-  between. Run the full `verify` after the last copy of a source that changed.
+  cannot tell them apart from the originals. It can then skip records that
+  no run copied: the records added in between, and after a stopped copy also
+  records that were not read yet. It gives no warning. The `ids` check of the
+  full `verify` names the skipped records, and `sync` writes them. The
+  `count` check alone can miss them when Weaviate still holds objects of
+  deleted records. Run the full `verify` after the last copy of a source
+  that changed.
 
 ### Rejects
 
@@ -140,19 +170,41 @@ the last `sync` and of the `copy` runs after it.
 `copy` retries a transient error: a network error, a timeout, HTTP 429,
 500, 502, 503 or 504, and the matching gRPC statuses. It tries up to 7 times
 and waits 15.75 s to 31.5 s in total between the attempts. A `Retry-After`
-header from the source raises each wait to its value, up to 30 s. It also
-retries:
+header from the source raises each wait to its value, up to 30 s. The
+Weaviate client also retries a gRPC `UNAVAILABLE` answer inside each attempt,
+for 15 s on a write and 63 s on a read. While Weaviate answers `UNAVAILABLE`,
+`copy` can therefore wait about 2 minutes on a write and about 8 minutes on a
+read before it stops. It also retries:
 
 - a batch of more than one object in which Weaviate refused every object. A
   batch of one refused object is a reject, unless the error is about a node
-  outage;
+  outage or a busy model provider. When a model provider answered an object
+  of the batch with another status than 401, 403, 429 or 5xx, `copy` does
+  not retry the batch. It sends the objects one by one;
 - an object that Weaviate refused with an error about a node, a shard or a
-  deadline, as it does while a node restarts.
+  deadline, as it does while a node restarts;
+- an object that Weaviate could not embed because the model provider
+  answered HTTP 429 or 5xx, or because the provider's rate limit resets too
+  late for the batch. Weaviate does not repeat that request itself. The
+  objects of the batch that Weaviate stored are not sent again. Another
+  answer of the provider, such as HTTP 400, makes the object a reject at once.
 
 When the retries run out, `copy` stops with `source_unreachable` or
 `target_unreachable`, exit 4, and stores no reject. The next run starts at
-that page. A refused API key is not retried: `copy` stops with
-`auth_failed`, exit 3.
+that page. A provider that still answers 429 or 5xx after the retries also
+ends the run with `target_unreachable`, and the message holds the provider's
+status: wait for the rate limit to reset, or lower `--parallelism`, then run
+`copy` again. `copy` has no option that skips a page or a record. While the
+provider answers a record of a page with 5xx, every run stops at that page.
+The message holds the provider's status and text. It does not hold the id of
+the record. Read the provider's text for the cause and solve it at the
+provider. To copy the other collections in the meantime, run `copy` with
+`--collection` for each of them. A refused API key is not retried: `copy`
+stops with `auth_failed`, exit 3. Another request that the source refuses,
+with HTTP 501 or a 4xx status other than 408 and 429, is not retried either:
+`copy` stops with `source_rejected`, exit 2, because the same request is
+refused again until an input changes. HTTP 408 is not retried either: `copy`
+stops with `source_unreachable`, exit 4.
 
 ### Existing collections and the recorded target
 
@@ -309,6 +361,18 @@ The JSON document is under [JSON output](#json-output).
 | `ids` | The full list of ids on both sides. It counts the missing and the extra ids and names up to 20 of each. |
 | `records` | A random sample of records: every property, and each kept source vector, rounded to float32, within 1e-5. |
 
+A sampled record that the plan rejects is not compared. When the target
+holds no object for it, `records` counts it under `rejects skipped`. When
+the target holds one, the record counts as differing, and the detail gives
+the reason of the reject. The object was written under another plan or
+before the record changed. Fix the cause of the reject and run `sync`.
+
+An existing collection keeps its property types, so a reject that needs
+another property type is not fixed by an edit of `plan.yaml`: `sync` stops
+with `plan_mismatch`. Copy into a new collection instead. Use another
+`--dir`, and give the target a name that does not exist, or delete the
+collection first.
+
 A failed check exits 1, `verification_failed`. Its detail names the cause,
 and the fix where there is one. Extra objects with a `source_id` lost their
 source record, and `sync --prune` deletes them. Extra objects without a
@@ -392,6 +456,14 @@ A successful `copy`:
   ],
   "total": 700,
   "added_properties": [],
+  "created_collections": [
+    {
+      "collection": "Docs_cosine",
+      "replication_factor": 3,
+      "chosen_by": "nodes",
+      "nodes": 3
+    }
+  ],
   "warnings": [
     {
       "code": "coerced_keys",
@@ -424,9 +496,18 @@ A successful `sync --prune`:
     }
   ],
   "added_properties": [],
+  "created_collections": [],
   "warnings": []
 }
 ```
+
+`created_collections` lists the collections that the run created. `chosen_by`
+is `plan` for a factor of the plan, `nodes` for the factor that `auto` took
+from the node count `nodes`, and `server` when the request sent no factor.
+`server` has two cases. With `nodes` `null`, the key may not read the nodes.
+With a number in `nodes`, the server refused the factor that `auto` took from
+that node count. `nodes` is also `null` for `plan`: the run does not read the
+node count for a factor of the plan.
 
 `copied` counts the records written; `unchanged` the records whose stored
 hash matched. The `prune_limit` and `rejects` error documents hold the same
@@ -440,7 +521,7 @@ The exit code is the same with and without `--json`.
 |---|---|---|
 | 0 | Success | |
 | 1 | Rejected records, a failed verification, or a collection with more than 10% stale objects that `sync --prune` left alone | `rejects`, `verification_failed`, `prune_limit` |
-| 2 | Usage error, invalid plan, a state of another target, a state file that cannot be read, a directory that cannot be written, a first run into a collection with objects that `sync --prune` would delete, not confirmed, or a Weaviate server that is older than 1.27.0 or reports no release version | `usage`, `invalid_plan`, `plan_mismatch`, `target_rejected_schema`, `state_mismatch`, `invalid_state`, `directory_unwritable`, `foreign_objects`, `target_version_unsupported` |
+| 2 | Usage error, invalid plan, a state of another target, a state file that cannot be read, a directory that cannot be written, a request that the source refused and refuses again until an input changes, a first run into a collection with objects that `sync --prune` would delete, not confirmed, or a Weaviate server that is older than 1.27.0 or reports no release version | `usage`, `invalid_plan`, `plan_mismatch`, `target_rejected_schema`, `state_mismatch`, `invalid_state`, `directory_unwritable`, `source_rejected`, `foreign_objects`, `target_version_unsupported` |
 | 3 | Missing credential or authentication failure | `missing_credential`, `auth_failed` |
 | 4 | Source or target unreachable, a source collection that the source compacted during the read or did not finish compacting, a source still written to during `sync --prune`, or a deletion that Weaviate did only partly | `source_unreachable`, `target_unreachable`, `source_compacting`, `source_writing`, `delete_failed` |
 | 5 | Internal error | `internal_error` |

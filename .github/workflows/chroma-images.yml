@@ -1,0 +1,91 @@
+name: Chroma images
+
+# Builds Chroma's query-service and compactor-service without AVX-512 and
+# pushes them to ghcr.io. Chroma publishes both images built with
+# ENABLE_AVX512=1, and they stop with SIGILL on a runner whose CPU lacks
+# avx512f. tests/acceptance/chroma-k8s.sh pins the images this workflow
+# pushes. Run it once per Chroma version, then update the pins there. The
+# packages stay private: only workflows of this repository pull them.
+
+on:
+  workflow_dispatch:
+    inputs:
+      chroma_version:
+        description: Chroma release tag, for example 1.5.9
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: chroma-images-${{ inputs.chroma_version }}
+  cancel-in-progress: false
+
+env:
+  CHROMA_VERSION: ${{ inputs.chroma_version }}
+  REGISTRY: ghcr.io/weaviate/to-weaviate
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Check the version
+        run: |
+          if ! printf '%s' "$CHROMA_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::chroma_version must look like 1.5.9."
+            exit 1
+          fi
+      # The release build of Chroma's Rust workspace needs more disk than a
+      # runner has free.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune --all --force >/dev/null
+          df -h /
+      - name: Clone Chroma
+        run: |
+          git clone --quiet --depth 1 --branch "$CHROMA_VERSION" \
+            https://github.com/chroma-core/chroma.git chroma
+          echo "CHROMA_SHA=$(git -C chroma rev-parse HEAD)" >>"$GITHUB_ENV"
+      - name: Log in to ghcr.io
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      # Both targets share the builder stage, so the second build compiles
+      # nothing. ENABLE_AVX512 is left unset: the Dockerfile then adds no
+      # AVX-512 compiler flag.
+      - name: Build and push
+        run: |
+          : >digests.txt
+          while read -r name target; do
+            image="$REGISTRY/chroma-$name:$CHROMA_VERSION"
+            if docker manifest inspect "$image" >/dev/null 2>&1; then
+              echo "::notice::$image exists. Not built again."
+              docker pull --quiet "$image"
+            else
+              docker build chroma \
+                --file chroma/rust/Dockerfile \
+                --target "$target" \
+                --build-arg RELEASE_MODE=1 \
+                --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+                --label "org.opencontainers.image.description=Chroma $name $CHROMA_VERSION built without AVX-512" \
+                --label "org.opencontainers.image.revision=$CHROMA_SHA" \
+                --tag "$image"
+              docker push --quiet "$image"
+            fi
+            docker inspect --format '{{index .RepoDigests 0}}' "$image" >>digests.txt
+          done <<'EOF'
+          query-service query_service
+          compactor-service compaction_service
+          EOF
+      - name: Report the digests
+        run: |
+          {
+            echo "Chroma $CHROMA_VERSION, commit \`$CHROMA_SHA\`, built without AVX-512:"
+            echo
+            sed 's/^/- `/; s/$/`/' digests.txt
+          } >>"$GITHUB_STEP_SUMMARY"
+          cat digests.txt

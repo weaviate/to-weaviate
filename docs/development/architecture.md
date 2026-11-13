@@ -61,7 +61,7 @@ An arrow means "calls". Every layer imports the types of `plan.py` and
 | `target/versions.py` | `MINIMUM_VERSION`, `SETTING_MINIMUMS` (the oldest server version that applies each index and quantizer setting), and the parsing of a version text |
 | `target/schema.py` | Creates collections from the plan, compares an existing collection with it, updates quantizers, classifies transient errors |
 | `target/writer.py` | Record to Weaviate object or reject; chunks of at most 4 MiB by estimated size, an object above that alone, with retries |
-| `target/reader.py` | Reads objects back for `verify`; lists the uuid and `source_id` of every object for `verify`, `sync` and the first `copy` into an existing collection; tells whether a tenant is active |
+| `target/reader.py` | Reads objects back for `verify`; lists the uuid and `source_id` of every object for `verify`, `sync` and the first `copy` into an existing collection, 1000 per request, or 100 per request when the target refuses 1000 because its `QUERY_MAXIMUM_RESULTS` is lower; tells whether a tenant is active |
 | `target/deleter.py` | Deletes objects by uuid for `sync --prune`, 100 per request, with retries; raises `DeleteFailed` when a request deleted only some |
 
 ## How each command runs
@@ -78,7 +78,9 @@ provider key that a planned vectorizer needs. `engine/check.py` returns
 findings from the plan and `inspect.json`, and from the modules and the
 version that the target reports. `cli.py` adds the differences that `target/schema.py` finds in
 existing collections, and a `missing_property` warning for each planned
-property that an existing collection lacks. `check` writes nothing.
+property that an existing collection lacks. It reads the node count and the
+factor of each existing collection for `engine/check.replication_findings`.
+`check` writes nothing.
 
 **`copy`**:
 
@@ -91,13 +93,16 @@ property that an existing collection lacks. `check` writes nothing.
    not hold are there, `cli.py` warns, asks in a terminal, and stops with
    `foreign_objects` unless the answer is yes or `--yes` was given.
 2. `target/schema.ensure_collection` creates each target collection, or
-   compares the existing one with the plan and adds missing properties.
+   compares the existing one with the plan and adds missing properties. For
+   `replication_factor: auto` it reads the node count before it creates a
+   collection. `cli.py` prints the factor of each created collection.
 3. For each plan entry, `engine/copy.copy_collection`:
    - calls `Source.wait_compacted`, which returns a state, or `None` for a
      source without compaction;
    - splits the collection with `Source.partitions`, and reads the pending
      partitions with `Source.read` in a pool of `--parallelism` threads, one
-     task per partition;
+     task per partition. In a run that continues a stopped copy, each task
+     first checks the partition's stored position with `Source.ids_at`;
    - converts each page with `target/writer` and writes it, then advances
      the partition's position in `state.sqlite`;
    - reads `Source.count` again and copies the records added since in a tail
@@ -157,7 +162,7 @@ source conforms; nothing checks it at run time.
 | `inspect(namespaces, collections, sample_pages)` | `inspect`. The result goes to `inspect.json` and into the draft plan. |
 | `partitions(collection, parallelism)` | `copy`, once per collection in every run. `state.sqlite` keeps the partitions of the first run until a `sync` replaces them with its own. |
 | `read(collection, partition, cursor, with_vectors)` | `copy`, in a pool of `--parallelism` threads, one task per partition. Returns a `Page`; `next_cursor` `None` ends the partition. |
-| `ids_at(collection, offset, limit)`, `page_size` | `copy`, after the stored partitions finish: one call checks that no record before the end moved. After a move, `copy` reads ids backwards, `page_size` at a time, to find where the tail starts. |
+| `ids_at(collection, offset, limit)`, `page_size` | `copy`, after the stored partitions finish: one call checks that no record before the end moved. After a move, `copy` reads ids backwards, `page_size` at a time, to find where the tail starts. A run that continues a stopped copy makes the same check for each pending partition before its first page, from the thread of that partition: at most one call when nothing moved. After a move, that partition also reads ids backwards, `page_size` at a time, until it finds its place, down to offset 0 when the records it looks for are gone. A first or fresh copy makes no such call. |
 | `count(collection)` | `copy` (the live total and the tail), `sync` (the guard of `--prune`) and `verify` (the `count` check). |
 | `ids(collection)` | `verify`, the `ids` check, and `sync`, the stale objects. |
 | `get(collection, ids, with_vectors)` | `sync`: the records without a target object, and the stale records before `--prune` deletes their objects. |
@@ -174,13 +179,13 @@ source conforms; nothing checks it at run time.
 | `partitions` returns ranges of decimal offsets that cover `[0, count)`, each with a `stop`, and `[]` for an empty collection. | `engine/copy.py` parses the offsets to know what is copied. |
 | Cursors are decimal offsets. A tail partition (`stop` is `None`) reads until an empty page. | The tail starts where the last run ended. |
 | Records come in insertion order. A deletion moves later records one position down; an addition goes after the last record. | Resuming and finding new records depend on this order. |
-| `read` is safe to call from up to 8 threads for different partitions of one collection. | `copy --parallelism` runs up to 8 reads of one collection at once. |
+| `read` and `ids_at` are safe to call from up to 8 threads for different partitions of one collection. | `copy --parallelism` runs up to 8 reads of one collection at once, and each thread checks its partition's position with `ids_at`. |
 | A vector that holds a non-number arrives as NaN. | The engine turns such a record into a reject. |
 | `count` equals the number of records `read` returns and the number of ids `ids` lists. | `verify`'s `count` check compares it with Weaviate; `sync --prune` stops with `source_writing` when it differs from the listing. |
 | `get` returns the records of the ids it holds and leaves out the others. | `sync --prune` keeps the object of every record that `get` returns. |
 | `inspect` lists every metadata key in `fields`. | A key missing from the plan makes each record that has it a reject. |
 | Metadata values are `bool`, `int`, `float`, `str`, `None`, or lists of one of these. | `types.py` maps and converts only these. |
-| Errors are the source's own exception class, with a `status` and an optional `hint`. | `cli.py` maps them to `auth_failed` or `source_unreachable`. |
+| Errors are the source's own exception class, with a `status` and an optional `hint`. | `cli.py` maps them to `auth_failed`, `source_rejected` (a status that a later run gets again) or `source_unreachable`. |
 | Every `SourceCollection` field survives `dataclasses.asdict` to JSON and back. | `inspect.json` stores it. |
 
 A source that pages with an opaque cursor, such as a token or the last id,

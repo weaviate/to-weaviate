@@ -26,6 +26,7 @@ from to_weaviate.target.schema import (
     PROPERTY_TYPES,
     USERINFO_TEXT,
     PlanMismatch,
+    auto_factor,
     cleaned_options,
     collection_kwargs,
     module_names,
@@ -38,6 +39,7 @@ from to_weaviate.target.versions import (
     versioned_settings,
 )
 from to_weaviate.target.writer import unmapped_key_text
+from to_weaviate.types import has_large_int
 
 # Vectorizer module to the Weaviate header that carries its provider key and
 # the environment variable that `weaviate_settings` reads it from.
@@ -178,9 +180,11 @@ def _vector_difference(first: CollectionPlan, entry: CollectionPlan) -> str:
 
 
 def _shared_collection_findings(entries: list[CollectionPlan]) -> list[Finding]:
-    """Entries of one collection that disagree on its vectors or on a property.
+    """Entries of one collection that disagree on its vectors, its replication
+    factor or a property.
 
-    copy creates the collection with the vectors of the first entry, and each
+    copy creates the collection with the vectors and the replication factor of
+    the first entry, and each
     property with the settings of the first entry that has it. Entries may
     have properties that others lack, but no two names that differ only in
     case: the server compares them in lower case. Names that repeat within one
@@ -203,6 +207,26 @@ def _shared_collection_findings(entries: list[CollectionPlan]) -> list[Finding]:
                         f"so give every entry of {key} the same vectors",
                     )
                 )
+        other = next(
+            (
+                e
+                for e in group[1:]
+                if e.target.replication_factor != first.target.replication_factor
+            ),
+            None,
+        )
+        if other is not None:
+            out.append(
+                Finding(
+                    "conflicting_replication_factor",
+                    key,
+                    f"replication_factor {first.target.replication_factor} in "
+                    f"{_describe(first)}, {other.target.replication_factor} in "
+                    f"{_describe(other)}; copy creates collection {key} with the "
+                    f"factor of the first entry, so give every entry of {key} the "
+                    "same replication_factor",
+                )
+            )
         owners: dict[str, tuple[CollectionPlan, PropertyPlan]] = {}
         for entry in group:
             for prop in entry.target.properties:
@@ -387,16 +411,51 @@ def _vectorizers(plan: Plan) -> Iterator[tuple[CollectionPlan, VectorizerPlan]]:
                 yield entry, vector.vectorizer
 
 
+def _sampled_types(
+    entry: CollectionPlan,
+    key: str,
+    inspected: Mapping[str, SourceCollection] | None,
+) -> dict[str, int] | None:
+    collection = inspected.get(entry.source.ref) if inspected else None
+    for field in collection.fields if collection else []:
+        if field.key == key:
+            return field.types
+    return None
+
+
 def _type_counts(
     entry: CollectionPlan,
     key: str,
     inspected: Mapping[str, SourceCollection] | None,
 ) -> str | None:
-    collection = inspected.get(entry.source.ref) if inspected else None
-    for field in collection.fields if collection else []:
-        if field.key == key:
-            return ", ".join(f"{t}: {n}" for t, n in sorted(field.types.items()))
-    return None
+    types = _sampled_types(entry, key, inspected)
+    if types is None:
+        return None
+    return ", ".join(f"{t}: {n}" for t, n in sorted(types.items()))
+
+
+def _large_int_findings(
+    entry: CollectionPlan,
+    prop: PropertyPlan,
+    inspected: Mapping[str, SourceCollection] | None,
+) -> list[Finding]:
+    """An int or number property whose key had an int above 2**53 in the sample."""
+    if prop.type.removesuffix("[]") not in ("int", "number"):
+        return []
+    if not has_large_int(_sampled_types(entry, prop.source_key, inspected) or ()):
+        return []
+    return [
+        Finding(
+            "large_ints",
+            entry.target.name,
+            f"key {prop.source_key} has ints above 2**53 in magnitude in the "
+            f"inspected sample and type {prop.type} cannot hold them exactly; "
+            "copy rejects each record that has one. Set the type to text, or "
+            "text[] for a list. An existing collection keeps its property "
+            "types: to change one, copy with another --dir into a target name "
+            "that does not exist, or delete the collection first.",
+        )
+    ]
 
 
 def _coerced(
@@ -448,6 +507,10 @@ def _model(vectorizer: VectorizerPlan) -> str:
     return vectorizer.module if model is None else f"{vectorizer.module} {model}"
 
 
+# On OpenAI's endpoint Weaviate accepts this model only under the name `ada`.
+_OPENAI_ADA_002 = "text-embedding-ada-002"
+
+
 def _keep_model_findings(
     entry: CollectionPlan, vectorizer_for: VectorizerMapper
 ) -> list[Finding]:
@@ -469,14 +532,25 @@ def _keep_model_findings(
             source_model is None or planned.options.get("model") == source_model
         ):
             continue
+        hint = (
+            "use embed mode to re-vectorize the documents, or set the "
+            "vectorizer to the source model"
+        )
+        if planned.module == source.module == "text2vec-openai":
+            models = (source_model, planned.options.get("model"))
+            if models == (_OPENAI_ADA_002, "ada"):
+                continue
+            if models == ("ada", _OPENAI_ADA_002):
+                hint = (
+                    f"ada is Weaviate's name for {_OPENAI_ADA_002}; set model: "
+                    "ada, or run inspect again"
+                )
         out.append(
             Finding(
                 "keep_model_mismatch",
                 entry.target.name,
                 f"vector {vector.name} keeps vectors made by {_model(source)}, "
-                f"but queries would be vectorized with {_model(planned)}; use "
-                "embed mode to re-vectorize the documents, or set the "
-                "vectorizer to the source model",
+                f"but queries would be vectorized with {_model(planned)}; {hint}",
             )
         )
     return out
@@ -752,6 +826,73 @@ def version_findings(
     return errors, warnings
 
 
+def replication_findings(
+    groups: Mapping[str, list[CollectionPlan]],
+    nodes: int | None,
+    existing: Mapping[str, int | None],
+) -> tuple[list[Finding], list[Finding]]:
+    """Errors and warnings about the replication factor of each collection.
+
+    `nodes` is the node count of the cluster, None when the key may not read
+    it. `existing` maps a target name to the factor of its collection, None
+    when the collection does not exist. A planned factor that differs from the
+    one of an existing collection is a difference of `Schema.differences`.
+    """
+    errors: list[Finding] = []
+    warnings: list[Finding] = []
+    for name, group in groups.items():
+        planned = group[0].target.replication_factor
+        stored = existing.get(name)
+        if not isinstance(planned, int):
+            if stored == 1 and nodes is not None and nodes > 1:
+                warnings.append(
+                    Finding(
+                        "not_replicated",
+                        name,
+                        "the collection exists with replication factor 1 and the "
+                        f"cluster has {nodes} nodes; copy does not change the "
+                        "factor of an existing collection. To replicate it, delete "
+                        "the collection and copy it again with another --dir; copy "
+                        "then creates it with replication factor "
+                        f"{auto_factor(nodes)}",
+                    )
+                )
+            elif stored is None and nodes is None:
+                warnings.append(
+                    Finding(
+                        "unknown_node_count",
+                        name,
+                        "the API key may not read the nodes of the cluster, so "
+                        "copy sends no replication factor and the server chooses "
+                        "it. Set replication_factor to a number, or give the key "
+                        "the permission to read the nodes",
+                    )
+                )
+        elif stored is not None:
+            continue
+        elif nodes is None:
+            warnings.append(
+                Finding(
+                    "unknown_node_count",
+                    name,
+                    f"check could not compare replication_factor {planned} with "
+                    "the node count: the API key may not read the nodes of the "
+                    "cluster",
+                )
+            )
+        elif nodes < planned:
+            errors.append(
+                Finding(
+                    "too_few_nodes",
+                    name,
+                    f"replication_factor {planned} needs {planned} nodes and the "
+                    f"cluster has {nodes}; lower replication_factor or set it to "
+                    "auto",
+                )
+            )
+    return errors, warnings
+
+
 def userinfo_only(errors: list[Finding]) -> bool:
     """Whether every one of `errors` is a URL option that keeps its userinfo."""
     return bool(errors) and all(
@@ -820,6 +961,7 @@ def plan_findings(
                         _coerced(entry, prop, inspected),
                     )
                 )
+            warnings.extend(_large_int_findings(entry, prop, inspected))
         for dropped in entry.target.dropped:
             warnings.append(
                 Finding(

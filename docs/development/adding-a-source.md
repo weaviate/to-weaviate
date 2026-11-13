@@ -34,9 +34,12 @@ Chroma is the only source, so a few shared places name it. See
    the plan's `source` block.
 5. **Source selection.** Make `copy`, `sync` and `verify` build the source from the
    plan's `source.type`. See [where the code names Chroma](#where-the-code-names-chroma).
-6. **Errors.** Map the new exception class to `auth_failed` and
-   `source_unreachable` in `_as_cli_error` (`cli.py`), and write hints that
-   name the new variables.
+6. **Errors.** Map the new exception class in `_as_cli_error` (`cli.py`):
+   a refused credential to `auth_failed`, an error that a later run can get
+   past (network error, timeout, rate limit, server fault) to
+   `source_unreachable`, and a request that the source refuses again until
+   an input changes to `source_rejected`. Write hints that name the new
+   variables.
 7. **Unit tests.** Mirror the Chroma modules: `test_<name>_client.py`,
    `test_<name>_source.py`, `test_<name>_mapping.py`, and `test_cli_<name>.py`
    with a fake server behind `httpx.MockTransport` (see

@@ -1,8 +1,8 @@
 """Cases that need a Weaviate cluster of 3 nodes with replication factor 3.
 
-Two of them delete a pod with kubectl. They run in the cluster setup of CI,
-where REPLICATION_MINIMUM_FACTOR is 3, and skip on a cluster of fewer than
-3 nodes.
+Two of them delete a pod with kubectl. They run in the cluster setup of CI
+and skip on a cluster of fewer than 3 nodes. The server sets no minimum
+factor: copy creates each collection with `replication_factor: auto`.
 """
 
 import json
@@ -43,7 +43,7 @@ def _needs_three_nodes(_test_endpoints: None) -> None:
 
 
 TARGET = "Resume"
-# The REPLICATION_MINIMUM_FACTOR of the cluster setup of CI.
+# The factor that `replication_factor: auto` sends on 3 nodes or more.
 REPLICATION_FACTOR = 3
 NAMESPACE = "weaviate"
 POD = "weaviate-1"
@@ -169,8 +169,8 @@ def _delete_a_pod_during(
 def _assert_replicated(name: str) -> None:
     factor = weaviate_config(name).replication_config.factor
     assert factor == REPLICATION_FACTOR, (
-        f"{name} has replication factor {factor}; the cluster cases need "
-        f"REPLICATION_MINIMUM_FACTOR={REPLICATION_FACTOR} on the server"
+        f"{name} has replication factor {factor}; copy creates it with "
+        f"{REPLICATION_FACTOR} on a cluster of {nodes()} nodes"
     )
 
 
@@ -217,6 +217,14 @@ def test_copy_with_a_consistency_level_on_three_replicas(seeded, tmp_path, level
     assert r.exit_code == 0, r
     r = run(["copy", "--consistency", level], tmp_path)
     assert r.exit_code == 0 and r.data["status"] == "success", r
+    assert r.data["created_collections"] == [
+        {
+            "collection": TARGET,
+            "replication_factor": REPLICATION_FACTOR,
+            "chosen_by": "nodes",
+            "nodes": nodes(),
+        }
+    ], r
     _assert_replicated(TARGET)
     assert weaviate_count(TARGET) == count("resume")
     r = run(["verify"], tmp_path)

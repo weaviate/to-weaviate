@@ -25,7 +25,7 @@ from to_weaviate.sources.base import (
     Sample,
     SourceCollection,
 )
-from to_weaviate.target.schema import PlanMismatch
+from to_weaviate.target.schema import Created, PlanMismatch, auto_factor
 from to_weaviate.target.writer import Reject, TargetObject, WeaviateWriter
 from to_weaviate.types import SPARSE_VECTOR, value_type
 
@@ -514,6 +514,13 @@ class FakeSchema:
     records them in `added`. `enable_trained_quantizers` records (target
     name, tenant) and raises `update_error` when it is set. `version` is
     the version text that the server reports.
+
+    `node_count` is what `nodes` returns; None is a key that may not read
+    the nodes. `factors` holds the replication factor of each collection; a
+    collection without one has `server_factor`, which is also what a
+    collection gets when `ensure` creates it without a node count. With
+    `refuse_factor`, the server refuses the factor of an `auto` plan with
+    that message.
     """
 
     def __init__(
@@ -523,7 +530,15 @@ class FakeSchema:
         ensure_error: Exception | None = None,
         update_error: Exception | None = None,
         version: str | None = "1.40.4",
+        node_count: int | None = 1,
+        factors: dict[str, int] | None = None,
+        server_factor: int = 1,
+        refuse_factor: str | None = None,
     ) -> None:
+        self.refuse_factor = refuse_factor
+        self.node_count = node_count
+        self.factors = dict(factors or {})
+        self.server_factor = server_factor
         self.enabled = set(modules)
         self.server_version = version
         self.existing = dict(existing or {})
@@ -550,7 +565,33 @@ class FakeSchema:
         planned = dict.fromkeys(p.name for e in group for p in e.target.properties)
         return [name for name in planned if name not in stored]
 
-    def ensure(self, group: list[CollectionPlan]) -> Literal["created", "exists"]:
+    def nodes(self) -> int | None:
+        return self.node_count
+
+    def replication_factor(self, group: list[CollectionPlan]) -> int | None:
+        name = group[0].target.name
+        if name not in self.existing:
+            return None
+        return self.factors.get(name, self.server_factor)
+
+    def _create(self, group: list[CollectionPlan]) -> Created:
+        name = group[0].target.name
+        planned = group[0].target.replication_factor
+        if planned != "auto":
+            return Created(name, planned, "plan")
+        if self.node_count is None:
+            return Created(name, self.server_factor, "server")
+        if self.refuse_factor is not None:
+            return Created(
+                name, self.server_factor, "server", self.node_count, self.refuse_factor
+            )
+        return Created(name, auto_factor(self.node_count), "nodes", self.node_count)
+
+    def ensure(
+        self,
+        group: list[CollectionPlan],
+        created: Callable[[Created], None] | None = None,
+    ) -> Literal["created", "exists"]:
         if self.ensure_error is not None:
             raise self.ensure_error
         name = group[0].target.name
@@ -565,6 +606,10 @@ class FakeSchema:
         )
         if found is None:
             self.existing[name] = []
+            made = self._create(group)
+            self.factors[name] = made.factor
+            if created is not None:
+                created(made)
             return "created"
         return "exists"
 
