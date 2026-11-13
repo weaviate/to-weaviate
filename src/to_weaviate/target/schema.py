@@ -128,6 +128,10 @@ class Schema(Protocol):
 
     def modules(self) -> set[str]: ...
 
+    def version(self) -> str | None:
+        """The version text that the server reports; None without one."""
+        ...
+
     def differences(self, group: list[CollectionPlan]) -> list[str] | None: ...
 
     def missing_properties(self, group: list[CollectionPlan]) -> list[str]: ...
@@ -652,9 +656,20 @@ class WeaviateSchema:
     ) -> None:
         self._client = client
         self._sleep = sleep
+        self._meta: dict[str, Any] | None = None
+
+    def _server_meta(self) -> dict[str, Any]:
+        # One request serves `modules` and `version`.
+        if self._meta is None:
+            self._meta = self._client.get_meta()
+        return self._meta
 
     def modules(self) -> set[str]:
-        return set(self._client.get_meta().get("modules") or {})
+        return set(self._server_meta().get("modules") or {})
+
+    def version(self) -> str | None:
+        version = self._server_meta().get("version")
+        return version if isinstance(version, str) else None
 
     def differences(self, group: list[CollectionPlan]) -> list[str] | None:
         return differences(self._client, group)

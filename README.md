@@ -164,7 +164,8 @@ Weaviate Cloud cluster, set `WEAVIATE_URL` to the cluster URL and
 `WEAVIATE_API_KEY` to an API key of the cluster from the
 [Weaviate Cloud console](https://console.weaviate.cloud), and leave
 `WEAVIATE_GRPC_URL` unset. [Weaviate target](docs/weaviate.md) has the
-details.
+details. The server must run Weaviate 1.27.0 or later; see
+[Supported Weaviate versions](docs/weaviate.md#supported-weaviate-versions).
 
 ### Check and copy
 

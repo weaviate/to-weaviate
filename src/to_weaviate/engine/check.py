@@ -30,6 +30,12 @@ from to_weaviate.target.schema import (
     collection_kwargs,
     module_names,
 )
+from to_weaviate.target.versions import (
+    parse_version,
+    unmet_settings,
+    version_text,
+    versioned_settings,
+)
 from to_weaviate.target.writer import unmapped_key_text
 
 # Vectorizer module to the Weaviate header that carries its provider key and
@@ -683,6 +689,51 @@ def async_indexing_findings(
         for vector in group[0].target.vectors
         if vector.index.type == "dynamic"
     ]
+
+
+def version_findings(
+    groups: Mapping[str, list[CollectionPlan]], version: str | None
+) -> tuple[list[Finding], list[Finding]]:
+    """Errors for the settings that need a newer server than `version`.
+
+    `version` is the version text the server reports. When it cannot be
+    parsed, no setting is refused, and each collection with a setting that
+    has a minimum version gets a warning. `collection_kwargs` sends the
+    vectors of the first entry of a group.
+    """
+    server = parse_version(version)
+    errors: list[Finding] = []
+    warnings: list[Finding] = []
+    for name, group in groups.items():
+        vectors = group[0].target.vectors
+        if server is None:
+            settings = dict.fromkeys(
+                row.setting for v in vectors for row in versioned_settings(v.index)
+            )
+            if settings:
+                reported = "no version" if version is None else f"the version {version}"
+                warnings.append(
+                    Finding(
+                        "server_version_unknown",
+                        name,
+                        f"the server reports {reported}, which cannot be "
+                        "compared; the minimum Weaviate version of "
+                        f"{', '.join(settings)} was not checked",
+                    )
+                )
+            continue
+        errors.extend(
+            Finding(
+                "server_too_old",
+                name,
+                f"vector {vector.name}: {row.setting} needs Weaviate "
+                f"{version_text(row.minimum)} or later, and the server runs "
+                f"{version}; upgrade Weaviate or change the setting in plan.yaml",
+            )
+            for vector in vectors
+            for row in unmet_settings(vector.index, server)
+        )
+    return errors, warnings
 
 
 def userinfo_only(errors: list[Finding]) -> bool:

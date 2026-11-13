@@ -512,7 +512,8 @@ class FakeSchema:
     holds the property names of each collection that `ensure` created;
     `ensure` adds the planned properties that such a collection lacks and
     records them in `added`. `enable_trained_quantizers` records (target
-    name, tenant) and raises `update_error` when it is set.
+    name, tenant) and raises `update_error` when it is set. `version` is
+    the version text that the server reports.
     """
 
     def __init__(
@@ -521,8 +522,10 @@ class FakeSchema:
         existing: dict[str, list[str]] | None = None,
         ensure_error: Exception | None = None,
         update_error: Exception | None = None,
+        version: str | None = "1.40.4",
     ) -> None:
         self.enabled = set(modules)
+        self.server_version = version
         self.existing = dict(existing or {})
         self.ensure_error = ensure_error
         self.update_error = update_error
@@ -533,6 +536,9 @@ class FakeSchema:
 
     def modules(self) -> set[str]:
         return set(self.enabled)
+
+    def version(self) -> str | None:
+        return self.server_version
 
     def differences(self, group: list[CollectionPlan]) -> list[str] | None:
         return self.existing.get(group[0].target.name)

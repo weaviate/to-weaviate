@@ -37,6 +37,9 @@ ERROR_EXIT: dict[str, int] = {
     # The target holds objects that sync --prune would delete, and nobody
     # confirmed the run: the user decides, then runs it again with --yes.
     "foreign_objects": 2,
+    # The server is older than the client connects to. Not 4: the same
+    # command run again later fails the same way.
+    "target_version_unsupported": 2,
     "internal_error": 5,
 }
 

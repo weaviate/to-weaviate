@@ -10,6 +10,8 @@ from to_weaviate.engine.check import (
     module_findings,
     plan_findings,
     provider_keys,
+    target_groups,
+    version_findings,
 )
 from to_weaviate.sources.base import FieldStats, SourceCollection
 from to_weaviate.sources.chroma.mapping import vectorizer_for
@@ -596,3 +598,65 @@ def test_a_property_name_with_an_upper_case_first_letter_names_the_stored_name()
             "letter in lower case, as position; use that name",
         )
     ]
+
+
+def rq(index_type: str = "hnsw", **quantizer: Any) -> p.VectorPlan:
+    index = p.IndexPlan.model_validate(
+        {"type": index_type, "quantizer": {"type": "rq", **quantizer}}
+    )
+    return p.VectorPlan(mode="keep", distance="cosine", index=index)
+
+
+def test_version_findings_name_the_setting_the_server_version_and_the_minimum():
+    groups = target_groups([entry([rq()]), entry([keep()], name="Plain")])
+    assert version_findings(groups, "1.30.23") == (
+        [
+            Finding(
+                "server_too_old",
+                "Docs",
+                "vector default: quantizer rq needs Weaviate 1.32 or later, and "
+                "the server runs 1.30.23; upgrade Weaviate or change the setting "
+                "in plan.yaml",
+            )
+        ],
+        [],
+    )
+
+
+def test_version_findings_report_each_setting_of_each_vector():
+    hfresh = embed("text2vec-openai").model_copy(
+        update={"name": "second", "index": p.IndexPlan(type="hfresh")}
+    )
+    errors, warnings = version_findings(
+        target_groups([entry([rq(bits=4), hfresh])]), "1.27.0"
+    )
+    assert warnings == []
+    assert [(e.code, e.collection, e.message.split(" needs ")[0]) for e in errors] == [
+        ("server_too_old", "Docs", "vector default: quantizer rq"),
+        ("server_too_old", "Docs", "vector default: rq with bits 4"),
+        ("server_too_old", "Docs", "vector second: index type hfresh"),
+    ]
+
+
+def test_version_findings_accept_a_server_that_has_every_setting():
+    groups = target_groups([entry([rq(bits=4, centering=True, training_limit=50)])])
+    assert version_findings(groups, "1.39.16") == ([], [])
+
+
+@pytest.mark.parametrize(
+    ("version", "reported"),
+    [("nightly", "the version nightly"), (None, "no version")],
+)
+def test_a_version_that_cannot_be_read_is_a_warning_not_an_error(version, reported):
+    groups = target_groups([entry([rq()]), entry([keep()], name="Plain")])
+    assert version_findings(groups, version) == (
+        [],
+        [
+            Finding(
+                "server_version_unknown",
+                "Docs",
+                f"the server reports {reported}, which cannot be compared; the "
+                "minimum Weaviate version of quantizer rq was not checked",
+            )
+        ],
+    )

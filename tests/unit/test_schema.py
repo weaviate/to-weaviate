@@ -971,7 +971,10 @@ def test_kwargs_refuses_a_vectorizer_option_value():
 
 
 class MetaClient(FakeClient):
+    meta_calls = 0
+
     def get_meta(self) -> dict[str, Any]:
+        self.meta_calls += 1
         return {
             "version": "1.40.4",
             "modules": {"text2vec-openai": {}, "backup-s3": {}},
@@ -981,6 +984,22 @@ class MetaClient(FakeClient):
 def test_weaviate_schema_modules():
     schema_ = WeaviateSchema(MetaClient(None))  # type: ignore[arg-type]
     assert schema_.modules() == {"text2vec-openai", "backup-s3"}
+
+
+def test_weaviate_schema_reads_the_version_and_the_modules_in_one_request():
+    client = MetaClient(None)
+    schema_ = WeaviateSchema(client)  # type: ignore[arg-type]
+    assert schema_.modules() == {"text2vec-openai", "backup-s3"}
+    assert schema_.version() == "1.40.4"
+    assert client.meta_calls == 1
+
+
+def test_weaviate_schema_version_is_none_when_the_server_reports_none():
+    class NoVersion(FakeClient):
+        def get_meta(self) -> dict[str, Any]:
+            return {"modules": {}}
+
+    assert WeaviateSchema(NoVersion(None)).version() is None  # type: ignore[arg-type]
 
 
 def test_weaviate_schema_differences_and_ensure_use_the_client():

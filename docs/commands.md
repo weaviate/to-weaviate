@@ -66,6 +66,9 @@ exit 2, `invalid_plan`. A warning does not stop `copy` or `sync`.
 - Names that Weaviate refuses (`invalid_name`). A tenant name has 1 to 64
   letters, digits, `_` or `-`.
 - A vectorizer module that the server has not enabled (`module_not_enabled`).
+- An index or quantizer setting that needs a newer Weaviate server than
+  the target (`server_too_old`). See
+  [Supported Weaviate versions](weaviate.md#supported-weaviate-versions).
 - A missing provider key for a vectorizer: exit 3, `missing_credential`.
 - An existing collection whose settings differ from the plan
   (`plan_mismatch`).
@@ -435,7 +438,7 @@ The exit code is the same with and without `--json`.
 |---|---|---|
 | 0 | Success | |
 | 1 | Rejected records, a failed verification, or a collection with more than 10% stale objects that `sync --prune` left alone | `rejects`, `verification_failed`, `prune_limit` |
-| 2 | Usage error, invalid plan, a state of another target, a state file that cannot be read, a directory that cannot be written, or a first run into a collection with objects that `sync --prune` would delete, not confirmed | `usage`, `invalid_plan`, `plan_mismatch`, `target_rejected_schema`, `state_mismatch`, `invalid_state`, `directory_unwritable`, `foreign_objects` |
+| 2 | Usage error, invalid plan, a state of another target, a state file that cannot be read, a directory that cannot be written, a first run into a collection with objects that `sync --prune` would delete, not confirmed, or a Weaviate server older than 1.27.0 | `usage`, `invalid_plan`, `plan_mismatch`, `target_rejected_schema`, `state_mismatch`, `invalid_state`, `directory_unwritable`, `foreign_objects`, `target_version_unsupported` |
 | 3 | Missing credential or authentication failure | `missing_credential`, `auth_failed` |
 | 4 | Source or target unreachable, a source collection that the source compacted during the read or did not finish compacting, a source still written to during `sync --prune`, or a deletion that Weaviate did only partly | `source_unreachable`, `target_unreachable`, `source_compacting`, `source_writing`, `delete_failed` |
 | 5 | Internal error | `internal_error` |

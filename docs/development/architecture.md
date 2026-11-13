@@ -52,12 +52,13 @@ An arrow means "calls". Every layer imports the types of `plan.py` and
 | `naming.py` | Weaviate's rules for collection, property and tenant names |
 | `types.py` | Metadata value to Weaviate type, and the conversion of values |
 | `ids.py` | `to_uuid`: source id to object UUID |
-| `engine/check.py` | Findings from the plan and `inspect.json`: entries, names, the `source_id` property, types, distances, vectorizer options, unmapped keys, quantizer training. `module_findings` for the enabled modules, `provider_keys` for the keys a plan needs. |
+| `engine/check.py` | Findings from the plan and `inspect.json`: entries, names, the `source_id` property, types, distances, vectorizer options, unmapped keys, quantizer training. `module_findings` for the enabled modules, `version_findings` for the settings that the server version lacks, `provider_keys` for the keys a plan needs. |
 | `engine/copy.py` | `copy_collection`: the partitioned, threaded, resumable copy and the tail of new records; `plan_hash` |
 | `engine/sync.py` | `sync_collection`: a copy that skips unchanged records, the count of stale objects, and their deletion with `--prune` |
 | `engine/verify.py` | The `count`, `ids` and `records` checks, and the report; `id_tables`, the scratch sqlite file of source ids and target ids that `verify` and `sync` diff |
 | `sources/base.py` | The `Source` protocol and the types `SourceCollection`, `FieldStats`, `Record`, `Partition`, `Page` |
 | `target/connect.py` | Weaviate Cloud or custom connection, from the settings |
+| `target/versions.py` | `MINIMUM_VERSION`, `SETTING_MINIMUMS` (the oldest server version that applies each index and quantizer setting), and the parsing of a version text |
 | `target/schema.py` | Creates collections from the plan, compares an existing collection with it, updates quantizers, classifies transient errors |
 | `target/writer.py` | Record to Weaviate object or reject; chunks of at most 4 MiB by estimated size, an object above that alone, with retries |
 | `target/reader.py` | Reads objects back for `verify`; lists the uuid and `source_id` of every object for `verify`, `sync` and the first `copy` into an existing collection; tells whether a tenant is active |
@@ -74,8 +75,8 @@ embedding configuration to vectorizer. `cli.py` writes `inspect.json` and
 **`check`**: `cli.py` loads the plan and `inspect.json`. It stops with
 `missing_credential` before it connects when the environment lacks a
 provider key that a planned vectorizer needs. `engine/check.py` returns
-findings from the plan and `inspect.json`, and from the modules the target
-has enabled. `cli.py` adds the differences that `target/schema.py` finds in
+findings from the plan and `inspect.json`, and from the modules and the
+version that the target reports. `cli.py` adds the differences that `target/schema.py` finds in
 existing collections, and a `missing_property` warning for each planned
 property that an existing collection lacks. `check` writes nothing.
 
@@ -83,7 +84,7 @@ property that an existing collection lacks. `check` writes nothing.
 
 1. `cli.py` runs the plan findings of `check`, the source check and the
    provider-key check. It then takes `copy.lock` and checks the enabled
-   modules and the recorded targets in `state.sqlite`. For an entry without
+   modules, the server version and the recorded targets in `state.sqlite`. For an entry without
    progress whose collection or tenant exists and is active
    (`TargetReader.active`), `engine/verify.foreign_count`
    lists the ids once. When objects with a `source_id` that the source does

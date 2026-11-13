@@ -5,6 +5,51 @@ cluster or a server you run yourself. The tests run against the Weaviate
 version in
 [`tests/acceptance/weaviate-version`](../tests/acceptance/weaviate-version).
 
+## Supported Weaviate versions
+
+| Weaviate server | State |
+|---|---|
+| 1.39.16 and later | Supported. Every acceptance test passes on 1.39.16 and on the version in [`tests/acceptance/weaviate-version`](../tests/acceptance/weaviate-version), which CI runs. |
+| 1.27.0 to 1.39.15 | Supported, except for the plan settings in the next table, which need a newer server. |
+| Older than 1.27.0 | Not supported. The Weaviate Python client refuses the server, and every command that connects stops with `target_version_unsupported`, exit 2. The message names the server version. |
+
+The acceptance tests were run on 1.27.27, 1.30.23, 1.32.27, 1.33.18,
+1.35.23, 1.37.18, 1.39.16 and 1.40.4. A selection of them was run on 1.27.0,
+1.34.20, 1.36.24 and 1.38.25. The versions 1.39.0 to 1.39.15 were not run.
+
+### Minimum version per plan setting
+
+| Plan setting | Minimum server | How the minimum is known |
+|---|---|---|
+| Quantizer `rq` | 1.32 | Read in the server source. Run: 1.27.27 and 1.30.23 ignore `rq` without an error and create the collection uncompressed. |
+| `rq` with `bits: 1` | 1.33 | Read in the server source, not run. |
+| `rq` with the index type `flat` or `dynamic` | 1.34 | Run for `dynamic`: 1.33.18 leaves the flat part uncompressed without an error, 1.34.20 applies it. Read in the server source for `flat`, not run. |
+| Index type `hfresh` | 1.36 | Run: 1.35.23 refuses it, 1.36.24 accepts it. |
+| `rq` with `bits: 4`, which `centering` needs | 1.39 | Run: 1.38.25 refuses it, 1.39.16 accepts it. |
+| `training_limit` of `rq` | 1.39 | Run: 1.38.25 does not store it, 1.39.16 does. |
+
+`check` reads the server version and reports each setting of the plan that
+the server is too old for as an error, `server_too_old`. The error names the
+vector, the setting, the minimum and the server version. `copy` and `sync`
+make the same check for the collections they write, and stop with
+`invalid_plan`, exit 2, before they create a collection. To go on, upgrade
+Weaviate or change the setting in `plan.yaml`.
+
+The tool compares the server version with the first release of the minimum:
+1.39.0 for 1.39. When it cannot read the version that the server reports, it
+refuses no setting, and `check`, `copy` and `sync` warn with
+`server_version_unknown` for each collection that uses a setting of the
+table.
+
+Two more differences were seen in the runs on servers older than 1.33:
+
+- The server does not enable the vectorizer modules that call a model
+  provider, such as `text2vec-openai`, by default. `check` reports a module
+  that is not enabled as `module_not_enabled`.
+- With `--vectors both`, a record without a document gets the embedded
+  vector `default` next to its `source` vector. On 1.33.18 and later it gets
+  only `source`.
+
 ## Connection settings
 
 Set these variables in the environment or in `.env`:
