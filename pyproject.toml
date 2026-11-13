@@ -11,17 +11,23 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
+# The CI job "unit (lowest deps)" installs each lower bound and runs the unit
+# tests on it.
 dependencies = [
-    "weaviate-client>=4.24.1",
-    "httpx",
+    # The code reads internals of the client, so the next major is excluded.
+    "weaviate-client>=4.24.1,<5",
+    "httpx>=0.26.0",
     "typer>=0.28.0",
-    "pydantic>=2",
-    "pyyaml",
-    "python-dotenv",
+    "pydantic>=2.12.0",
+    "pyyaml>=6.0.1",
+    "python-dotenv>=1.0.0",
 ]
 
 [project.optional-dependencies]
-test = ["pytest"]
+test = ["pytest>=7.0"]
+
+[dependency-groups]
+dev = ["pre-commit>=4"]
 
 [project.scripts]
 to-weaviate = "to_weaviate.cli:app"

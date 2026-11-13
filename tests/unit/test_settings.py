@@ -114,6 +114,20 @@ def test_environ_wins_over_dotenv(tmp_path, monkeypatch):
     assert load_env(tmp_path)["WEAVIATE_URL"] == "from-env"
 
 
+def test_dotenv_keeps_a_hash_inside_a_value_and_drops_a_trailing_comment(
+    tmp_path, monkeypatch
+):
+    # python-dotenv below 0.10.5 cuts the key at the "#" or keeps the comment.
+    monkeypatch.delenv("WEAVIATE_API_KEY", raising=False)
+    monkeypatch.delenv("WEAVIATE_URL", raising=False)
+    (tmp_path / ".env").write_text(
+        "WEAVIATE_API_KEY=abc#def\nWEAVIATE_URL=http://host:8099 # local\n"
+    )
+    env = load_env(tmp_path)
+    assert env["WEAVIATE_API_KEY"] == "abc#def"
+    assert env["WEAVIATE_URL"] == "http://host:8099"
+
+
 @pytest.mark.parametrize(
     ("url", "expected"),
     [
