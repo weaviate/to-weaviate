@@ -60,7 +60,7 @@ An arrow means "calls". Every layer imports the types of `plan.py` and
 | `target/connect.py` | Weaviate Cloud or custom connection, from the settings |
 | `target/schema.py` | Creates collections from the plan, compares an existing collection with it, updates quantizers, classifies transient errors |
 | `target/writer.py` | Record to Weaviate object or reject; chunks of at most 4 MiB by estimated size, an object above that alone, with retries |
-| `target/reader.py` | Reads objects back for `verify`; lists the uuid and `source_id` of every object for `verify`, `sync` and the first `copy` into an existing collection; tells whether a tenant is active |
+| `target/reader.py` | Reads objects back for `verify`; lists the uuid and `source_id` of every object for `verify`, `sync` and the first `copy` into an existing collection, 1000 per request, or 100 per request when the target refuses 1000 because its `QUERY_MAXIMUM_RESULTS` is lower; tells whether a tenant is active |
 | `target/deleter.py` | Deletes objects by uuid for `sync --prune`, 100 per request, with retries; raises `DeleteFailed` when a request deleted only some |
 
 ## How each command runs
