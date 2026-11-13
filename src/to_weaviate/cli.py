@@ -139,7 +139,7 @@ from to_weaviate.state import (
     Target,
     unwritable_reason,
 )
-from to_weaviate.target.connect import connect
+from to_weaviate.target.connect import VersionUnreadable, connect
 from to_weaviate.target.deleter import DeleteFailed, Deleter, WeaviateDeleter
 from to_weaviate.target.reader import SOURCE_ID, TargetReader, WeaviateReader
 from to_weaviate.target.schema import (
@@ -207,6 +207,11 @@ WEAVIATE_HINT = (
 UNSUPPORTED_VERSION = re.compile(
     r"Weaviate version (\S+) is not supported\."
     r"(?: Please use Weaviate version (\S+) or higher\.)?"
+)
+NO_RELEASE_HINT = (
+    "Check that WEAVIATE_URL is the Weaviate server you mean. to-weaviate needs "
+    f"a server that reports a release version, {version_text(MINIMUM_VERSION)} or "
+    "later."
 )
 ISSUES_URL = "https://github.com/weaviate/to-weaviate/issues"
 INTERNAL_HINT = (
@@ -305,6 +310,16 @@ def _refused(service: str, key: str, forbidden: bool) -> CliError:
     )
 
 
+def _version_unreadable(reported: str | None) -> CliError:
+    message = "The Weaviate server reports no version."
+    if reported is not None:
+        message = (
+            f"The Weaviate server reports the version {reported}, which the "
+            "Weaviate client cannot read."
+        )
+    return CliError("target_version_unsupported", message, NO_RELEASE_HINT)
+
+
 def _as_cli_error(exc: Exception) -> CliError:
     """The CliError for `exc`. An exception outside the table is internal_error.
 
@@ -397,10 +412,15 @@ def _as_cli_error(exc: Exception) -> CliError:
         variables = key_variables(exc.provider)
         key = " or ".join(variables) if variables else f"the key of {exc.provider}"
         return _refused(exc.provider, key, exc.status == 403)
+    if isinstance(exc, VersionUnreadable):
+        return _version_unreadable(exc.reported)
     if isinstance(exc, WeaviateStartUpError):
         unsupported = UNSUPPORTED_VERSION.search(str(exc))
         if unsupported is not None:
             version, minimum = unsupported.groups()
+            if version == "0.0.0":
+                # The client reads an empty version text as 0.0.0.
+                return _version_unreadable(None)
             minimum = minimum or version_text(MINIMUM_VERSION)
             return CliError(
                 "target_version_unsupported",

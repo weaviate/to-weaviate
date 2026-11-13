@@ -78,8 +78,10 @@ exit 2, `invalid_plan`. A warning does not stop `copy` or `sync`.
   [Edits you can make](plan-file.md#edits-you-can-make).
 - Warnings: `missing_property` (an existing collection lacks a planned
   property; `copy` adds it), `coerced_keys` (a metadata key with mixed types
-  whose values `copy` converts), and `quantizer_training` (a trained
-  quantizer whose training limit is above the record count of the source).
+  whose values `copy` converts), `quantizer_training` (a trained
+  quantizer whose training limit is above the record count of the source),
+  and `server_version_unknown` (the server reported no version that can be
+  compared, so the minimum versions of the plan settings were not checked).
 
 ## `copy`
 
@@ -438,7 +440,7 @@ The exit code is the same with and without `--json`.
 |---|---|---|
 | 0 | Success | |
 | 1 | Rejected records, a failed verification, or a collection with more than 10% stale objects that `sync --prune` left alone | `rejects`, `verification_failed`, `prune_limit` |
-| 2 | Usage error, invalid plan, a state of another target, a state file that cannot be read, a directory that cannot be written, a first run into a collection with objects that `sync --prune` would delete, not confirmed, or a Weaviate server older than 1.27.0 | `usage`, `invalid_plan`, `plan_mismatch`, `target_rejected_schema`, `state_mismatch`, `invalid_state`, `directory_unwritable`, `foreign_objects`, `target_version_unsupported` |
+| 2 | Usage error, invalid plan, a state of another target, a state file that cannot be read, a directory that cannot be written, a first run into a collection with objects that `sync --prune` would delete, not confirmed, or a Weaviate server that is older than 1.27.0 or reports no release version | `usage`, `invalid_plan`, `plan_mismatch`, `target_rejected_schema`, `state_mismatch`, `invalid_state`, `directory_unwritable`, `foreign_objects`, `target_version_unsupported` |
 | 3 | Missing credential or authentication failure | `missing_credential`, `auth_failed` |
 | 4 | Source or target unreachable, a source collection that the source compacted during the read or did not finish compacting, a source still written to during `sync --prune`, or a deletion that Weaviate did only partly | `source_unreachable`, `target_unreachable`, `source_compacting`, `source_writing`, `delete_failed` |
 | 5 | Internal error | `internal_error` |

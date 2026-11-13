@@ -638,6 +638,33 @@ def test_version_findings_report_each_setting_of_each_vector():
     ]
 
 
+def test_a_setting_below_the_highest_minimum_names_the_version_to_upgrade_to():
+    hfresh = embed("text2vec-openai").model_copy(
+        update={"name": "second", "index": p.IndexPlan(type="hfresh")}
+    )
+    groups = target_groups([entry([rq(bits=4)]), entry([hfresh], name="Other")])
+    errors, _ = version_findings(groups, "1.27.0")
+    assert [e.message for e in errors] == [
+        "vector default: quantizer rq needs Weaviate 1.32 or later, and the "
+        "server runs 1.27.0; another setting of the plan needs 1.39, so upgrade "
+        "Weaviate to 1.39 or later or change the settings in plan.yaml",
+        "vector default: rq with bits 4 needs Weaviate 1.39 or later, and the "
+        "server runs 1.27.0; upgrade Weaviate or change the setting in plan.yaml",
+        "vector second: index type hfresh needs Weaviate 1.36 or later, and the "
+        "server runs 1.27.0; another setting of the plan needs 1.39, so upgrade "
+        "Weaviate to 1.39 or later or change the settings in plan.yaml",
+    ]
+
+
+def test_the_version_to_upgrade_to_leaves_out_a_minimum_the_server_meets():
+    groups = target_groups([entry([rq(bits=4)])])
+    errors, _ = version_findings(groups, "1.38.25")
+    assert [e.message for e in errors] == [
+        "vector default: rq with bits 4 needs Weaviate 1.39 or later, and the "
+        "server runs 1.38.25; upgrade Weaviate or change the setting in plan.yaml"
+    ]
+
+
 def test_version_findings_accept_a_server_that_has_every_setting():
     groups = target_groups([entry([rq(bits=4, centering=True, training_limit=50)])])
     assert version_findings(groups, "1.39.16") == ([], [])

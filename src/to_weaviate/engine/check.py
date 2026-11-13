@@ -31,6 +31,7 @@ from to_weaviate.target.schema import (
     module_names,
 )
 from to_weaviate.target.versions import (
+    SettingMinimum,
     parse_version,
     unmet_settings,
     version_text,
@@ -698,12 +699,15 @@ def version_findings(
 
     `version` is the version text the server reports. When it cannot be
     parsed, no setting is refused, and each collection with a setting that
-    has a minimum version gets a warning. `collection_kwargs` sends the
-    vectors of the first entry of a group.
+    has a minimum version gets a warning. An error for a setting below the
+    highest unmet minimum of `groups` names that minimum as the version to
+    upgrade to. `collection_kwargs` sends the vectors of the first entry of a
+    group.
     """
     server = parse_version(version)
     errors: list[Finding] = []
     warnings: list[Finding] = []
+    unmet: list[tuple[str, str, SettingMinimum]] = []
     for name, group in groups.items():
         vectors = group[0].target.vectors
         if server is None:
@@ -722,16 +726,28 @@ def version_findings(
                     )
                 )
             continue
-        errors.extend(
+        unmet.extend(
+            (name, vector.name, row)
+            for vector in vectors
+            for row in unmet_settings(vector.index, server)
+        )
+    highest = max((row.minimum for _, _, row in unmet), default=())
+    for name, vector_name, row in unmet:
+        step = "upgrade Weaviate or change the setting in plan.yaml"
+        if row.minimum < highest:
+            target = version_text(highest)
+            step = (
+                f"another setting of the plan needs {target}, so upgrade Weaviate "
+                f"to {target} or later or change the settings in plan.yaml"
+            )
+        errors.append(
             Finding(
                 "server_too_old",
                 name,
-                f"vector {vector.name}: {row.setting} needs Weaviate "
+                f"vector {vector_name}: {row.setting} needs Weaviate "
                 f"{version_text(row.minimum)} or later, and the server runs "
-                f"{version}; upgrade Weaviate or change the setting in plan.yaml",
+                f"{version}; {step}",
             )
-            for vector in vectors
-            for row in unmet_settings(vector.index, server)
         )
     return errors, warnings
 

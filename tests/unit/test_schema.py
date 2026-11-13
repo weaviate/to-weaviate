@@ -19,6 +19,7 @@ from weaviate.collections.classes.config import (
     _VectorIndexConfigHFresh,
     _VectorIndexConfigHNSW,
 )
+from weaviate.connect.v4 import ConnectionSync
 from weaviate.exceptions import (
     UnexpectedStatusCodeError,
     WeaviateBaseError,
@@ -26,6 +27,7 @@ from weaviate.exceptions import (
     WeaviateConnectionError,
     WeaviateQueryError,
     WeaviateRetryError,
+    WeaviateStartUpError,
     WeaviateTenantGetError,
 )
 
@@ -1049,6 +1051,45 @@ def test_connect_cloud_passes_the_host_without_userinfo_or_port(monkeypatch, url
     )
     connect_module.connect(WeaviateSettings(url, None, None, {}))
     assert seen["cluster_url"] == "https://x.weaviate.cloud"
+
+
+def _connect_with_meta(monkeypatch, meta: dict[str, Any]) -> None:
+    """`connect` through the client's own startup code, with `meta` as the answer."""
+    monkeypatch.setattr(ConnectionSync, "_open_connections_rest", lambda *a, **k: None)
+    monkeypatch.setattr(ConnectionSync, "open_connection_grpc", lambda *a, **k: None)
+    monkeypatch.setattr(ConnectionSync, "get_meta", lambda *a, **k: meta)
+    connect_module.connect(WeaviateSettings("http://h:8080", None, "h:50051", {}))
+
+
+@pytest.mark.parametrize("text", ["nightly", "preview-1.39.0", "1.39.x"])
+def test_connect_names_a_version_text_that_the_client_cannot_parse(monkeypatch, text):
+    with pytest.raises(connect_module.VersionUnreadable) as caught:
+        _connect_with_meta(monkeypatch, {"version": text})
+    assert caught.value.reported == text
+
+
+def test_connect_names_an_answer_without_a_version(monkeypatch):
+    with pytest.raises(connect_module.VersionUnreadable) as caught:
+        _connect_with_meta(monkeypatch, {"modules": {}})
+    assert caught.value.reported is None
+
+
+def test_the_client_reads_an_empty_version_text_as_0_0_0(monkeypatch):
+    with pytest.raises(WeaviateStartUpError, match="Weaviate version 0.0.0 is not"):
+        _connect_with_meta(monkeypatch, {"version": ""})
+
+
+@pytest.mark.parametrize(
+    "error", [ValueError("made-up"), KeyError("modules"), KeyError("version", 1)]
+)
+def test_connect_passes_on_another_error_of_the_same_type(monkeypatch, error):
+    def fail(**kwargs: Any) -> None:
+        raise error
+
+    monkeypatch.setattr(connect_module.weaviate, "connect_to_custom", fail)
+    with pytest.raises(type(error)) as caught:
+        connect_module.connect(WeaviateSettings("http://h:8080", None, "h:50051", {}))
+    assert caught.value is error
 
 
 def test_connect_cloud_keeps_a_host_that_starts_with_http(monkeypatch):

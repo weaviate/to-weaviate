@@ -17,6 +17,13 @@ The acceptance tests were run on 1.27.27, 1.30.23, 1.32.27, 1.33.18,
 1.35.23, 1.37.18, 1.39.16 and 1.40.4. A selection of them was run on 1.27.0,
 1.34.20, 1.36.24 and 1.38.25. The versions 1.39.0 to 1.39.15 were not run.
 
+The server must report a release version such as `1.39.16`. The Weaviate
+Python client cannot read a version text such as `nightly` or
+`preview-1.39.0`. For such a server, and for a server that reports no
+version, every command that connects stops with `target_version_unsupported`,
+exit 2. Check that `WEAVIATE_URL` is the server you mean, and use a server
+that reports a release version, 1.27.0 or later.
+
 ### Minimum version per plan setting
 
 | Plan setting | Minimum server | How the minimum is known |
@@ -30,13 +37,18 @@ The acceptance tests were run on 1.27.27, 1.30.23, 1.32.27, 1.33.18,
 
 `check` reads the server version and reports each setting of the plan that
 the server is too old for as an error, `server_too_old`. The error names the
-vector, the setting, the minimum and the server version. `copy` and `sync`
+vector, the setting, the minimum and the server version. When the plan has
+settings with different minimums, each error for a lower minimum also names
+the highest one, which is the version to upgrade to. `copy` and `sync`
 make the same check for the collections they write, and stop with
 `invalid_plan`, exit 2, before they create a collection. To go on, upgrade
-Weaviate or change the setting in `plan.yaml`.
+Weaviate or change the setting in `plan.yaml`. For a collection that exists,
+a changed index or quantizer stops `sync` with `plan_mismatch`; see
+[Edits you can make](plan-file.md#edits-you-can-make).
 
 The tool compares the server version with the first release of the minimum:
-1.39.0 for 1.39. When it cannot read the version that the server reports, it
+1.39.0 for 1.39. The tool reads the version again after the client has
+connected. When that answer has no version text that it can compare, it
 refuses no setting, and `check`, `copy` and `sync` warn with
 `server_version_unknown` for each collection that uses a setting of the
 table.
