@@ -112,6 +112,14 @@ class Source(Protocol):
         """
         ...
 
+    @property
+    def namespaces_note(self) -> str | None:
+        """A line for the user about the namespaces the last `inspect` read.
+
+        None when `inspect` was given its namespaces or listed all of them.
+        """
+        ...
+
     def inspect(
         self,
         namespaces: list[str] | None,

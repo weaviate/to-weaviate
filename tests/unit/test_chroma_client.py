@@ -613,6 +613,77 @@ def test_collection_by_name_reads_the_collection_document():
     )
 
 
+# Chroma 0.5.16 to 0.6.2 answer the first body, a Rust server the empty one.
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx.Response(
+            405, json={"detail": "Method Not Allowed"}, headers={"Allow": "POST"}
+        ),
+        httpx.Response(405, headers={"Allow": "POST"}),
+    ],
+)
+def test_databases_is_none_when_the_server_answers_405(answer):
+    client, sleeps = make(lambda r: answer)
+    assert client.databases("t") is None
+    assert sleeps == []
+
+
+IDENTITY_NO_AUTH = {
+    "user_id": "",
+    "tenant": "default_tenant",
+    "databases": ["default_database"],
+    "attributes": None,
+}
+IDENTITY_TOKEN_AUTH = {
+    "user_id": "anonymous",
+    "tenant": "*",
+    "databases": ["*"],
+    "attributes": None,
+}
+
+
+@pytest.mark.parametrize(
+    ("identity", "tenant"),
+    [
+        (IDENTITY_NO_AUTH, "default_tenant"),
+        (IDENTITY_TOKEN_AUTH, "default_tenant"),
+        ({"tenant": "of-the-key", "databases": ["a"]}, "of-the-key"),
+    ],
+)
+def test_tenant_is_the_identity_tenant_and_the_default_for_a_star(identity, tenant):
+    client, _ = make(lambda r: httpx.Response(200, json=identity))
+    assert client.tenant() == tenant
+
+
+@pytest.mark.parametrize(
+    ("identity", "databases"),
+    [
+        (IDENTITY_NO_AUTH, ["default_database"]),
+        (IDENTITY_TOKEN_AUTH, ["default_database"]),
+        (
+            {"tenant": "t", "databases": ["a", "*", "b", "a"]},
+            ["a", "default_database", "b"],
+        ),
+        ({"tenant": "t", "databases": ["*", "default_database"]}, ["default_database"]),
+        ({"tenant": "t", "databases": []}, []),
+        ({"tenant": "t", "databases": None}, []),
+        ({"tenant": "t"}, []),
+        ({"tenant": "t", "databases": ["", 3, None]}, []),
+    ],
+)
+def test_identity_databases_names_the_default_for_a_star(identity, databases):
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.path)
+        return httpx.Response(200, json=identity)
+
+    client, _ = make(handler)
+    assert client.identity_databases() == databases
+    assert seen == ["/api/v2/auth/identity"]
+
+
 def _count(client):
     return client.count("t", "d", "c")
 
@@ -671,9 +742,9 @@ def test_another_400_on_a_collection_keeps_the_general_hint():
         ),
         (
             httpx.Response(405, headers={"Allow": "POST"}),
-            lambda client: client.databases("t"),
+            lambda client: client.collections("t", "d"),
             "Chroma returned HTTP 405: no route for GET "
-            "/api/v2/api/v2/tenants/t/databases",
+            "/api/v2/api/v2/tenants/t/databases/d/collections",
         ),
         (
             httpx.Response(404, html="<h1>404 Not Found</h1>"),
@@ -688,9 +759,9 @@ def test_another_400_on_a_collection_keeps_the_general_hint():
         ),
         (
             httpx.Response(405, html="<h1>405 Not Allowed</h1>"),
-            lambda client: client.databases("t"),
+            lambda client: client.collections("t", "d"),
             "Chroma returned HTTP 405: no route for GET "
-            "/api/v2/api/v2/tenants/t/databases",
+            "/api/v2/api/v2/tenants/t/databases/d/collections",
         ),
     ],
     ids=[
@@ -717,10 +788,24 @@ def test_a_405_with_a_body_keeps_the_general_hint():
     answer = httpx.Response(405, json={"detail": "Method Not Allowed"})
     client, _ = make(lambda r: answer)
     with pytest.raises(ChromaError) as info:
-        client.databases("t")
+        client.collections("t", "d")
     assert (str(info.value), info.value.hint) == (
         "Chroma returned HTTP 405: Method Not Allowed",
         None,
+    )
+
+
+def test_a_chroma_url_with_a_path_still_ends_in_the_missing_route_error():
+    # databases() reads a 405 as a server that cannot list databases. The
+    # identity request that follows has no such reading.
+    answer = httpx.Response(405, headers={"Allow": "POST"})
+    client, _ = make(lambda r: answer, url="http://chroma.test/api/v2")
+    assert client.databases("t") is None
+    with pytest.raises(ChromaError) as info:
+        client.identity_databases()
+    assert (str(info.value), info.value.hint) == (
+        "Chroma returned HTTP 405: no route for GET /api/v2/api/v2/auth/identity",
+        NO_ROUTE_HINT,
     )
 
 

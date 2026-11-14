@@ -128,8 +128,10 @@ from to_weaviate.sources.base import (
 )
 from to_weaviate.sources.chroma.client import (
     COLLECTION_GONE_HINT,
+    DATABASES_NOT_LISTED_HINT,
     ChromaClient,
     ChromaError,
+    DatabasesNotListed,
 )
 from to_weaviate.sources.chroma.mapping import stored_embedding, vectorizer_for
 from to_weaviate.sources.chroma.source import ChromaSource
@@ -810,7 +812,14 @@ def _inspect_chroma(
         databases = [settings.database]
     source = factories.source(settings)
     _info(json_output, f"Inspecting Chroma at {settings.stored_url}")
-    collections = source.inspect(databases or None, names or None, sample_pages)
+    try:
+        collections = source.inspect(databases or None, names or None, sample_pages)
+    except DatabasesNotListed as exc:
+        raise CliError("usage", str(exc), DATABASES_NOT_LISTED_HINT) from exc
+    finally:
+        namespaces_note = source.namespaces_note
+        if namespaces_note is not None:
+            _info(json_output, namespaces_note)
     missing = sorted(set(names) - {c.name for c in collections})
     if missing:
         raise CliError(
@@ -845,6 +854,7 @@ def _inspect_chroma(
 
     found = decisions(plan, {c.ref: c for c in collections})
     document, text = _inspect_output(plan, found, plan_path)
+    document["notes"] = [] if namespaces_note is None else [namespaces_note]
     _emit_success(json_output, document, text)
 
 
@@ -1892,7 +1902,7 @@ def _weaviate_client(settings: WeaviateSettings) -> weaviate.WeaviateClient:
 def _chroma_source(settings: ChromaSettings) -> Source:
     client = ChromaClient(settings)
     atexit.register(client.close)
-    tenant = settings.tenant or client.identity()["tenant"]
+    tenant = settings.tenant or client.tenant()
     return ChromaSource(client, tenant)
 
 

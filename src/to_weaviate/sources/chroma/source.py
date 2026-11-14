@@ -18,8 +18,10 @@ from to_weaviate.sources.base import (
 from to_weaviate.sources.chroma.client import (
     CHROMA_MAX_PAGE,
     COLLECTION_GONE_HINT,
+    DATABASES_NOT_LISTED,
     ChromaClient,
     ChromaError,
+    DatabasesNotListed,
 )
 from to_weaviate.sources.chroma.config import (
     distance_of,
@@ -138,6 +140,7 @@ class ChromaSource:
         self._last_pages: dict[tuple[str, str], tuple[int, set[str]]] = {}
         self._pages_lock = threading.Lock()
         self._searched: list[str] = []
+        self._namespaces_note: str | None = None
 
     def _get(
         self,
@@ -170,7 +173,28 @@ class ChromaSource:
         return CHROMA_MAX_PAGE
 
     def namespaces(self) -> list[str]:
-        return self._client.databases(self._tenant)
+        """The databases of the tenant.
+
+        When the server cannot list them, the databases that its identity
+        names, and `namespaces_note` says so. Raises DatabasesNotListed when
+        the identity names none.
+        """
+        listed = self._client.databases(self._tenant)
+        if listed is not None:
+            return listed
+        named = self._client.identity_databases()
+        if not named:
+            raise DatabasesNotListed
+        self._namespaces_note = (
+            f"{DATABASES_NOT_LISTED}. Searched only {', '.join(named)}. The "
+            "server's identity answer names no other database. Pass --database or "
+            "set CHROMA_DATABASE to search another database."
+        )
+        return named
+
+    @property
+    def namespaces_note(self) -> str | None:
+        return self._namespaces_note
 
     @property
     def searched_namespaces(self) -> list[str]:
@@ -182,6 +206,7 @@ class ChromaSource:
         collections: list[str] | None,
         sample_pages: int | None,
     ) -> list[SourceCollection]:
+        self._namespaces_note = None
         databases = self.namespaces() if namespaces is None else namespaces
         self._searched = list(databases)
         found: list[SourceCollection] = []

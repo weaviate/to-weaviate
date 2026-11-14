@@ -13,14 +13,61 @@ the plan keeps the source vector. It never writes to Chroma.
 | Single-node Chroma | A `chroma run` server or the `chromadb/chroma` container. |
 | A Chroma directory on disk | Serve it with `chroma run`, then read it as a single-node server. |
 
+## Supported Chroma versions
+
+The tool reads a Chroma server through its `/api/v2` REST API. This table
+is for a server you run. Chroma Cloud has no version to choose.
+
+| Chroma server | State |
+|---|---|
+| 1.0.6 and later | Supported. The acceptance tests in CI run against 1.5.9, the version that [`docker-compose.yml`](../../tests/acceptance/chroma/docker-compose.yml) and [`chroma-k8s.sh`](../../tests/acceptance/chroma-k8s.sh) pin. |
+| 1.0.0 to 1.0.5 | Works, with the limits below. `inspect` can record the wrong distance. |
+| 0.6.3 | Works, with the limits below. |
+| 0.5.16 to 0.6.2 | Works, with the limits below. `inspect` finds only some databases without `--database`. |
+| Older than 0.5.16 | Not supported. The server has no `/api/v2` API, and every command stops with HTTP 404. |
+
+Only `inspect` was checked on the versions older than 1.0.6, against the
+servers 0.5.23, 0.6.0, 0.6.3 and 1.0.0. `copy`, `sync` and `verify` were not
+run on them. Between 1.0.6 and the version that CI runs, `inspect` was
+checked on 1.0.20, 1.1.1, 1.3.7 and 1.4.1.
+
+Limits of the versions older than 1.0.6:
+
+- **1.0.0 to 1.0.5: wrong distance.** For a collection that was created
+  with a distance in its `configuration`, these servers list `space: l2`,
+  whatever distance the collection uses. `inspect` then records
+  `l2-squared`. The tool cannot detect it, because every 1.x server answers
+  `1.0.0` as its version. After `inspect`, check `distance` of each
+  collection in `plan.yaml` and correct it before `copy`. A collection that
+  got its distance from the `hnsw:space` metadata is listed correctly.
+- **0.5.16 to 0.6.2: no database listing.** These servers cannot list the
+  databases of a tenant. Without `--database` and `CHROMA_DATABASE`,
+  `inspect` reads the databases that the server's identity answer names,
+  and prints a line that names them. With `--json`, the line is also in
+  the document under `notes`. That answer holds `default_database`
+  only, also when the tenant has more databases. Pass `--database` or set
+  `CHROMA_DATABASE` to read another database. When the identity answer
+  names no database, `inspect` stops with a `usage` error that asks for
+  `--database`.
+- **0.5.16 to 0.6.3 with token authentication: no tenant of the token.**
+  These servers answer `*` as the tenant and the database of a token. The
+  tool reads `*` as "none named": without `CHROMA_TENANT` it reads the
+  tenant `default_tenant`, and on a server without the database listing it
+  reads the database `default_database`. Set `CHROMA_TENANT` to read
+  another tenant.
+- **0.5.16 to 1.0.5: no embedding function.** These servers do not list the
+  embedding function of a collection, so `inspect` sets no vectorizer. Pass
+  `--vectorizer` to set one.
+- **Older than 1.4.1: no compaction wait.** See [Compaction](#compaction).
+
 ## Connection settings
 
 | Variable | Required | Use |
 |---|---|---|
 | `CHROMA_URL` | no | The Chroma server. Default: `https://api.trychroma.com` (Chroma Cloud). |
 | `CHROMA_API_KEY` | for Chroma Cloud | The Chroma API key. A server without authentication needs none. |
-| `CHROMA_TENANT` | no | The Chroma tenant. Default: the tenant of the API key. |
-| `CHROMA_DATABASE` | no | The database that `inspect chroma` reads when you pass no `--database`. With neither, it reads every database of the tenant. |
+| `CHROMA_TENANT` | no | The Chroma tenant. Default: the tenant of the API key, or `default_tenant` when the server names none for it. |
+| `CHROMA_DATABASE` | no | The database that `inspect chroma` reads when you pass no `--database`. With neither, it reads every database of the tenant that the server lists; see [Supported Chroma versions](#supported-chroma-versions). |
 | `CHROMA_TOKEN_HEADER` | no | The header that carries the key. Default: `x-chroma-token`. With `Authorization`, the tool sends `Bearer <key>`. |
 
 Without `CHROMA_URL`, the source is Chroma Cloud, and `inspect chroma`,
@@ -288,8 +335,11 @@ variables.
 ### How it reads
 
 - `inspect` lists the tenant's databases when neither `--database` nor
-  `CHROMA_DATABASE` names one, then the collections of each database in
-  pages of 1,000. For each collection it reads the count and pages of
+  `CHROMA_DATABASE` names one. When the listing answers HTTP 405,
+  `ChromaSource.namespaces` takes the databases of `/api/v2/auth/identity`
+  instead and sets `namespaces_note`, which `inspect` prints. `inspect`
+  then lists the collections of each database in pages of 1,000. For each
+  collection it reads the count and pages of
   metadata to collect each key's types. It then reads the first page and up
   to 10 spread pages of documents to estimate the document size.
 - `read` uses `/get` with an offset and a limit of at most 300. Chroma

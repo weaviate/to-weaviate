@@ -14,6 +14,13 @@ COLLECTIONS_PAGE = 1000
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 MAX_MESSAGE_CHARS = 500
 MAX_CONTENT_TYPE_CHARS = 100
+# The names of the tenant and the database that every Chroma server creates.
+DEFAULT_TENANT = "default_tenant"
+DEFAULT_DATABASE = "default_database"
+# Chroma 0.5.16 to 0.6.3 with token authentication answer the identity with
+# this value for the tenant and for each database. It is not a name: a
+# request for the tenant or the database `*` finds no collection.
+ANY = "*"
 REDIRECT_HINT = "Set CHROMA_URL to the address the server redirects to."
 NOT_JSON_HINT = (
     "Check that CHROMA_URL points at the Chroma API and not at a proxy or a web page."
@@ -26,6 +33,11 @@ COLLECTION_GONE_HINT = (
     "The collection is gone from Chroma, or it was created again with a new id. "
     "Run to-weaviate inspect chroma --force to inspect it again."
 )
+DATABASES_NOT_LISTED = (
+    "The Chroma server cannot list databases (HTTP 405, as Chroma before 0.6.3 "
+    "answers)"
+)
+DATABASES_NOT_LISTED_HINT = "Pass --database or set CHROMA_DATABASE."
 NO_ROUTE_HINT = (
     "Set CHROMA_URL to the root address of the Chroma server, without a path "
     "such as /api/v2. The server must be Chroma 0.5.16 or later."
@@ -69,6 +81,15 @@ class ChromaError(Exception):
         self.message = message
         self.retry_after = retry_after
         self.hint = hint
+
+
+class DatabasesNotListed(Exception):
+    """The server cannot list databases and its identity names none."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            f"{DATABASES_NOT_LISTED}, and its identity answer names no database."
+        )
 
 
 def _json(response: httpx.Response) -> Any:
@@ -319,9 +340,37 @@ class ChromaClient:
         result: dict[str, Any] = self._request("GET", "/api/v2/auth/identity")
         return result
 
-    def databases(self, tenant: str) -> list[str]:
+    def tenant(self) -> str:
+        """The tenant of the identity, DEFAULT_TENANT when it is `ANY`."""
+        tenant: str = self.identity()["tenant"]
+        return DEFAULT_TENANT if tenant == ANY else tenant
+
+    def identity_databases(self) -> list[str]:
+        """The databases that the identity names, DEFAULT_DATABASE for `ANY`.
+
+        Chroma 0.5.16 to 0.6.2 answer `["default_database"]` here for every
+        tenant, also after another database was created.
+        """
+        listed = self.identity().get("databases")
+        names = [
+            DEFAULT_DATABASE if name == ANY else name
+            for name in (listed if isinstance(listed, list) else [])
+            if isinstance(name, str) and name
+        ]
+        return list(dict.fromkeys(names))
+
+    def databases(self, tenant: str) -> list[str] | None:
+        """The database names of `tenant`. None when the server cannot list them.
+
+        Chroma 0.5.16 to 0.6.2 serve this path for POST only and answer 405.
+        """
         path = f"/api/v2/tenants/{_seg(tenant)}/databases"
-        rows = self._hinted_request(403, DATABASES_FORBIDDEN_HINT, "GET", path)
+        try:
+            rows = self._hinted_request(403, DATABASES_FORBIDDEN_HINT, "GET", path)
+        except ChromaError as exc:
+            if exc.status == 405:
+                return None
+            raise
         return [row["name"] for row in rows]
 
     def collections(self, tenant: str, database: str) -> list[dict[str, Any]]:
