@@ -31,6 +31,13 @@ from to_weaviate.target.schema import (
     collection_kwargs,
     module_names,
 )
+from to_weaviate.target.versions import (
+    SettingMinimum,
+    parse_version,
+    unmet_settings,
+    version_text,
+    versioned_settings,
+)
 from to_weaviate.target.writer import unmapped_key_text
 from to_weaviate.types import has_large_int
 
@@ -757,6 +764,66 @@ def async_indexing_findings(
         for vector in group[0].target.vectors
         if vector.index.type == "dynamic"
     ]
+
+
+def version_findings(
+    groups: Mapping[str, list[CollectionPlan]], version: str | None
+) -> tuple[list[Finding], list[Finding]]:
+    """Errors for the settings that need a newer server than `version`.
+
+    `version` is the version text the server reports. When it cannot be
+    parsed, no setting is refused, and each collection with a setting that
+    has a minimum version gets a warning. An error for a setting below the
+    highest unmet minimum of `groups` names that minimum as the version to
+    upgrade to. `collection_kwargs` sends the vectors of the first entry of a
+    group.
+    """
+    server = parse_version(version)
+    errors: list[Finding] = []
+    warnings: list[Finding] = []
+    unmet: list[tuple[str, str, SettingMinimum]] = []
+    for name, group in groups.items():
+        vectors = group[0].target.vectors
+        if server is None:
+            settings = dict.fromkeys(
+                row.setting for v in vectors for row in versioned_settings(v.index)
+            )
+            if settings:
+                reported = "no version" if version is None else f"the version {version}"
+                warnings.append(
+                    Finding(
+                        "server_version_unknown",
+                        name,
+                        f"the server reports {reported}, which cannot be "
+                        "compared; the minimum Weaviate version of "
+                        f"{', '.join(settings)} was not checked",
+                    )
+                )
+            continue
+        unmet.extend(
+            (name, vector.name, row)
+            for vector in vectors
+            for row in unmet_settings(vector.index, server)
+        )
+    highest = max((row.minimum for _, _, row in unmet), default=())
+    for name, vector_name, row in unmet:
+        step = "upgrade Weaviate or change the setting in plan.yaml"
+        if row.minimum < highest:
+            target = version_text(highest)
+            step = (
+                f"another setting of the plan needs {target}, so upgrade Weaviate "
+                f"to {target} or later or change the settings in plan.yaml"
+            )
+        errors.append(
+            Finding(
+                "server_too_old",
+                name,
+                f"vector {vector_name}: {row.setting} needs Weaviate "
+                f"{version_text(row.minimum)} or later, and the server runs "
+                f"{version}; {step}",
+            )
+        )
+    return errors, warnings
 
 
 def replication_findings(

@@ -456,6 +456,115 @@ def test_check_warns_that_a_dynamic_index_needs_async_indexing():
     ]
 
 
+RQ_TOO_OLD = {
+    "code": "server_too_old",
+    "collection": "Docs",
+    "message": "vector default: quantizer rq needs Weaviate 1.32 or later, and "
+    "the server runs 1.30.23; upgrade Weaviate or change the setting in plan.yaml",
+}
+
+
+def _rq_on(version: str | None) -> FakeFactories:
+    fakes = FakeFactories(
+        FakeSource(cli_records(10)), schema=FakeSchema(version=version)
+    )
+    return inspected(fakes, "--index", "hnsw", "--quantizer", "rq")
+
+
+def test_check_refuses_a_setting_that_the_server_version_cannot_apply():
+    r = invoke(_rq_on("1.30.23"), "check", "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert d["code"] == "invalid_plan" and d["errors"] == [RQ_TOO_OLD]
+
+
+def test_check_prints_the_setting_the_server_version_and_the_minimum():
+    r = invoke(_rq_on("1.30.23"), "check")
+    assert r.exit_code == 2
+    assert f"error server_too_old Docs: {RQ_TOO_OLD['message']}" in r.output
+
+
+def test_check_accepts_the_setting_on_a_server_that_has_it():
+    r = invoke(_rq_on("1.32.0"), "check", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["errors"] == []
+
+
+def test_check_compares_server_versions_as_numbers():
+    fakes = _rq_on("1.9.20")
+    assert invoke(fakes, "check").exit_code == 2
+    fakes.schema.server_version = "1.100.0"
+    assert invoke(fakes, "check").exit_code == 0
+
+
+@pytest.mark.parametrize("version", ["nightly", None])
+def test_check_warns_and_goes_on_when_the_server_version_cannot_be_read(version):
+    r = invoke(_rq_on(version), "check", "--json")
+    assert r.exit_code == 0, r.output
+    d = json.loads(r.stdout)
+    assert d["errors"] == []
+    assert [w["code"] for w in d["warnings"]] == ["server_version_unknown"]
+
+
+def test_check_gives_no_version_warning_for_a_plan_without_a_versioned_setting():
+    fakes = FakeFactories(
+        FakeSource(cli_records(10)), schema=FakeSchema(version="nightly")
+    )
+    r = invoke(inspected(fakes), "check", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["warnings"] == []
+
+
+@pytest.mark.parametrize("command", ["copy", "sync"])
+def test_copy_and_sync_stop_on_an_old_server_before_they_create_a_collection(
+    tmp_path, command
+):
+    fakes = _rq_on("1.30.23")
+    r = invoke(fakes, command, "--json")
+    assert r.exit_code == 2, r.output
+    d = json.loads(r.stdout)
+    assert d["code"] == "invalid_plan" and d["errors"] == [RQ_TOO_OLD]
+    assert fakes.schema.ensured == [] and fakes.source.read_calls == 0
+    assert fakes.writer.objects == {}
+    assert not (tmp_path / DIR / "state.sqlite").exists()
+
+
+@pytest.mark.parametrize("command", ["copy", "sync"])
+def test_copy_and_sync_go_on_when_the_server_version_cannot_be_read(command):
+    fakes = _rq_on("nightly")
+    r = invoke(fakes, command, "--json")
+    assert r.exit_code == 0, r.output
+    assert fakes.schema.ensured == ["Docs"]
+    codes = [w["code"] for w in json.loads(r.stdout)["warnings"]]
+    assert "server_version_unknown" in codes
+
+
+def test_copy_ignores_the_server_version_for_a_collection_it_does_not_copy():
+    source = FakeSource(cli_records(10))
+    fakes = FakeFactories(source, schema=FakeSchema(version="1.30.23"))
+    inspected(fakes)
+    path = Path(DIR) / "plan.yaml"
+    plan = yaml.safe_load(path.read_text(encoding="utf-8"))
+    other = json.loads(json.dumps(plan["collections"][0]))
+    other["source"]["ref"] += "-other"
+    other["source"]["name"] = "other"
+    other["target"]["name"] = "Other"
+    other["target"]["vectors"][0]["index"] = {
+        "type": "hnsw",
+        "quantizer": {"type": "rq"},
+    }
+    plan["collections"].append(other)
+    path.write_text(yaml.safe_dump(plan, sort_keys=False), encoding="utf-8")
+    inspect_path = Path(DIR) / "inspect.json"
+    seen = json.loads(inspect_path.read_text(encoding="utf-8"))
+    twin = {**seen["collections"][0], "ref": other["source"]["ref"], "name": "other"}
+    seen["collections"].append(twin)
+    inspect_path.write_text(json.dumps(seen), encoding="utf-8")
+    r = invoke(fakes, "copy", "--collection", "Docs", "--json")
+    assert r.exit_code == 0, r.output
+    assert fakes.schema.ensured == ["Docs"]
+
+
 def test_check_gives_no_async_indexing_warning_without_a_dynamic_index():
     fakes = inspected(FakeFactories(FakeSource(cli_records(10))), "--index", "hnsw")
     r = invoke(fakes, "check", "--json")

@@ -61,6 +61,7 @@ from to_weaviate.engine.check import (
     replication_findings,
     target_groups,
     userinfo_only,
+    version_findings,
 )
 from to_weaviate.engine.copy import (
     REJECTS_HINT,
@@ -145,7 +146,7 @@ from to_weaviate.state import (
     Target,
     unwritable_reason,
 )
-from to_weaviate.target.connect import connect
+from to_weaviate.target.connect import VersionUnreadable, connect
 from to_weaviate.target.deleter import DeleteFailed, Deleter, WeaviateDeleter
 from to_weaviate.target.reader import SOURCE_ID, TargetReader, WeaviateReader
 from to_weaviate.target.schema import (
@@ -159,6 +160,7 @@ from to_weaviate.target.schema import (
     auto_factor,
     nearest_grpc_status,
 )
+from to_weaviate.target.versions import MINIMUM_VERSION, version_text
 from to_weaviate.target.writer import (
     BatchRefused,
     ProviderRefused,
@@ -217,6 +219,16 @@ NOT_COMPACTED_HINT = (
 NO_COLLECTION_HINT = "Check --database, CHROMA_DATABASE and CHROMA_TENANT."
 WEAVIATE_HINT = (
     "Check WEAVIATE_URL, WEAVIATE_GRPC_URL and that the Weaviate server is running."
+)
+# The client's startup error for a server older than it connects to.
+UNSUPPORTED_VERSION = re.compile(
+    r"Weaviate version (\S+) is not supported\."
+    r"(?: Please use Weaviate version (\S+) or higher\.)?"
+)
+NO_RELEASE_HINT = (
+    "Check that WEAVIATE_URL is the Weaviate server you mean. to-weaviate needs "
+    f"a server that reports a release version, {version_text(MINIMUM_VERSION)} or "
+    "later."
 )
 ISSUES_URL = "https://github.com/weaviate/to-weaviate/issues"
 INTERNAL_HINT = (
@@ -317,6 +329,16 @@ def _refused(service: str, key: str, forbidden: bool) -> CliError:
         f"{service} refused the request: {reason}.",
         f"Check {key} in the environment or in .env.",
     )
+
+
+def _version_unreadable(reported: str | None) -> CliError:
+    message = "The Weaviate server reports no version."
+    if reported is not None:
+        message = (
+            f"The Weaviate server reports the version {reported}, which the "
+            "Weaviate client cannot read."
+        )
+    return CliError("target_version_unsupported", message, NO_RELEASE_HINT)
 
 
 def _source_rejected(status: int) -> bool:
@@ -427,6 +449,22 @@ def _as_cli_error(exc: Exception) -> CliError:
         variables = key_variables(exc.provider)
         key = " or ".join(variables) if variables else f"the key of {exc.provider}"
         return _refused(exc.provider, key, exc.status == 403)
+    if isinstance(exc, VersionUnreadable):
+        return _version_unreadable(exc.reported)
+    if isinstance(exc, WeaviateStartUpError):
+        unsupported = UNSUPPORTED_VERSION.search(str(exc))
+        if unsupported is not None:
+            version, minimum = unsupported.groups()
+            if version == "0.0.0":
+                # The client reads an empty version text as 0.0.0.
+                return _version_unreadable(None)
+            minimum = minimum or version_text(MINIMUM_VERSION)
+            return CliError(
+                "target_version_unsupported",
+                f"The Weaviate server runs version {version}. to-weaviate needs "
+                f"Weaviate {minimum} or later.",
+                f"Upgrade the Weaviate server to {minimum} or later.",
+            )
     if isinstance(
         exc,
         WeaviateConnectionError
@@ -950,6 +988,9 @@ def _check(factories: _Factories, directory: Path, json_output: bool) -> None:
     schema = factories.schema(settings)
     errors.extend(module_findings(plan, schema.modules()))
     groups = target_groups(plan.collections)
+    version_errors, version_warnings = version_findings(groups, schema.version())
+    errors.extend(version_errors)
+    warnings.extend(version_warnings)
     for name, group in groups.items():
         for difference in schema.differences(group) or []:
             errors.append(Finding("plan_mismatch", name, difference))
@@ -1182,10 +1223,10 @@ def _writing(
 ) -> Iterator[_Run]:
     """The checks before a copy or a sync, then the state under `copy.lock`.
 
-    Raises the plan, source, provider-key, module and state errors, and
-    creates the target collections. The state is closed on exit. When a first
-    run meets objects that `sync --prune` would delete, it goes on only with
-    `yes` or a yes at the prompt of a terminal; else it raises
+    Raises the plan, source, provider-key, module, server-version and state
+    errors, and creates the target collections. The state is closed on exit.
+    When a first run meets objects that `sync --prune` would delete, it goes
+    on only with `yes` or a yes at the prompt of a terminal; else it raises
     `foreign_objects` before it creates or writes anything.
     """
     if not 1 <= parallelism <= MAX_PARALLELISM:
@@ -1219,8 +1260,11 @@ def _writing(
             for f in module_findings(plan, schema.modules())
             if collection_key(f.collection) in keys
         ]
-        if module_errors:
-            raise _plan_errors(module_errors, warnings)
+        version_errors, version_warnings = version_findings(selected, schema.version())
+        warnings.extend(version_warnings)
+        target_errors = [*module_errors, *version_errors]
+        if target_errors:
+            raise _plan_errors(target_errors, warnings)
         writer = factories.writer(target_settings, consistency)
         reader = factories.reader(target_settings)
         source_names = {c.ref: c.name for c in inspected.values()}

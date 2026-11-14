@@ -233,7 +233,9 @@ distance is `l2-squared` or `dot` and `--index` is `default`, `inspect` sets
 
 The rules below are those of the Weaviate version in
 [`tests/acceptance/weaviate-version`](../tests/acceptance/weaviate-version).
-`inspect`, `check` and `copy` refuse any other combination.
+`inspect`, `check` and `copy` refuse any other combination. An older
+server lacks some of these settings; see
+[Minimum version per plan setting](weaviate.md#minimum-version-per-plan-setting).
 
 | Index type | `index.options` | Quantizer types | `rq` bits |
 |---|---|---|---|

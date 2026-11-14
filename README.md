@@ -42,6 +42,8 @@ The Weaviate team maintains it.
   A free (sandbox) Weaviate Cloud cluster accepts only the index type
   `hfresh`; for one, run `inspect` with `--index hfresh`.
   [Weaviate target](https://github.com/weaviate/to-weaviate/blob/main/docs/weaviate.md) has the details.
+  The server must run Weaviate 1.27.0 or later; see
+  [Supported Weaviate versions](https://github.com/weaviate/to-weaviate/blob/main/docs/weaviate.md#supported-weaviate-versions).
 - Read access to the source. See the [source guide](https://github.com/weaviate/to-weaviate/blob/main/docs/sources/README.md).
 
 ```bash

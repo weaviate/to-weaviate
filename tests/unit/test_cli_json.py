@@ -43,6 +43,7 @@ from to_weaviate.sources.chroma.client import (
     ChromaClient,
     ChromaError,
 )
+from to_weaviate.target.connect import VersionUnreadable
 from to_weaviate.target.schema import collection_kwargs
 from to_weaviate.target.writer import WeaviateWriter
 
@@ -1165,8 +1166,119 @@ def test_error_exit_covers_every_code():
         "source_writing": 4,
         "delete_failed": 4,
         "foreign_objects": 2,
+        "target_version_unsupported": 2,
         "internal_error": 5,
     }
+
+
+UNSUPPORTED = (
+    "Weaviate version 1.26.18 is not supported. Please use Weaviate version "
+    "1.27.0 or higher."
+)
+
+
+@pytest.mark.parametrize("cmd", ["check", "copy", "sync", "verify"])
+def test_a_server_older_than_the_minimum_is_its_own_error_with_exit_2(cmd):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    fakes.target_error = WeaviateStartUpError(UNSUPPORTED)
+    r = invoke(fakes, cmd, "--json")
+    assert r.exit_code == 2, r.output
+    assert json.loads(r.stdout) == {
+        "status": "error",
+        "code": "target_version_unsupported",
+        "message": "The Weaviate server runs version 1.26.18. to-weaviate needs "
+        "Weaviate 1.27.0 or later.",
+        "hint": "Upgrade the Weaviate server to 1.27.0 or later.",
+    }
+
+
+def test_an_old_server_error_names_the_minimum_of_the_client_message():
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    fakes.target_error = WeaviateStartUpError(
+        "Weaviate version 1.27.5 is not supported. Please use Weaviate version "
+        "1.28.0 or higher."
+    )
+    d = json.loads(invoke(fakes, "check", "--json").stdout)
+    assert d["code"] == "target_version_unsupported"
+    assert d["message"] == (
+        "The Weaviate server runs version 1.27.5. to-weaviate needs Weaviate "
+        "1.28.0 or later."
+    )
+    assert d["hint"] == "Upgrade the Weaviate server to 1.28.0 or later."
+
+
+def test_an_old_server_error_without_a_minimum_names_the_documented_one():
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    fakes.target_error = WeaviateStartUpError(
+        "Weaviate version 1.26.18 is not supported."
+    )
+    d = json.loads(invoke(fakes, "check", "--json").stdout)
+    assert d["code"] == "target_version_unsupported"
+    assert d["hint"] == "Upgrade the Weaviate server to 1.27.0 or later."
+
+
+NO_RELEASE_HINT = (
+    "Check that WEAVIATE_URL is the Weaviate server you mean. to-weaviate needs "
+    "a server that reports a release version, 1.27.0 or later."
+)
+
+
+@pytest.mark.parametrize(
+    ("reported", "message"),
+    [
+        (
+            "nightly",
+            "The Weaviate server reports the version nightly, which the Weaviate "
+            "client cannot read.",
+        ),
+        (None, "The Weaviate server reports no version."),
+    ],
+)
+@pytest.mark.parametrize("cmd", ["check", "copy", "sync", "verify"])
+def test_a_server_version_the_client_cannot_read_is_exit_2(cmd, reported, message):
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    fakes.target_error = VersionUnreadable(reported)
+    r = invoke(fakes, cmd, "--json")
+    assert r.exit_code == 2, r.output
+    assert json.loads(r.stdout) == {
+        "status": "error",
+        "code": "target_version_unsupported",
+        "message": message,
+        "hint": NO_RELEASE_HINT,
+    }
+
+
+def test_the_version_0_0_0_of_the_client_is_reported_as_no_version():
+    # The client reads an empty version text as 0.0.0; see test_schema.py.
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    fakes.target_error = WeaviateStartUpError(
+        "Weaviate version 0.0.0 is not supported. Please use Weaviate version "
+        "1.27.0 or higher."
+    )
+    r = invoke(fakes, "check", "--json")
+    assert r.exit_code == 2, r.output
+    assert json.loads(r.stdout) == {
+        "status": "error",
+        "code": "target_version_unsupported",
+        "message": "The Weaviate server reports no version.",
+        "hint": NO_RELEASE_HINT,
+    }
+
+
+def test_another_startup_error_stays_target_unreachable():
+    fakes = FakeFactories(FakeSource(cli_records(10)))
+    assert invoke(fakes, "inspect", "chroma").exit_code == 0
+    fakes.target_error = WeaviateStartUpError(
+        "Could not connect to Weaviate: the gRPC protocol is not supported."
+    )
+    r = invoke(fakes, "check", "--json")
+    assert r.exit_code == 4
+    assert json.loads(r.stdout)["code"] == "target_unreachable"
 
 
 def test_a_compaction_during_copy_is_source_compacting_exit_4():
