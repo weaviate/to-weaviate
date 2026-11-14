@@ -20,6 +20,7 @@ from weaviate.collections.classes.config import (
     _VectorIndexConfigHNSW,
 )
 from weaviate.exceptions import (
+    InsufficientPermissionsError,
     UnexpectedStatusCodeError,
     WeaviateBaseError,
     WeaviateBatchError,
@@ -35,6 +36,7 @@ from to_weaviate.settings import WeaviateSettings
 from to_weaviate.target import connect as connect_module
 from to_weaviate.target import schema
 from to_weaviate.target.schema import (
+    Created,
     PlanMismatch,
     PropertyRejected,
     SchemaRejected,
@@ -43,7 +45,9 @@ from to_weaviate.target.schema import (
     differences,
     ensure_collection,
     missing_properties,
+    node_count,
     quantizer_updates,
+    replication_factor,
 )
 
 PROPS = [
@@ -244,6 +248,8 @@ class FakeCollections:
         self.existing = existing
         self.created: list[dict[str, Any]] = []
         self.fail: list[Exception] = []
+        # The config of a collection that `create` makes.
+        self.created_cfg: Any = None
 
     def exists(self, name: str) -> bool:
         return self.existing is not None
@@ -256,13 +262,29 @@ class FakeCollections:
         if self.fail:
             raise self.fail.pop(0)
         self.created.append(kwargs)
-        self.existing = FakeCollection()
+        self.existing = FakeCollection(self.created_cfg)
         return self.existing
 
 
+class FakeCluster:
+    """`nodes` raises each error of `fail` in turn, then returns `count` nodes."""
+
+    def __init__(self, count: int) -> None:
+        self.count = count
+        self.fail: list[Exception] = []
+        self.calls = 0
+
+    def nodes(self) -> list[Any]:
+        self.calls += 1
+        if self.fail:
+            raise self.fail.pop(0)
+        return [SimpleNamespace(name=f"node-{i}") for i in range(self.count)]
+
+
 class FakeClient:
-    def __init__(self, existing: FakeCollection | None) -> None:
+    def __init__(self, existing: FakeCollection | None, nodes: int = 1) -> None:
         self.collections = FakeCollections(existing)
+        self.cluster = FakeCluster(nodes)
 
 
 def hnsw(distance: Any = VectorDistances.COSINE, quantizer: Any = None) -> Any:
@@ -290,6 +312,7 @@ def config(
     vector_name: str = "default",
     properties: dict[str, str] | None = None,
     tenancy: bool = False,
+    factor: int = 1,
 ) -> Any:
     props = {"document": "text", "source_id": "text", "year": "int"}
     props.update(properties or {})
@@ -305,6 +328,7 @@ def config(
             for n, t in props.items()
         ],
         multi_tenancy_config=SimpleNamespace(enabled=tenancy),
+        replication_config=SimpleNamespace(factor=factor),
     )
 
 
@@ -699,8 +723,11 @@ def test_already_exists_on_the_first_create_attempt_is_schema_rejected():
 def test_a_create_refused_for_another_reason_after_a_lost_answer_is_schema_rejected():
     client = FakeClient(None)
     body = {"error": [{"message": "vector index dynamic needs async indexing"}]}
+    # Under `replication_factor: auto` a refused create is sent once more
+    # without a factor, so the server refuses two creates.
     client.collections.fail = [
         WeaviateTimeoutError("read timeout"),
+        UnexpectedStatusCodeError("refused", httpx.Response(422, json=body)),
         UnexpectedStatusCodeError("refused", httpx.Response(422, json=body)),
     ]
     with pytest.raises(SchemaRejected) as info:
@@ -1091,15 +1118,19 @@ def test_weaviate_schema_differences_and_ensure_use_the_client():
 def test_weaviate_schema_turns_a_refused_creation_into_schema_rejected(status):
     client = FakeClient(None)
     body = {"error": [{"message": "vector index dynamic needs async indexing"}]}
+    # Under `replication_factor: auto` a refused create is sent once more
+    # without a factor, so the server refuses two creates.
     client.collections.fail = [
         UnexpectedStatusCodeError(
             "Collection may not have been created properly.",
             httpx.Response(status, json=body),
         )
+        for _ in range(2)
     ]
     with pytest.raises(SchemaRejected) as info:
         WeaviateSchema(client).ensure([entry()])  # type: ignore[arg-type]
     assert str(info.value) == "vector index dynamic needs async indexing"
+    assert client.collections.fail == []
 
 
 def test_weaviate_schema_keeps_other_status_errors():
@@ -1539,3 +1570,220 @@ def test_ensure_resumes_into_a_collection_made_from_the_same_plan():
     )
     index = p.IndexPlan(type="hnsw", quantizer=quantizer)
     assert ensure_collection(client, [entry(index=index)]) == "exists"  # type: ignore[arg-type]
+
+
+def factor_entry(factor: Any) -> p.CollectionPlan:
+    made = entry()
+    target = made.target.model_copy(update={"replication_factor": factor})
+    return made.model_copy(update={"target": target})
+
+
+def sent_factors(client: FakeClient) -> list[int | None]:
+    """The factor of each create that passed; None for one that sent no factor."""
+    sent = [kwargs.get("replication_config") for kwargs in client.collections.created]
+    return [None if config is None else config.factor for config in sent]
+
+
+def ensure_reported(client: FakeClient, group: list[p.CollectionPlan]) -> list[Created]:
+    reported: list[Created] = []
+    ensure_collection(client, group, sleep=lambda s: None, created=reported.append)  # type: ignore[arg-type]
+    return reported
+
+
+def test_kwargs_send_no_replication_config_for_auto_without_a_factor():
+    assert "replication_config" not in collection_kwargs([entry()])
+
+
+def test_kwargs_send_only_the_factor():
+    for sent in (
+        collection_kwargs([entry()], 3)["replication_config"],
+        collection_kwargs([factor_entry(3)])["replication_config"],
+    ):
+        assert sent.model_dump(exclude_none=True) == {"factor": 3}
+
+
+def test_kwargs_send_the_planned_factor_whatever_the_auto_factor_is():
+    assert collection_kwargs([factor_entry(2)], 3)["replication_config"].factor == 2
+
+
+@pytest.mark.parametrize(("nodes", "factor"), [(1, 1), (2, 2), (3, 3), (5, 3)])
+def test_auto_creates_with_the_node_count_up_to_3(nodes, factor):
+    client = FakeClient(None, nodes=nodes)
+    assert ensure_reported(client, [entry()]) == [
+        Created("My_docs", factor, "nodes", nodes)
+    ]
+    assert sent_factors(client) == [factor]
+    assert client.cluster.calls == 1
+
+
+def test_auto_retries_a_transient_failure_of_the_node_read():
+    client = FakeClient(None, nodes=3)
+    client.cluster.fail = [WeaviateConnectionError("down")]
+    assert ensure_reported(client, [entry()]) == [Created("My_docs", 3, "nodes", 3)]
+
+
+def _forbidden() -> InsufficientPermissionsError:
+    return InsufficientPermissionsError(httpx.Response(403, json={}))
+
+
+def test_auto_sends_no_factor_when_the_node_read_is_forbidden():
+    client = FakeClient(None, nodes=3)
+    client.cluster.fail = [_forbidden()]
+    client.collections.created_cfg = config(factor=2)
+    assert ensure_reported(client, [entry()]) == [Created("My_docs", 2, "server")]
+    assert sent_factors(client) == [None]
+
+
+def test_auto_keeps_another_error_of_the_node_read():
+    client = FakeClient(None)
+    client.cluster.fail = [_status_error(401)]
+    with pytest.raises(UnexpectedStatusCodeError):
+        ensure_reported(client, [entry()])
+    assert client.collections.created == []
+
+
+def _refusal(status: int, message: str) -> UnexpectedStatusCodeError:
+    body = {"error": [{"message": message}]}
+    return UnexpectedStatusCodeError("refused", httpx.Response(status, json=body))
+
+
+MINIMUM = "invalid replication factor: setup requires a minimum of 5: got 3"
+
+
+@pytest.mark.parametrize("status", [400, 422])
+def test_auto_creates_again_without_a_factor_when_the_factor_is_refused(status):
+    client = FakeClient(None, nodes=3)
+    client.collections.fail = [_refusal(status, MINIMUM)]
+    client.collections.created_cfg = config(factor=5)
+    assert ensure_reported(client, [entry()]) == [
+        Created("My_docs", 5, "server", 3, MINIMUM)
+    ]
+    assert sent_factors(client) == [None]
+
+
+def test_auto_reports_the_refusal_of_the_create_without_a_factor():
+    client = FakeClient(None, nodes=3)
+    client.collections.fail = [
+        _refusal(422, MINIMUM),
+        _refusal(422, "second refusal"),
+        _refusal(422, "third refusal"),
+    ]
+    with pytest.raises(SchemaRejected) as info:
+        WeaviateSchema(client, sleep=lambda s: None).ensure([entry()])  # type: ignore[arg-type]
+    assert str(info.value) == "second refusal"
+    assert len(client.collections.fail) == 1 and client.collections.created == []
+
+
+def _count_creates(client: FakeClient) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    create = client.collections.create
+
+    def counted(**kwargs: Any) -> FakeCollection:
+        calls.append(kwargs)
+        return create(**kwargs)
+
+    client.collections.create = counted  # type: ignore[method-assign]
+    return calls
+
+
+def test_auto_counts_a_create_applied_before_its_answer_was_lost_as_created():
+    client = FakeClient(None, nodes=3)
+    _applied_then_lost(client, config(factor=3), WeaviateTimeoutError("read timeout"))
+    calls = _count_creates(client)
+    assert ensure_reported(client, [entry()]) == [Created("My_docs", 3, "nodes", 3)]
+    assert [kwargs["replication_config"].factor for kwargs in calls] == [3, 3]
+
+
+def test_auto_without_a_factor_counts_a_lost_create_as_created():
+    client = FakeClient(None, nodes=3)
+    client.cluster.fail = [_forbidden()]
+    _applied_then_lost(client, config(factor=2), WeaviateTimeoutError("read timeout"))
+    calls = _count_creates(client)
+    assert ensure_reported(client, [entry()]) == [Created("My_docs", 2, "server", None)]
+    assert ["replication_config" in kwargs for kwargs in calls] == [False, False]
+
+
+def test_auto_lost_create_that_left_another_collection_is_a_plan_mismatch():
+    client = FakeClient(None, nodes=3)
+    _applied_then_lost(
+        client, config(properties={"year": "text"}), WeaviateTimeoutError("t")
+    )
+    calls = _count_creates(client)
+    with pytest.raises(PlanMismatch, match="property year: type is text"):
+        ensure_reported(client, [entry()])
+    assert len(calls) == 2
+
+
+def test_auto_does_not_create_again_after_another_status():
+    client = FakeClient(None, nodes=3)
+    client.collections.fail = [_status_error(401), _status_error(401)]
+    with pytest.raises(UnexpectedStatusCodeError):
+        ensure_reported(client, [entry()])
+    assert len(client.collections.fail) == 1
+
+
+def test_auto_does_not_create_again_when_it_sent_no_factor():
+    client = FakeClient(None)
+    client.cluster.fail = [_forbidden()]
+    client.collections.fail = [_refusal(422, "first"), _refusal(422, "second")]
+    with pytest.raises(UnexpectedStatusCodeError):
+        ensure_reported(client, [entry()])
+    assert len(client.collections.fail) == 1
+
+
+@pytest.mark.parametrize("nodes", [1, 3, 5])
+def test_a_planned_factor_is_sent_as_it_is_without_a_node_read(nodes):
+    client = FakeClient(None, nodes=nodes)
+    assert ensure_reported(client, [factor_entry(2)]) == [Created("My_docs", 2, "plan")]
+    assert sent_factors(client) == [2]
+    assert client.cluster.calls == 0
+
+
+def test_a_refused_planned_factor_is_not_created_again():
+    client = FakeClient(None, nodes=1)
+    message = (
+        "could not find enough weaviate nodes for replication: 1 available, 3 requested"
+    )
+    client.collections.fail = [_refusal(422, message), _refusal(422, "second")]
+    with pytest.raises(SchemaRejected) as info:
+        WeaviateSchema(client, sleep=lambda s: None).ensure([factor_entry(3)])  # type: ignore[arg-type]
+    assert str(info.value) == message
+    assert len(client.collections.fail) == 1 and client.collections.created == []
+
+
+@pytest.mark.parametrize("factor", ["auto", 2])
+def test_an_existing_collection_is_not_reported_and_needs_no_node_read(factor):
+    client = FakeClient(FakeCollection(config(factor=2)), nodes=3)
+    assert ensure_reported(client, [factor_entry(factor)]) == []
+    assert client.cluster.calls == 0 and client.collections.created == []
+
+
+@pytest.mark.parametrize("stored", [1, 2, 3, 5])
+def test_differences_skip_the_factor_of_a_plan_with_auto(stored):
+    client = FakeClient(FakeCollection(config(factor=stored)), nodes=3)
+    assert differences(client, [entry()]) == []  # type: ignore[arg-type]
+    assert client.cluster.calls == 0
+
+
+def test_differences_compare_a_planned_factor():
+    client = FakeClient(FakeCollection(config(factor=1)))
+    assert differences(client, [factor_entry(3)]) == [  # type: ignore[arg-type]
+        "replication factor is 1, plan has 3"
+    ]
+    assert differences(client, [factor_entry(1)]) == []  # type: ignore[arg-type]
+
+
+def test_ensure_refuses_an_existing_collection_with_another_factor():
+    client = FakeClient(FakeCollection(config(factor=1)))
+    with pytest.raises(PlanMismatch, match="replication factor is 1, plan has 3"):
+        ensure_collection(client, [factor_entry(3)])  # type: ignore[arg-type]
+
+
+def test_the_schema_reads_the_node_count_and_the_factor_of_a_collection():
+    client = FakeClient(FakeCollection(config(factor=2)), nodes=5)
+    made = WeaviateSchema(client, sleep=lambda s: None)  # type: ignore[arg-type]
+    assert made.nodes() == 5
+    assert made.replication_factor([entry()]) == 2
+    assert replication_factor(FakeClient(None), [entry()]) is None  # type: ignore[arg-type]
+    client.cluster.fail = [_forbidden()]
+    assert node_count(client, lambda s: None) is None  # type: ignore[arg-type]

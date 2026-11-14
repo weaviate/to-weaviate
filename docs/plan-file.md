@@ -31,6 +31,7 @@ collections:
   target:
     name: Docs_cosine
     tenant: null
+    replication_factor: auto
     vectors:
     - name: default
       mode: keep
@@ -83,6 +84,7 @@ and the properties `source_id`, `uri` and the other metadata keys.
 | `collections[].source` | `inspect` | The source collection: its id, namespace, name, count, dimension, distance and embedding configuration. Do not edit it. |
 | `collections[].target.name` | you may edit | The Weaviate collection. |
 | `collections[].target.tenant` | you may edit | A tenant of the collection, or `null` for a collection without multi-tenancy. |
+| `collections[].target.replication_factor` | you may edit | `auto`, or the number of nodes that hold each object, from 1. It applies when `copy` creates the collection. See [replication](weaviate.md#replication). |
 | `collections[].target.vectors` | you may edit | The named vectors. See [vector modes](#vector-modes) and [index and quantizer](#index-and-quantizer). |
 | `collections[].target.properties` | you may edit | One entry per source field. See [properties](#properties). |
 | `collections[].target.dropped` | you may edit | Source keys that are not copied, each with a reason. |
@@ -93,9 +95,9 @@ and the properties `source_id`, `uri` and the other metadata keys.
 - Rename a target collection: change `target.name`.
 - Merge several source collections into one collection, one tenant each:
   give the entries the same `target.name` and a different `target.tenant`.
-  The entries must have the same vectors, the same settings for each property
-  that more than one of them has, and no two property names that differ only
-  in case.
+  The entries must have the same vectors, the same `replication_factor`,
+  the same settings for each property that more than one of them has, and no
+  two property names that differ only in case.
 - Rename a property, change its type, its tokenization or its index flags.
 - Drop a metadata key: remove its property and list the key under
   `target.dropped` with a reason. Each metadata key must be a property or
@@ -103,6 +105,10 @@ and the properties `source_id`, `uri` and the other metadata keys.
   (`unmapped_key`).
 - Change the `mode` of a vector (`keep` or `embed`), the vectorizer, the
   index type or the quantizer.
+- Set `replication_factor` to a number before the first `copy`. A change of
+  it after the collection exists writes no record again: `auto` accepts the
+  collection, and another number stops `copy` and `sync` with
+  `plan_mismatch`.
 
 After a `copy`, an edit that Weaviate takes on the existing collection, such
 as a renamed, added or dropped property, makes the next

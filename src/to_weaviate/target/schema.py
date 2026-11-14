@@ -3,6 +3,7 @@ import re
 import time
 import typing
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Literal, Protocol, Union
 
 import weaviate
@@ -123,6 +124,31 @@ class PropertyRejected(SchemaRejected):
     """The server refused to add a property to an existing collection."""
 
 
+MAX_AUTO_FACTOR = 3
+
+
+def auto_factor(nodes: int) -> int:
+    """The factor that `replication_factor: auto` sends to a cluster of `nodes`."""
+    return max(1, min(MAX_AUTO_FACTOR, nodes))
+
+
+@dataclass(frozen=True)
+class Created:
+    """A collection that `ensure_collection` created, and its replication factor.
+
+    `chosen_by` is "plan" for a factor of the plan and "nodes" for the factor
+    that `auto` took from the node count. It is "server" when the create sent
+    no factor: the key may not read the nodes (`nodes` is None), or the server
+    refused the factor of `auto` with the message `refused`.
+    """
+
+    name: str
+    factor: int
+    chosen_by: Literal["plan", "nodes", "server"]
+    nodes: int | None = None
+    refused: str | None = None
+
+
 class Schema(Protocol):
     """Target schema operations. `group` holds the entries of one target name."""
 
@@ -132,7 +158,19 @@ class Schema(Protocol):
 
     def missing_properties(self, group: list[CollectionPlan]) -> list[str]: ...
 
-    def ensure(self, group: list[CollectionPlan]) -> Literal["created", "exists"]: ...
+    def nodes(self) -> int | None:
+        """The number of nodes; None when the key may not read them."""
+        ...
+
+    def replication_factor(self, group: list[CollectionPlan]) -> int | None:
+        """The factor of the existing collection; None without one."""
+        ...
+
+    def ensure(
+        self,
+        group: list[CollectionPlan],
+        created: Callable[[Created], None] | None = None,
+    ) -> Literal["created", "exists"]: ...
 
     def enable_trained_quantizers(self, entry: CollectionPlan) -> None: ...
 
@@ -383,8 +421,17 @@ def _tenants(group: list[CollectionPlan]) -> list[str]:
     return list(dict.fromkeys(e.target.tenant for e in group if e.target.tenant))
 
 
-def collection_kwargs(group: list[CollectionPlan]) -> dict[str, Any]:
+def collection_kwargs(
+    group: list[CollectionPlan], auto: int | None = None
+) -> dict[str, Any]:
+    """The arguments that create the collection of `group`.
+
+    `auto` is the factor to send for `replication_factor: auto`. Without it
+    and without a factor in the plan, the server chooses the factor.
+    """
     name = group[0].target.name
+    planned = group[0].target.replication_factor
+    factor = planned if isinstance(planned, int) else auto
     kwargs: dict[str, Any] = {
         "name": name,
         "properties": [_property(p) for p in _properties(group)],
@@ -392,6 +439,8 @@ def collection_kwargs(group: list[CollectionPlan]) -> dict[str, Any]:
     }
     if _tenants(group):
         kwargs["multi_tenancy_config"] = Configure.multi_tenancy(enabled=True)
+    if factor is not None:
+        kwargs["replication_config"] = Configure.replication(factor=factor)
     return kwargs
 
 
@@ -555,7 +604,79 @@ def differences(
         out.append(
             f"multi-tenancy is {found_mt}, plan has {'on' if planned_mt else 'off'}"
         )
+    planned_factor = group[0].target.replication_factor
+    if isinstance(planned_factor, int):
+        found_factor = cfg.replication_config.factor
+        if found_factor != planned_factor:
+            out.append(
+                f"replication factor is {found_factor}, plan has {planned_factor}"
+            )
     return out
+
+
+def node_count(
+    client: weaviate.WeaviateClient, sleep: Callable[[float], None] = time.sleep
+) -> int | None:
+    """The number of nodes; None when the key may not read them."""
+    try:
+        return len(with_retry(client.cluster.nodes, transient, sleep=sleep))
+    except UnexpectedStatusCodeError as exc:
+        if exc.status_code == 403:
+            return None
+        raise
+
+
+def replication_factor(
+    client: weaviate.WeaviateClient,
+    group: list[CollectionPlan],
+    sleep: Callable[[float], None] = time.sleep,
+) -> int | None:
+    """The factor of the existing collection of `group`; None without one."""
+    name = group[0].target.name
+    if not client.collections.exists(name):
+        return None
+    config = client.collections.get(name).config
+    return with_retry(config.get, transient, sleep=sleep).replication_config.factor
+
+
+def _create(
+    client: weaviate.WeaviateClient,
+    group: list[CollectionPlan],
+    sleep: Callable[[float], None],
+) -> Created:
+    """Create the collection of `group` with the factor that the plan asks for.
+
+    `auto` sends min(3, nodes). It sends no factor when the key may not read
+    the nodes. When the server refuses the factor with 400 or 422, it creates
+    once more without a factor; the error of that create is raised. A 400 or
+    422 after a retried attempt is a refusal of the factor only when no
+    collection exists; `_send_create` handles the other cases.
+    """
+    name = group[0].target.name
+
+    def create(auto: int | None) -> None:
+        _send_create(client, group, auto, sleep)
+
+    planned = group[0].target.replication_factor
+    if isinstance(planned, int):
+        create(None)
+        return Created(name, planned, "plan")
+    nodes = node_count(client, sleep)
+    refused = None
+    if nodes is not None:
+        factor = auto_factor(nodes)
+        try:
+            create(factor)
+        except UnexpectedStatusCodeError as exc:
+            if exc.status_code not in (400, 422):
+                raise
+            refused = _server_message(exc)
+        else:
+            return Created(name, factor, "nodes", nodes)
+    create(None)
+    stored = replication_factor(client, group, sleep)
+    assert stored is not None
+    return Created(name, stored, "server", nodes, refused)
 
 
 def _missing_properties(
@@ -592,12 +713,13 @@ def _add_property(
         raise
 
 
-def _create(
+def _send_create(
     client: weaviate.WeaviateClient,
     group: list[CollectionPlan],
+    auto: int | None,
     sleep: Callable[[float], None],
 ) -> None:
-    """Create the collection of `group`.
+    """Send the create of the collection of `group`, with `auto` as its factor.
 
     The server can apply a create whose answer does not arrive. The attempt
     after it is then refused, because the collection exists. A 400 or 422
@@ -606,7 +728,7 @@ def _create(
     raises PlanMismatch. A matching collection can come from another writer,
     so the planned properties it lacks are added.
     """
-    kwargs = collection_kwargs(group)
+    kwargs = collection_kwargs(group, auto)
     retried = False
 
     def judge(exc: Exception) -> float | None:
@@ -633,10 +755,12 @@ def ensure_collection(
     client: weaviate.WeaviateClient,
     group: list[CollectionPlan],
     sleep: Callable[[float], None] = time.sleep,
+    created: Callable[[Created], None] | None = None,
 ) -> Literal["created", "exists"]:
     """Create the collection of `group`, or add the planned properties it lacks.
 
     Raises PlanMismatch when the existing collection has other settings.
+    `created` gets the collection that this call created.
     """
     found = differences(client, group)
     if found:
@@ -644,7 +768,9 @@ def ensure_collection(
     name = group[0].target.name
     result: Literal["created", "exists"] = "exists"
     if found is None:
-        _create(client, group, sleep)
+        made = _create(client, group, sleep)
+        if created is not None:
+            created(made)
         result = "created"
     else:
         for prop in _missing_properties(client, group):
@@ -698,9 +824,19 @@ class WeaviateSchema:
     def missing_properties(self, group: list[CollectionPlan]) -> list[str]:
         return missing_properties(self._client, group)
 
-    def ensure(self, group: list[CollectionPlan]) -> Literal["created", "exists"]:
+    def nodes(self) -> int | None:
+        return node_count(self._client, self._sleep)
+
+    def replication_factor(self, group: list[CollectionPlan]) -> int | None:
+        return replication_factor(self._client, group, self._sleep)
+
+    def ensure(
+        self,
+        group: list[CollectionPlan],
+        created: Callable[[Created], None] | None = None,
+    ) -> Literal["created", "exists"]:
         try:
-            return ensure_collection(self._client, group, self._sleep)
+            return ensure_collection(self._client, group, self._sleep, created)
         except UnexpectedStatusCodeError as exc:
             if exc.status_code in (400, 422):
                 raise SchemaRejected(_server_message(exc)) from exc

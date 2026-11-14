@@ -123,9 +123,9 @@ def test_a_trained_quantizer_compresses_the_vectors_of_every_tenant(seeded, tmp_
         entry["target"]["vectors"][0]["index"] = index
     write_plan(tmp_path, plan)
     copy_and_verify(tmp_path)
-    # One shard per tenant, on as many nodes as the replication factor, which
-    # is the node count in both CI setups. copy enabled sq after the pages of
-    # each tenant.
+    # One shard per tenant, on as many nodes as the replication factor. copy
+    # creates the collection with min(3, nodes) replicas, which is the node
+    # count in both CI setups. copy enabled sq after the pages of each tenant.
     every_shard = [True] * (len(TENANTS) * nodes())
     deadline = time.monotonic() + compression_wait()
     while weaviate_compressed(TARGET) != every_shard and time.monotonic() < deadline:

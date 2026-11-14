@@ -77,7 +77,9 @@ provider key that a planned vectorizer needs. `engine/check.py` returns
 findings from the plan and `inspect.json`, and from the modules the target
 has enabled. `cli.py` adds the differences that `target/schema.py` finds in
 existing collections, and a `missing_property` warning for each planned
-property that an existing collection lacks. `check` writes nothing.
+property that an existing collection lacks. It reads the node count and the
+factor of each existing collection for `engine/check.replication_findings`.
+`check` writes nothing.
 
 **`copy`**:
 
@@ -90,7 +92,9 @@ property that an existing collection lacks. `check` writes nothing.
    not hold are there, `cli.py` warns, asks in a terminal, and stops with
    `foreign_objects` unless the answer is yes or `--yes` was given.
 2. `target/schema.ensure_collection` creates each target collection, or
-   compares the existing one with the plan and adds missing properties.
+   compares the existing one with the plan and adds missing properties. For
+   `replication_factor: auto` it reads the node count before it creates a
+   collection. `cli.py` prints the factor of each created collection.
 3. For each plan entry, `engine/copy.copy_collection`:
    - calls `Source.wait_compacted`, which returns a state, or `None` for a
      source without compaction;

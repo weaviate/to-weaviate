@@ -70,20 +70,33 @@ exit 2, `invalid_plan`. A warning does not stop `copy` or `sync`.
 - An existing collection whose settings differ from the plan
   (`plan_mismatch`).
 - Plan entries that share a collection, one tenant each, with different
-  vectors, different settings for a shared property, or property names that
-  differ only in case. See
+  vectors, a different `replication_factor`
+  (`conflicting_replication_factor`), different settings for a shared
+  property, or property names that differ only in case. See
   [Edits you can make](plan-file.md#edits-you-can-make).
+- A `replication_factor` above the node count of the cluster, for a
+  collection that does not exist yet (`too_few_nodes`). See
+  [replication](weaviate.md#replication).
 - Warnings: `missing_property` (an existing collection lacks a planned
   property; `copy` adds it), `coerced_keys` (a metadata key with mixed types
   whose values `copy` converts), `large_ints` (an `int` or `number` property
   for a key that holds ints above 2**53, which `copy`
-  [rejects](plan-file.md#types-and-conversion)), and `quantizer_training` (a
+  [rejects](plan-file.md#types-and-conversion)), `quantizer_training` (a
   trained quantizer whose training limit is above the record count of the
-  source).
+  source), `not_replicated` (with `replication_factor: auto`, an existing
+  collection has factor 1 on a cluster of more than one node), and
+  `unknown_node_count` (the key may not read the nodes, so `check` did not
+  compare a planned factor with the node count, or `auto` has no node count
+  for a collection that does not exist yet).
 
 ## `copy`
 
 `copy` creates the target collections, then copies the records page by page.
+It prints the [replication factor](weaviate.md#replication) of each
+collection it creates and lists them under `created_collections` in its JSON
+document. With `replication_factor: auto`, it warns when the server chose the
+factor and the key may not read the nodes (`unknown_node_count`), or the
+factor is below the one that `auto` sent (`low_replication_factor`).
 
 | Option | Effect |
 |---|---|
@@ -445,6 +458,14 @@ A successful `copy`:
   ],
   "total": 700,
   "added_properties": [],
+  "created_collections": [
+    {
+      "collection": "Docs_cosine",
+      "replication_factor": 3,
+      "chosen_by": "nodes",
+      "nodes": 3
+    }
+  ],
   "warnings": [
     {
       "code": "coerced_keys",
@@ -477,9 +498,18 @@ A successful `sync --prune`:
     }
   ],
   "added_properties": [],
+  "created_collections": [],
   "warnings": []
 }
 ```
+
+`created_collections` lists the collections that the run created. `chosen_by`
+is `plan` for a factor of the plan, `nodes` for the factor that `auto` took
+from the node count `nodes`, and `server` when the request sent no factor.
+`server` has two cases. With `nodes` `null`, the key may not read the nodes.
+With a number in `nodes`, the server refused the factor that `auto` took from
+that node count. `nodes` is also `null` for `plan`: the run does not read the
+node count for a factor of the plan.
 
 `copied` counts the records written; `unchanged` the records whose stored
 hash matched. The `prune_limit` and `rejects` error documents hold the same

@@ -11,6 +11,8 @@ from to_weaviate.engine.check import (
     module_findings,
     plan_findings,
     provider_keys,
+    replication_findings,
+    target_groups,
 )
 from to_weaviate.sources.base import FieldStats, SourceCollection
 from to_weaviate.sources.chroma.mapping import vectorizer_for
@@ -674,6 +676,121 @@ def test_a_property_name_with_an_upper_case_first_letter_names_the_stored_name()
             "letter in lower case, as position; use that name",
         )
     ]
+
+
+def factor_entry(
+    factor: Any, tenant: str = "a", name: str = "Docs"
+) -> p.CollectionPlan:
+    made = tenant_entry(tenant)
+    target = made.target.model_copy(update={"replication_factor": factor, "name": name})
+    return made.model_copy(update={"target": target})
+
+
+def replication(
+    made: p.CollectionPlan, nodes: int | None, existing: int | None
+) -> tuple[list[Finding], list[Finding]]:
+    return replication_findings(target_groups([made]), nodes, {"Docs": existing})
+
+
+@pytest.mark.parametrize(("nodes", "factor"), [(1, 2), (2, 3), (3, 5)])
+def test_a_factor_above_the_node_count_is_an_error(nodes, factor):
+    errors, warnings = replication(factor_entry(factor), nodes, None)
+    assert errors == [
+        Finding(
+            "too_few_nodes",
+            "Docs",
+            f"replication_factor {factor} needs {factor} nodes and the cluster "
+            f"has {nodes}; lower replication_factor or set it to auto",
+        )
+    ]
+    assert warnings == []
+
+
+@pytest.mark.parametrize(("nodes", "factor"), [(1, 1), (3, 3), (5, 3), (3, 1)])
+def test_a_factor_up_to_the_node_count_has_no_finding(nodes, factor):
+    assert replication(factor_entry(factor), nodes, None) == ([], [])
+
+
+def test_a_factor_without_a_readable_node_count_is_a_warning():
+    errors, warnings = replication(factor_entry(3), None, None)
+    assert errors == []
+    assert warnings == [
+        Finding(
+            "unknown_node_count",
+            "Docs",
+            "check could not compare replication_factor 3 with the node count: "
+            "the API key may not read the nodes of the cluster",
+        )
+    ]
+
+
+@pytest.mark.parametrize("nodes", [1, None])
+def test_a_factor_is_not_compared_with_the_nodes_when_the_collection_exists(nodes):
+    assert replication(factor_entry(3), nodes, 3) == ([], [])
+
+
+@pytest.mark.parametrize("nodes", [2, 3, 5])
+def test_auto_warns_about_an_existing_collection_with_factor_1_on_more_nodes(nodes):
+    errors, warnings = replication(factor_entry("auto"), nodes, 1)
+    assert errors == []
+    assert warnings == [
+        Finding(
+            "not_replicated",
+            "Docs",
+            f"the collection exists with replication factor 1 and the cluster "
+            f"has {nodes} nodes; copy does not change the factor of an existing "
+            "collection. To replicate it, delete the collection and copy it "
+            "again with another --dir; copy then creates it with replication "
+            f"factor {min(nodes, 3)}",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("nodes", "existing"), [(1, 1), (None, 1), (3, 2), (3, 3), (3, None)]
+)
+def test_auto_has_no_finding_otherwise(nodes, existing):
+    assert replication(factor_entry("auto"), nodes, existing) == ([], [])
+
+
+def test_auto_without_a_readable_node_count_warns_about_a_new_collection():
+    errors, warnings = replication(factor_entry("auto"), None, None)
+    assert errors == []
+    assert warnings == [
+        Finding(
+            "unknown_node_count",
+            "Docs",
+            "the API key may not read the nodes of the cluster, so copy sends no "
+            "replication factor and the server chooses it. Set replication_factor "
+            "to a number, or give the key the permission to read the nodes",
+        )
+    ]
+
+
+def test_entries_of_one_collection_with_other_factors_conflict():
+    plan = plan_of(
+        factor_entry("auto", "a"), factor_entry(3, "b"), factor_entry("auto", "c")
+    )
+    errors, _ = plan_findings(plan, None, vectorizer_for)
+    assert errors == [
+        Finding(
+            "conflicting_replication_factor",
+            "Docs",
+            "replication_factor auto in docs -> Docs (tenant a), 3 in docs -> Docs "
+            "(tenant b); copy creates collection Docs with the factor of the "
+            "first entry, so give every entry of Docs the same replication_factor",
+        )
+    ]
+
+
+@pytest.mark.parametrize("factor", ["auto", 2])
+def test_entries_of_one_collection_with_one_factor_do_not_conflict(factor):
+    plan = plan_of(
+        factor_entry(factor, "a"),
+        factor_entry(factor, "b"),
+        factor_entry(3, "c", name="Other"),
+    )
+    assert plan_findings(plan, None, vectorizer_for)[0] == []
 
 
 def sampled(types: dict[str, int]) -> dict[str, SourceCollection]:

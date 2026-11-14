@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from weaviate.classes.config import VectorDistances
 
 from to_weaviate.naming import collection_name, property_name
@@ -224,9 +224,21 @@ class DroppedKey(_Model):
 class TargetPlan(_Model):
     name: str
     tenant: str | None = None
+    replication_factor: Literal["auto"] | int = "auto"
     vectors: list[VectorPlan]
     properties: list[PropertyPlan]
     dropped: list[DroppedKey] = []
+
+    @field_validator("replication_factor", mode="before")
+    @classmethod
+    def _factor(cls, value: Any) -> Any:
+        number = isinstance(value, int) and not isinstance(value, bool)
+        if value != "auto" and not (number and value >= 1):
+            raise ValueError(
+                f"replication_factor={value!r} is not valid; use auto or an "
+                "integer of at least 1"
+            )
+        return value
 
     @model_validator(mode="after")
     def _one_kept_vector(self) -> "TargetPlan":
