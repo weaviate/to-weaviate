@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 import pytest
 from fakes import raise_grpc_failure
+from weaviate.classes.config import ConsistencyLevel
 from weaviate.collections.classes.tenants import Tenant, TenantActivityStatus
 from weaviate.exceptions import (
     UnexpectedStatusCodeError,
@@ -13,6 +14,7 @@ from weaviate.exceptions import (
 )
 
 from to_weaviate import plan as p
+from to_weaviate.retry import ATTEMPTS
 from to_weaviate.sources.base import Record
 from to_weaviate.target.reader import FETCH_BATCH, WeaviateReader
 from to_weaviate.target.writer import TargetObject, to_object
@@ -105,6 +107,9 @@ class FakeCollection:
         self.objects = objects
         self.failures = failures
         self.applied_tenants: list[str] = []
+        self.applied_levels: list[Any] = []
+        self.on_a_quorum: set[str] = set()
+        self.data = SimpleNamespace(exists=self._exists)
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.aggregate = SimpleNamespace(over_all=self._over_all)
         self.query = SimpleNamespace(
@@ -141,6 +146,14 @@ class FakeCollection:
     def with_tenant(self, tenant: str) -> "FakeCollection":
         self.applied_tenants.append(tenant)
         return self
+
+    def with_consistency_level(self, level: Any) -> "FakeCollection":
+        self.applied_levels.append(level)
+        return self
+
+    def _exists(self, uuid: str) -> bool:
+        self._call("data.exists", {"uuid": uuid})
+        return uuid in self.on_a_quorum
 
     def _over_all(self, **kwargs: Any) -> Any:
         self._call("over_all", kwargs)
@@ -334,6 +347,41 @@ def test_source_ids_raises_a_refused_limit_after_the_first_object():
     with pytest.raises(WeaviateQueryError, match="QUERY_MAXIMUM_RESULTS"):
         list(reader(client).source_ids(ENTRY))
     assert len(client.collection.calls) == 1
+
+
+def test_present_reads_each_uuid_by_id_at_quorum():
+    client = FakeClient([])
+    client.collection.on_a_quorum = {"u1", "u3"}
+    found = reader(client).present(make_entry(tenant="t1"), ["u1", "u2", "u3"])
+    assert found == {"u1", "u3"}
+    assert client.collection.applied_tenants == ["t1"]
+    assert client.collection.applied_levels == [ConsistencyLevel.QUORUM]
+    assert client.collection.calls == [
+        ("data.exists", {"uuid": u}) for u in ("u1", "u2", "u3")
+    ]
+
+
+def test_present_retries_a_transient_error():
+    busy = UnexpectedStatusCodeError("x", httpx.Response(503))
+    client = FakeClient([], failures=[busy])
+    client.collection.on_a_quorum = {"u1"}
+    assert reader(client).present(ENTRY, ["u1"]) == {"u1"}
+    assert len(client.collection.calls) == 2
+
+
+def test_present_is_none_when_the_read_fails_on_every_attempt():
+    down = UnexpectedStatusCodeError("x", httpx.Response(500))
+    client = FakeClient([], failures=[down] * ATTEMPTS)
+    client.collection.on_a_quorum = {"u1", "u2"}
+    assert reader(client).present(ENTRY, ["u1", "u2"]) is None
+    assert len(client.collection.calls) == ATTEMPTS
+
+
+def test_present_raises_an_error_that_is_not_transient():
+    refused = UnexpectedStatusCodeError("x", httpx.Response(422))
+    client = FakeClient([], failures=[refused])
+    with pytest.raises(UnexpectedStatusCodeError):
+        reader(client).present(ENTRY, ["u1"])
 
 
 def test_transient_errors_are_retried_and_others_raised():

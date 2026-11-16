@@ -1,7 +1,7 @@
 import time
 
 import pytest
-from chroma.seed import count
+from chroma.seed import count, records
 from conftest import (
     compression_wait,
     copy_and_verify,
@@ -12,9 +12,13 @@ from conftest import (
     weaviate_config,
     weaviate_count,
     weaviate_exists,
+    weaviate_reader,
     weaviate_tenants,
     write_plan,
 )
+
+from to_weaviate.ids import to_uuid
+from to_weaviate.plan import load_plan
 
 TARGET = "Tenants"
 # Source collection to tenant of TARGET.
@@ -60,6 +64,25 @@ def test_two_collections_copy_into_two_tenants_of_one_collection(seeded, tmp_pat
     assert r.exit_code == 0, r
     for source, tenant in TENANTS.items():
         assert weaviate_count(TARGET, tenant) == count(source), tenant
+
+
+@pytest.mark.parametrize("tenant", [None, "a"], ids=["collection", "tenant"])
+def test_a_read_by_id_at_quorum_finds_the_stored_objects_only(seeded, tmp_path, tenant):
+    # verify reads an id again in this way when a listing or a search of one
+    # replica did not return it.
+    r = run(["inspect", "chroma", "--collection", "tenant-a"], tmp_path)
+    assert r.exit_code == 0, r
+    plan = read_plan(tmp_path)
+    plan["collections"][0]["target"].update(name=TARGET, tenant=tenant)
+    write_plan(tmp_path, plan)
+    copy_and_verify(tmp_path)
+    entry = load_plan(tmp_path / "plan.yaml").collections[0]
+    total = count("tenant-a")
+    stored = [to_uuid(record.id) for record in records("tenant-a", total)]
+    assert len(stored) == total
+    absent = to_uuid("not-a-record")
+    found = weaviate_reader().present(entry, [*stored, absent])
+    assert found == set(stored)
 
 
 def _position_as_text(entry: dict) -> None:

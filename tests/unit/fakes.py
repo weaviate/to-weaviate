@@ -428,9 +428,23 @@ class FakeReader:
 
     def __init__(self, writer: FakeWriter | FakeInsertClient) -> None:
         self.writer = writer
+        # uuids that the replica of a search or a listing lacks. `present`
+        # finds them.
+        self.lagging: set[str] = set()
+        self.present_calls: list[list[str]] = []
+        self.present_fails = False
+
+    def _stored(self, entry: CollectionPlan) -> dict[str, TargetObject]:
+        return self.writer.stored.get((entry.target.name, entry.target.tenant), {})
 
     def _objects(self, entry: CollectionPlan) -> dict[str, TargetObject]:
-        return self.writer.stored.get((entry.target.name, entry.target.tenant), {})
+        return {u: o for u, o in self._stored(entry).items() if u not in self.lagging}
+
+    def present(self, entry: CollectionPlan, uuids: list[str]) -> set[str] | None:
+        self.present_calls.append(list(uuids))
+        if self.present_fails:
+            return None
+        return set(uuids) & set(self._stored(entry))
 
     def active(self, entry: CollectionPlan) -> bool:
         """False for a (name, tenant) in the store's `inactive` set."""
@@ -649,6 +663,8 @@ class FakeFactories:
         self.consistency: list[str | None] = []
         self.delete_consistency: list[str | None] = []
         self.deleter = FakeDeleter(self.store or self.writer)  # type: ignore[arg-type]
+        # uuids that the reader's search and listing do not return.
+        self.lagging: set[str] = set()
 
     def app(self) -> typer.Typer:
         return build_app(
@@ -672,7 +688,9 @@ class FakeFactories:
     def _reader(self, settings: WeaviateSettings) -> FakeReader:
         if self.target_error is not None:
             raise self.target_error
-        return FakeReader(self.store or self.writer)  # type: ignore[arg-type]
+        reader = FakeReader(self.store or self.writer)  # type: ignore[arg-type]
+        reader.lagging = self.lagging
+        return reader
 
     def _deleter(
         self, settings: WeaviateSettings, consistency: str | None

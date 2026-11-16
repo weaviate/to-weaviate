@@ -347,6 +347,22 @@ def test_a_404_page_that_is_not_json_names_chroma_url():
     assert "CHROMA_URL" in d["hint"]
 
 
+def test_another_server_at_chroma_url_names_chroma_url_and_not_the_tenant():
+    # Weaviate answers an unknown path with this body.
+    server = ChromaServer(records(0, 10))
+    body = {"code": 404, "message": "path /api/v2/auth/identity was not found"}
+    server.faults["identity"] = [httpx.Response(404, json=body)]
+    r = invoke(ServerFactories(server), "inspect", "chroma", "--json")
+    assert r.exit_code == 2, r.output
+    assert json.loads(r.stdout) == {
+        "status": "error",
+        "code": "source_rejected",
+        "message": "Chroma returned HTTP 404: no route for GET /api/v2/auth/identity",
+        "hint": "Set CHROMA_URL to the root address of the Chroma server, without "
+        "a path such as /api/v2. The server must be Chroma 0.5.16 or later.",
+    }
+
+
 def test_a_404_of_a_missing_database_names_the_tenant_and_database_settings():
     server = ChromaServer(records(0, 10))
     body = {"error": "NotFoundError", "message": "Database [nope] not found"}

@@ -106,16 +106,27 @@ _RESERVED_OPTIONS = frozenset(
 
 
 class PlanMismatch(Exception):
-    pass
+    """The plan and the target collection differ, or the plan cannot be sent.
+
+    `collection` is the target collection, set by the caller that knows it.
+    """
+
+    collection: str | None = None
+
+
+CREATE_ACTION = "create the collection"
 
 
 class SchemaRejected(Exception):
     """The server refused a schema change; the message is the server's.
 
-    `action` names the change, as in "create the collection".
+    `action` names the change, as in "create the collection". `collection`
+    is the target collection, set by the caller that knows it.
     """
 
-    def __init__(self, message: str, action: str = "create the collection") -> None:
+    collection: str | None = None
+
+    def __init__(self, message: str, action: str = CREATE_ACTION) -> None:
         super().__init__(message)
         self.action = action
 

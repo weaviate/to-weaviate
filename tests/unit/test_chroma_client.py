@@ -784,6 +784,26 @@ def test_an_answer_of_a_missing_route_names_the_route_and_chroma_url(
     assert sleeps == []
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"code": 404, "message": "path /api/v2/auth/identity was not found"},
+        {"error": "NotFoundError", "message": "Tenant [t] not found"},
+        ["not found"],
+    ],
+    ids=["weaviate", "chroma error shape", "list"],
+)
+def test_a_404_with_a_body_on_the_identity_names_the_route_and_chroma_url(body):
+    client, sleeps = make(lambda r: httpx.Response(404, json=body))
+    with pytest.raises(ChromaError) as info:
+        client.identity()
+    assert (str(info.value), info.value.hint) == (
+        "Chroma returned HTTP 404: no route for GET /api/v2/auth/identity",
+        NO_ROUTE_HINT,
+    )
+    assert sleeps == []
+
+
 def test_a_405_with_a_body_keeps_the_general_hint():
     answer = httpx.Response(405, json={"detail": "Method Not Allowed"})
     client, _ = make(lambda r: answer)

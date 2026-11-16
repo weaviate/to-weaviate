@@ -373,6 +373,22 @@ with `plan_mismatch`. Copy into a new collection instead. Use another
 `--dir`, and give the target a name that does not exist, or delete the
 collection first.
 
+The listing of `ids` and the search of `records` read one replica of each
+shard. After a node restart during the copy, one replica can lack objects
+that the others hold. `verify` reads an id that the listing or the search did
+not return again by id, at consistency level QUORUM. When that read finds
+the object, it is not counted as missing. The check passes, and its detail
+gives the number of such objects. The read also makes Weaviate repair the
+replica; a second `verify` shows whether the replicas agree. `ids` and
+`records` each read at most 500 ids of a collection again. With more, the
+check reads none and fails. It also fails when the read by id fails, as
+without a quorum of live replicas. `records` fails when the read by id found
+every sampled object, because it compared none.
+
+`count` reads one replica and has no second read. It fails while that
+replica lacks objects, so `verify` exits 1 until the replicas agree. When
+`ids` passed that way, the detail of `count` says so.
+
 A failed check exits 1, `verification_failed`. Its detail names the cause,
 and the fix where there is one. Extra objects with a `source_id` lost their
 source record, and `sync --prune` deletes them. Extra objects without a
@@ -438,6 +454,10 @@ that the parser refuses exits 2 with its message on stderr, and Ctrl-C exits
   "hint": "Check WEAVIATE_API_KEY in the environment or in .env."
 }
 ```
+
+The `plan_mismatch` and `target_rejected_schema` documents of `copy` and
+`sync` also have `collection`, the target collection that the error is about.
+The message names it too.
 
 The document of a successful `inspect chroma` has `plan`, `collections`,
 `total`, `decisions` and `notes`. `notes` is a list of text lines about the

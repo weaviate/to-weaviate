@@ -647,8 +647,30 @@ def _segment_findings(entry: CollectionPlan) -> list[Finding]:
     return out
 
 
+# Weaviate refuses a create with range filters on another type, a list of
+# ints or numbers included.
+RANGE_FILTER_TYPES = ("int", "number")
+
+
+def _range_filter_findings(entry: CollectionPlan) -> list[Finding]:
+    """Range filters on a property type that has none."""
+    return [
+        Finding(
+            "invalid_range_filters",
+            entry.target.name,
+            f"property {prop.name}: range_filters is true and type {prop.type} "
+            f"has no range filters; set it to false, or use one of "
+            f"{', '.join(RANGE_FILTER_TYPES)}",
+        )
+        for prop in entry.target.properties
+        if prop.range_filters
+        and prop.type in PROPERTY_TYPES
+        and prop.type not in RANGE_FILTER_TYPES
+    ]
+
+
 def _value_findings(entry: CollectionPlan) -> list[Finding]:
-    """Property types and distances that the schema mapping does not have."""
+    """Property types and distances that Weaviate does not have."""
     name = entry.target.name
     out = [
         Finding(
@@ -915,6 +937,7 @@ def plan_findings(
     value_errors = [f for e in plan.collections for f in _value_findings(e)]
     value_errors.extend(_invalid_name_findings(plan.collections))
     errors.extend(value_errors)
+    errors.extend(f for e in plan.collections for f in _range_filter_findings(e))
     errors.extend(f for e in plan.collections for f in _segment_findings(e))
     # collection_kwargs cannot map a group that has a value error or a name
     # that the client refuses.
