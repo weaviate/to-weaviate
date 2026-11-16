@@ -754,6 +754,57 @@ def test_copy_stops_when_the_target_refuses_the_schema():
     assert source.read_calls == 0
 
 
+def test_a_refused_create_names_the_collection():
+    fakes = inspected(
+        FakeFactories(
+            FakeSource(cli_records(10)),
+            schema=FakeSchema(ensure_error=SchemaRejected(M)),
+        )
+    )
+    d = json.loads(invoke(fakes, "copy", "--json").stdout)
+    assert (d["code"], d["message"], d["collection"]) == (
+        "target_rejected_schema",
+        f"Weaviate refused to create the collection Docs: {M}",
+        "Docs",
+    )
+    r = invoke(fakes, "copy")
+    assert r.exit_code == 2
+    assert f"Weaviate refused to create the collection Docs: {M}" in r.output
+
+
+def test_a_plan_mismatch_of_copy_names_the_collection():
+    difference = "vector default: distance is dot, plan has cosine"
+    fakes = inspected(
+        FakeFactories(
+            FakeSource(cli_records(10)),
+            schema=FakeSchema(existing={"Docs": [difference]}),
+        )
+    )
+    d = json.loads(invoke(fakes, "copy", "--json").stdout)
+    assert (d["code"], d["message"], d["collection"]) == (
+        "plan_mismatch",
+        f"Target collection Docs: {difference}",
+        "Docs",
+    )
+    r = invoke(fakes, "copy")
+    assert r.exit_code == 2
+    assert f"Target collection Docs: {difference}" in r.output
+
+
+def test_a_refused_change_of_an_existing_collection_keeps_its_action_text():
+    refused = PropertyRejected("conflict", "add the property lang to Docs")
+    fakes = inspected(
+        FakeFactories(
+            FakeSource(cli_records(10)), schema=FakeSchema(ensure_error=refused)
+        )
+    )
+    d = json.loads(invoke(fakes, "copy", "--json").stdout)
+    assert (d["message"], d["collection"]) == (
+        "Weaviate refused to add the property lang to Docs: conflict",
+        "Docs",
+    )
+
+
 def test_copy_refuses_a_module_that_the_target_lacks_before_it_creates_anything(
     tmp_path,
 ):
@@ -1991,6 +2042,44 @@ DISTANCES = "cosine, dot, hamming, l2-squared, manhattan"
 
 
 @pytest.mark.parametrize("cmd", ["check", "copy"])
+@pytest.mark.parametrize("type_", ["int[]", "number[]", "text", "boolean"])
+def test_range_filters_on_a_type_without_them_is_an_invalid_plan(tmp_path, cmd, type_):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    properties = [
+        p.model_copy(update={"type": type_, "range_filters": True})
+        if p.name == "year"
+        else p
+        for p in target.properties
+    ]
+    edit_target(tmp_path / DIR, properties=properties)
+    r = invoke(fakes, cmd, "--json")
+    message = (
+        f"property year: range_filters is true and type {type_} has no range "
+        "filters; set it to false, or use one of int, number"
+    )
+    assert plan_errors(r) == [
+        {"code": "invalid_range_filters", "collection": "Docs", "message": message}
+    ]
+    assert fakes.schema.ensured == [] and fakes.writer.calls == 0
+
+
+@pytest.mark.parametrize("type_", ["int", "number"])
+def test_range_filters_on_an_int_or_a_number_pass_check(tmp_path, type_):
+    fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    properties = [
+        p.model_copy(update={"type": type_, "range_filters": True})
+        if p.name == "year"
+        else p
+        for p in target.properties
+    ]
+    edit_target(tmp_path / DIR, properties=properties)
+    r = invoke(fakes, "check", "--json")
+    assert r.exit_code == 0, r.output
+
+
+@pytest.mark.parametrize("cmd", ["check", "copy"])
 def test_a_property_type_without_a_mapping_is_an_invalid_plan(tmp_path, cmd):
     fakes = inspected(FakeFactories(FakeSource(cli_records(10))))
     target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
@@ -2741,7 +2830,8 @@ def _year_as_text(plan: Any) -> None:
 
 
 def _year_as_list(plan: Any) -> None:
-    _prop(plan.collections[0], "year").type = "int[]"
+    year = _prop(plan.collections[0], "year")
+    year.type, year.range_filters = "int[]", False
 
 
 def _document_flags(plan: Any) -> None:

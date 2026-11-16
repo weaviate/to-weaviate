@@ -647,8 +647,13 @@ def _segment_findings(entry: CollectionPlan) -> list[Finding]:
     return out
 
 
+# Weaviate refuses a create with range filters on another type, a list of
+# ints or numbers included.
+RANGE_FILTER_TYPES = ("int", "number")
+
+
 def _value_findings(entry: CollectionPlan) -> list[Finding]:
-    """Property types and distances that the schema mapping does not have."""
+    """Property types, range filters and distances that Weaviate does not have."""
     name = entry.target.name
     out = [
         Finding(
@@ -660,6 +665,19 @@ def _value_findings(entry: CollectionPlan) -> list[Finding]:
         for prop in entry.target.properties
         if prop.type not in PROPERTY_TYPES
     ]
+    out.extend(
+        Finding(
+            "invalid_range_filters",
+            name,
+            f"property {prop.name}: range_filters is true and type {prop.type} "
+            f"has no range filters; set it to false, or use one of "
+            f"{', '.join(RANGE_FILTER_TYPES)}",
+        )
+        for prop in entry.target.properties
+        if prop.range_filters
+        and prop.type in PROPERTY_TYPES
+        and prop.type not in RANGE_FILTER_TYPES
+    )
     out.extend(
         Finding(
             "invalid_distance",

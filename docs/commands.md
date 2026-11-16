@@ -439,6 +439,10 @@ that the parser refuses exits 2 with its message on stderr, and Ctrl-C exits
 }
 ```
 
+The `plan_mismatch` and `target_rejected_schema` documents of `copy` and
+`sync` also have `collection`, the target collection that the error is about.
+The message names it too.
+
 The document of a successful `inspect chroma` has `plan`, `collections`,
 `total`, `decisions` and `notes`. `notes` is a list of text lines about the
 inspection as a whole. It is empty unless the Chroma server cannot list its

@@ -139,7 +139,7 @@ Every other `source_key` is a metadata key. A property has these fields:
 | `tokenization` | `word` or `field`, for `text` types only. |
 | `searchable` | Whether keyword search indexes the property. |
 | `filterable` | Whether filters can use the property. |
-| `range_filters` | Whether range filters can use the property, for `int` and `number`. |
+| `range_filters` | Whether range filters can use the property. Only `int` and `number` have them: `check` reports `invalid_range_filters` for `true` on another type, a list included. |
 | `coerced_from` | The other types the source holds for this key. `inspect` fills it in. |
 
 ### Types and conversion

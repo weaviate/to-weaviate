@@ -56,6 +56,7 @@ QUOTA_TEXT = "exceeded quota limit"
 # name. Chroma 1.x answers HTTP 404.
 INVALID_COLLECTION = "InvalidCollection"
 NO_BODY = "the answer has no body"
+IDENTITY_PATH = "/api/v2/auth/identity"
 # Single-node Chroma 1.5.9 answers indexing_status with HTTP 500 and
 # "Method scout_logs is not implemented".
 NOT_IMPLEMENTED = "is not implemented"
@@ -146,11 +147,17 @@ def _no_route(response: httpx.Response, body: Any) -> bool:
     does not count: Chroma 0.5.16 to 0.6.2 answer it for the database list of
     a correct CHROMA_URL. A 404 or 405 whose body is not JSON comes from a
     proxy or another server, since Chroma answers an error of an existing
-    route with JSON.
+    route with JSON. The identity path names no tenant, database or
+    collection, so its 404 comes from a server without the route, whatever
+    the body.
     """
     if response.status_code not in (404, 405):
         return False
     if body is None:
+        return True
+    if response.status_code == 404 and response.request.url.path.endswith(
+        IDENTITY_PATH
+    ):
         return True
     return response.status_code == 404 and body == {"detail": "Not Found"}
 
@@ -337,7 +344,7 @@ class ChromaClient:
         return self._request(method, path, transient, on_collection=True, **kwargs)
 
     def identity(self) -> dict[str, Any]:
-        result: dict[str, Any] = self._request("GET", "/api/v2/auth/identity")
+        result: dict[str, Any] = self._request("GET", IDENTITY_PATH)
         return result
 
     def tenant(self) -> str:

@@ -150,6 +150,7 @@ from to_weaviate.target.connect import VersionUnreadable, connect
 from to_weaviate.target.deleter import DeleteFailed, Deleter, WeaviateDeleter
 from to_weaviate.target.reader import SOURCE_ID, TargetReader, WeaviateReader
 from to_weaviate.target.schema import (
+    CREATE_ACTION,
     USERINFO_TEXT,
     Created,
     PlanMismatch,
@@ -350,6 +351,20 @@ def _source_rejected(status: int) -> bool:
     return status == 501 or (400 <= status < 500 and status not in (408, 429))
 
 
+def _collection_field(collection: str | None) -> dict[str, Any]:
+    return {"collection": collection} if collection else {}
+
+
+@contextmanager
+def _naming(collection: str) -> Iterator[None]:
+    """Set `collection` on a schema error that leaves the block."""
+    try:
+        yield
+    except (PlanMismatch, SchemaRejected) as exc:
+        exc.collection = collection
+        raise
+
+
 def _as_cli_error(exc: Exception) -> CliError:
     """The CliError for `exc`. An exception outside the table is internal_error.
 
@@ -478,10 +493,14 @@ def _as_cli_error(exc: Exception) -> CliError:
             WEAVIATE_HINT,
         )
     if isinstance(exc, SchemaRejected):
+        action = exc.action
+        if exc.collection and action == CREATE_ACTION:
+            action = f"{action} {exc.collection}"
         return CliError(
             "target_rejected_schema",
-            f"Weaviate refused to {exc.action}: {exc}",
+            f"Weaviate refused to {action}: {exc}",
             ADD_PROPERTY_HINT if isinstance(exc, PropertyRejected) else SCHEMA_HINT,
+            fields=_collection_field(exc.collection),
         )
     if isinstance(exc, BatchRefused):
         hint = BATCH_HINT
@@ -491,11 +510,15 @@ def _as_cli_error(exc: Exception) -> CliError:
             )
         return CliError("target_unreachable", str(exc), hint)
     if isinstance(exc, PlanMismatch):
+        message = str(exc)
+        if exc.collection:
+            message = f"Target collection {exc.collection}: {message}"
         return CliError(
             "plan_mismatch",
-            str(exc),
+            message,
             "The target collection exists with other settings. Edit plan.yaml "
             "to match it, or choose another target name.",
+            fields=_collection_field(exc.collection),
         )
     if isinstance(exc, WeaviateBaseError):
         return CliError(
@@ -1325,7 +1348,8 @@ def _writing(
                     warnings.append(finding)
 
             for name, group in selected.items():
-                schema.ensure(group, report)
+                with _naming(name):
+                    schema.ensure(group, report)
                 for prop in missing[name]:
                     _info(json_output, f"Added the property {prop} to {name}")
                     added.append({"collection": name, "property": prop})
@@ -1456,7 +1480,8 @@ def _begin_entry(run: _Run, entry: CollectionPlan) -> bool:
 
 def _enable_quantizers(run: _Run, entry: CollectionPlan, json_output: bool) -> None:
     _info(json_output, f"Enabling the trained quantizers of {entry.target.name}")
-    run.schema.enable_trained_quantizers(entry)
+    with _naming(entry.target.name):
+        run.schema.enable_trained_quantizers(entry)
     run.state.quantizers_updated(entry.source.ref)
 
 

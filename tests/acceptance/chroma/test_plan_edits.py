@@ -1,5 +1,6 @@
 from typing import Any
 
+import pytest
 from chroma.seed import records
 from conftest import (
     copy_and_verify,
@@ -13,6 +14,7 @@ from conftest import (
     write_plan,
 )
 from weaviate.classes.config import DataType, Property
+from weaviate.exceptions import UnexpectedStatusCodeError
 
 from to_weaviate.plan import load_plan
 from to_weaviate.target.schema import collection_kwargs
@@ -84,6 +86,42 @@ def test_a_hand_edited_plan_is_copied_as_edited(seeded, tmp_path):
     stored = [weaviate_by_source_id(TARGET, r) for r in _source_ids(tmp_path)]
     assert sorted(o.properties["pos"] for o in stored if o) == [
         str(i) for i in range(10)
+    ]
+
+
+def test_range_filters_on_a_list_stop_check_and_pass_once_false(seeded, tmp_path):
+    _inspect_tiny_l2(tmp_path)
+    plan = read_plan(tmp_path)
+    position = next(
+        p
+        for p in plan["collections"][0]["target"]["properties"]
+        if p["name"] == "position"
+    )
+    assert position["range_filters"] is True
+    position["type"] = "int[]"
+    write_plan(tmp_path, plan)
+    for command in ("check", "copy"):
+        r = run([command], tmp_path)
+        assert r.exit_code == 2 and r.data["code"] == "invalid_plan", r
+        assert r.data["errors"] == [
+            {
+                "code": "invalid_range_filters",
+                "collection": TARGET,
+                "message": "property position: range_filters is true and type "
+                "int[] has no range filters; set it to false, or use one of "
+                "int, number",
+            }
+        ], r
+    assert not weaviate_exists(TARGET)
+    # The server refuses the create that the finding prevents.
+    with pytest.raises(UnexpectedStatusCodeError, match="indexRangeFilters"):
+        create_target_collection(_planned_collection(tmp_path))
+    position["range_filters"] = False
+    write_plan(tmp_path, plan)
+    copy_and_verify(tmp_path)
+    stored = [weaviate_by_source_id(TARGET, r) for r in _source_ids(tmp_path)]
+    assert sorted(o.properties["position"] for o in stored if o) == [
+        [i] for i in range(10)
     ]
 
 
