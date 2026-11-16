@@ -14,6 +14,7 @@ from weaviate.exceptions import (
 )
 
 from to_weaviate import plan as p
+from to_weaviate.retry import ATTEMPTS
 from to_weaviate.sources.base import Record
 from to_weaviate.target.reader import FETCH_BATCH, WeaviateReader
 from to_weaviate.target.writer import TargetObject, to_object
@@ -366,6 +367,21 @@ def test_present_retries_a_transient_error():
     client.collection.on_a_quorum = {"u1"}
     assert reader(client).present(ENTRY, ["u1"]) == {"u1"}
     assert len(client.collection.calls) == 2
+
+
+def test_present_is_none_when_the_read_fails_on_every_attempt():
+    down = UnexpectedStatusCodeError("x", httpx.Response(500))
+    client = FakeClient([], failures=[down] * ATTEMPTS)
+    client.collection.on_a_quorum = {"u1", "u2"}
+    assert reader(client).present(ENTRY, ["u1", "u2"]) is None
+    assert len(client.collection.calls) == ATTEMPTS
+
+
+def test_present_raises_an_error_that_is_not_transient():
+    refused = UnexpectedStatusCodeError("x", httpx.Response(422))
+    client = FakeClient([], failures=[refused])
+    with pytest.raises(UnexpectedStatusCodeError):
+        reader(client).present(ENTRY, ["u1"])
 
 
 def test_transient_errors_are_retried_and_others_raised():

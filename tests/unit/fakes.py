@@ -432,6 +432,7 @@ class FakeReader:
         # finds them.
         self.lagging: set[str] = set()
         self.present_calls: list[list[str]] = []
+        self.present_fails = False
 
     def _stored(self, entry: CollectionPlan) -> dict[str, TargetObject]:
         return self.writer.stored.get((entry.target.name, entry.target.tenant), {})
@@ -439,8 +440,10 @@ class FakeReader:
     def _objects(self, entry: CollectionPlan) -> dict[str, TargetObject]:
         return {u: o for u, o in self._stored(entry).items() if u not in self.lagging}
 
-    def present(self, entry: CollectionPlan, uuids: list[str]) -> set[str]:
+    def present(self, entry: CollectionPlan, uuids: list[str]) -> set[str] | None:
         self.present_calls.append(list(uuids))
+        if self.present_fails:
+            return None
         return set(uuids) & set(self._stored(entry))
 
     def active(self, entry: CollectionPlan) -> bool:
@@ -456,7 +459,7 @@ class FakeReader:
         return any(stored_name == name for stored_name, _ in self.writer.stored)
 
     def count(self, entry: CollectionPlan) -> int:
-        return len(self._stored(entry))
+        return len(self._objects(entry))
 
     def fetch(self, entry: CollectionPlan, uuids: list[str]) -> dict[str, TargetObject]:
         objects = self._objects(entry)

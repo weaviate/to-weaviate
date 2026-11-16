@@ -39,8 +39,11 @@ class TargetReader(Protocol):
         self, entry: CollectionPlan, uuids: list[str]
     ) -> dict[str, TargetObject]: ...
 
-    def present(self, entry: CollectionPlan, uuids: list[str]) -> set[str]:
-        """The `uuids` that a quorum of the replicas holds."""
+    def present(self, entry: CollectionPlan, uuids: list[str]) -> set[str] | None:
+        """The `uuids` that a read by id at consistency level QUORUM finds.
+
+        None when the read fails, as without a quorum of live replicas.
+        """
         ...
 
     def near_vector(
@@ -135,21 +138,29 @@ class WeaviateReader:
                 found[str(obj.uuid)] = TargetObject(str(obj.uuid), properties, vectors)
         return found
 
-    def present(self, entry: CollectionPlan, uuids: list[str]) -> set[str]:
-        """The `uuids` that a quorum of the replicas holds, one request each.
+    def present(self, entry: CollectionPlan, uuids: list[str]) -> set[str] | None:
+        """The `uuids` that a read by id at QUORUM finds, one request each.
 
         A search or a listing reads one replica and returns only the objects
-        which that replica holds. A read by id asks the other replicas too,
-        so it finds an object that the replica of the search lacks.
+        which that replica holds. A read by id asks a quorum of the replicas,
+        finds an object that one of them holds, and repairs the others.
+
+        None when a read still fails with a transient error after the
+        retries: the server answers 500 when it reaches no quorum.
         """
         collection = self._collection(entry).with_consistency_level(
             ConsistencyLevel.QUORUM
         )
-        return {
-            uuid
-            for uuid in uuids
-            if self._call(lambda u=uuid: collection.data.exists(u))  # type: ignore[misc]
-        }
+        found: set[str] = set()
+        for uuid in uuids:
+            try:
+                if self._call(lambda u=uuid: collection.data.exists(u)):  # type: ignore[misc]
+                    found.add(uuid)
+            except Exception as exc:
+                if transient(exc) is None:
+                    raise
+                return None
+        return found
 
     def near_vector(
         self, entry: CollectionPlan, vector: list[float], limit: int

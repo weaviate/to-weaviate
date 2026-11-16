@@ -2064,6 +2064,31 @@ def test_range_filters_on_a_type_without_them_is_an_invalid_plan(tmp_path, cmd, 
     assert fakes.schema.ensured == [] and fakes.writer.calls == 0
 
 
+def test_range_filters_on_a_text_do_not_hide_an_invalid_vectorizer(tmp_path):
+    fakes = inspected(
+        FakeFactories(FakeSource(cli_records(10))),
+        "--vectors",
+        "embed",
+        "--vectorizer",
+        "text2vec-openai",
+        "--vectorizer-option",
+        "colour=blue",
+    )
+    target = load_plan(tmp_path / DIR / "plan.yaml").collections[0].target
+    properties = [
+        p.model_copy(update={"type": "text", "range_filters": True})
+        if p.name == "year"
+        else p
+        for p in target.properties
+    ]
+    edit_target(tmp_path / DIR, properties=properties)
+    r = invoke(fakes, "check", "--json", OPENAI_API_KEY="openai-key")
+    assert [e["code"] for e in plan_errors(r)] == [
+        "invalid_range_filters",
+        "invalid_vectorizer",
+    ]
+
+
 @pytest.mark.parametrize("type_", ["int", "number"])
 def test_range_filters_on_an_int_or_a_number_pass_check(tmp_path, type_):
     fakes = inspected(FakeFactories(FakeSource(cli_records(10))))

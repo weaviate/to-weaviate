@@ -1758,9 +1758,10 @@ def _verify(
         before = source.wait_compacted(
             collection, _waiting(json_output, entry.source.name)
         )
-        checks.append(verify_counts(source, reader, entry, collection))
-        if not quick:
-            diff = diff_ids(source, reader, entry, collection, directory)
+        diff = None if quick else diff_ids(source, reader, entry, collection, directory)
+        lagging = 0 if diff is None else diff.lagging
+        checks.append(verify_counts(source, reader, entry, collection, lagging))
+        if diff is not None:
             checks.append(verify_ids(diff, entry))
         checks.append(verify_records(source, reader, entry, collection, sample, rng))
         raise_if_compacted(source, collection, before)

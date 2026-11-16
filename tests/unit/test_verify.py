@@ -11,6 +11,9 @@ from fakes import FakeFactories, FakeReader, FakeSource, FakeWriter, cli_records
 from to_weaviate import plan as p
 from to_weaviate.engine.verify import (
     ID_BATCH,
+    NOT_RECHECKED,
+    NOTHING_COMPARED,
+    RECHECK_FAILED,
     RECHECK_LIMIT,
     REPLICA_LAG,
     Check,
@@ -385,13 +388,102 @@ def test_records_that_the_search_returns_read_no_object_by_id():
     assert reader.present_calls == []
 
 
-def test_verify_passes_and_warns_when_one_replica_lacks_objects(in_tmp):
+def test_a_failed_read_by_id_leaves_the_ids_missing_and_says_so(tmp_path):
+    source, writer = migrated(make_records(50), ENTRY)
+    reader = lagging_reader(writer, ["id-3", "id-7"])
+    reader.present_fails = True
+    diff = diff_ids(source, reader, ENTRY, collection_of(source), tmp_path)
+    assert (diff.missing, diff.lagging) == (2, 0)
+    assert sorted(diff.missing_sample) == ["id-3", "id-7"]
+    assert (diff.rechecked, diff.read_failed) == (False, True)
+    check = verify_ids(diff, ENTRY)
+    assert not check.passed
+    assert check.detail.endswith(
+        f"{COPY_AGAIN} The read by id at consistency level QUORUM failed, so no "
+        "id was read again; replicas that disagree, as after a node restart "
+        "during the copy, also show as missing ids."
+    )
+
+
+def test_a_failed_read_by_id_leaves_the_sampled_records_missing():
+    source, writer = migrated(make_records(10), ENTRY)
+    reader = lagging_reader(writer, ["id-6"])
+    reader.present_fails = True
+    check = verify_records(
+        source, reader, ENTRY, collection_of(source), 10, random.Random(0)
+    )
+    assert not check.passed
+    assert check.detail == (
+        'sampled 10, compared 10, rejects skipped 0, differing 1: "id-6": missing '
+        f"in the target; {RECHECK_FAILED}"
+    )
+
+
+def test_records_fail_when_a_read_by_id_finds_every_sampled_object():
+    records = make_records(10)
+    source, writer = migrated(records, ENTRY)
+    reader = lagging_reader(writer, [r.id for r in records])
+    check = verify_records(
+        source, reader, ENTRY, collection_of(source), 10, random.Random(0)
+    )
+    assert not check.passed
+    assert check.detail == (
+        f"sampled 10, compared 0, rejects skipped 0, differing 0; {NOTHING_COMPARED}"
+        "; the search did not return 10 of the sampled objects, which were not "
+        f"compared, and {REPLICA_LAG}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("absent", "calls"),
+    [(RECHECK_LIMIT, 1), (RECHECK_LIMIT + 1, 0)],
+    ids=["at the limit", "above the limit"],
+)
+def test_sampled_records_are_read_again_up_to_the_limit(absent, calls):
+    records = make_records(RECHECK_LIMIT + 10)
+    source, writer = migrated(records, ENTRY)
+    reader = lagging_reader(writer, [r.id for r in records[:absent]])
+    check = verify_records(
+        source, reader, ENTRY, collection_of(source), len(records), random.Random(0)
+    )
+    assert len(reader.present_calls) == calls
+    assert check.passed is bool(calls)
+    if not calls:
+        assert f"differing {absent}: " in check.detail
+        assert check.detail.endswith(f"; {NOT_RECHECKED}")
+
+
+def test_a_count_below_the_source_names_the_objects_that_one_replica_lacks():
+    source, writer = migrated(make_records(10), ENTRY)
+    reader = lagging_reader(writer, ["id-3", "id-6"])
+    check = verify_counts(source, reader, ENTRY, collection_of(source), lagging=2)
+    assert not check.passed
+    assert check.detail == (
+        "source count 10, target count 8; the ids check found by id 2 objects "
+        "that one replica lacks. A count from that replica can be lower by "
+        "that number, and the counts agree once Weaviate has repaired it; run "
+        "to-weaviate verify again."
+    )
+
+
+def test_a_count_below_the_source_by_more_than_the_lag_says_to_copy_again():
+    source, writer = migrated(make_records(10), ENTRY, skip={"id-1"})
+    reader = lagging_reader(writer, ["id-3", "id-6"])
+    check = verify_counts(source, reader, ENTRY, collection_of(source), lagging=2)
+    assert not check.passed
+    assert check.detail.startswith(
+        "source count 10, target count 7; run to-weaviate copy again."
+    )
+
+
+def test_verify_fails_on_count_only_when_one_replica_lacks_objects(in_tmp):
     fakes = copied()
     fakes.lagging = {to_uuid("id-2"), to_uuid("id-5")}
     r = invoke(fakes, "verify", "--json", "--sample", "10")
-    assert r.exit_code == 0, r.output
+    assert r.exit_code == 1, r.output
     checks = {c["name"]: c for c in json.loads(r.stdout)["checks"]}
-    assert all(c["passed"] for c in checks.values())
+    assert [n for n, c in checks.items() if not c["passed"]] == ["count"]
+    assert "found by id 2 objects that one replica lacks" in checks["count"]["detail"]
     assert "lacked 2 more" in checks["ids"]["detail"]
     assert "did not return 2 of the sampled objects" in checks["records"]["detail"]
     assert "lacked 2 more" in (DIR / "report.md").read_text()
