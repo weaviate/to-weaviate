@@ -27,6 +27,7 @@ from weaviate.collections.classes.internal import Object, ObjectSingleReturn
 from to_weaviate.output import ERROR_EXIT, secret_values
 from to_weaviate.settings import weaviate_settings
 from to_weaviate.target.connect import connect
+from to_weaviate.target.reader import WeaviateReader
 from to_weaviate.target.schema import module_names
 
 COMMAND = Path(sysconfig.get_path("scripts")) / "to-weaviate"
@@ -379,6 +380,11 @@ def close_weaviate() -> None:
 def _collection(name: str, tenant: str | None = None) -> Collection[Any, Any]:
     collection = _weaviate().collections.use(name)
     return collection.with_tenant(tenant) if tenant else collection
+
+
+def weaviate_reader() -> WeaviateReader:
+    """The reader of `verify` over the client of these helpers."""
+    return WeaviateReader(_weaviate())
 
 
 def weaviate_count(name: str, tenant: str | None = None) -> int:

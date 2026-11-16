@@ -7,7 +7,7 @@ import struct
 import tempfile
 from collections.abc import Iterable, Iterator
 from contextlib import closing, contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -47,6 +47,19 @@ FOREIGN_OBJECTS = (
 COUNT_ABOVE_SOURCE = (
     "the target holds objects that are not in the source; the ids check of a "
     "verify without --quick says which and how to remove them."
+)
+# The most ids of one collection that a check reads again by id.
+RECHECK_LIMIT = 500
+REPLICA_LAG = (
+    "a read by id at consistency level QUORUM found them. One replica lacks "
+    "them, as after a node restart during the copy, and Weaviate repairs it. "
+    "Until then a read at consistency level ONE can miss them; run "
+    "to-weaviate verify again to see whether the replicas agree."
+)
+NOT_RECHECKED = (
+    f"more than {RECHECK_LIMIT} ids are missing, so none was read again by id; "
+    "replicas that disagree, as after a node restart during the copy, also "
+    "show as missing ids."
 )
 NOTHING_COMPARED = "no record was compared; run to-weaviate verify again"
 REJECTS_IN_TARGET = (
@@ -96,6 +109,9 @@ class IdDiff:
     # most ID_SAMPLE.
     extra_sample: list[str]
     foreign: int = 0  # extra objects without a source_id
+    # Source ids that the listing of the target lacked and a read by id found.
+    lagging: int = 0
+    rechecked: bool = True  # False when `missing` is above RECHECK_LIMIT
 
 
 def _quoted(value: Any) -> str:
@@ -262,9 +278,29 @@ def diff_ids(
     collection: SourceCollection,
     workdir: Path,
 ) -> IdDiff:
-    """Source ids without a target object, and target objects without a source id."""
+    """Source ids without a target object, and target objects without a source id.
+
+    The listing of the target reads one replica. Up to RECHECK_LIMIT missing
+    ids are read again by id, and the ones that a quorum of the replicas
+    holds count as `lagging`, not as missing.
+    """
     with id_tables(source, reader, entry, collection, workdir) as db:
-        return _counts(db)
+        diff = _counts(db)
+        if diff.missing == 0:
+            return diff
+        if diff.missing > RECHECK_LIMIT:
+            return replace(diff, rechecked=False)
+        ids = [i for batch in missing_source_ids(db) for i in batch]
+    found = reader.present(entry, [to_uuid(i) for i in ids])
+    if not found:
+        return diff
+    absent = [i for i in ids if to_uuid(i) not in found]
+    return replace(
+        diff,
+        missing=len(absent),
+        missing_sample=absent[:ID_SAMPLE],
+        lagging=len(ids) - len(absent),
+    )
 
 
 def verify_ids(diff: IdDiff, entry: CollectionPlan) -> Check:
@@ -275,10 +311,17 @@ def verify_ids(diff: IdDiff, entry: CollectionPlan) -> Check:
         detail += f"; extra ids {_quoted(diff.extra_sample)}"
     if diff.missing:
         detail += f"; {MISSING_IDS}"
+        if not diff.rechecked:
+            detail += f" {NOT_RECHECKED[0].upper()}{NOT_RECHECKED[1:]}"
     if diff.extra > diff.foreign:
         detail += f"; {TARGET_ABOVE_SOURCE}"
     if diff.foreign:
         detail += f"; {FOREIGN_OBJECTS}"
+    if diff.lagging:
+        detail += (
+            f"; the listing of the target lacked {diff.lagging} more, and "
+            f"{REPLICA_LAG}"
+        )
     return _check("ids", entry, diff.missing == diff.extra == 0, detail)
 
 
@@ -373,7 +416,9 @@ def verify_records(
     A record that converts to a reject is not compared. It is a difference
     when the target holds an object for it, as after a copy under another plan
     or by a version that did not reject it; otherwise it is counted as
-    skipped. An empty sample of an empty source passes. Otherwise the check
+    skipped. A record whose object the search does not return is read again
+    by id: when a quorum of the replicas holds it, it is not compared and
+    not a difference. An empty sample of an empty source passes. Otherwise the check
     fails when no record was compared.
     """
     with_vectors = any(v.mode == "keep" for v in entry.target.vectors)
@@ -392,8 +437,12 @@ def verify_records(
         entry,
         [*(obj.uuid for _, obj in expected), *(to_uuid(r.source_id) for r in rejects)],
     )
+    absent = [obj.uuid for _, obj in expected if obj.uuid not in stored]
+    lagging = reader.present(entry, absent) if absent else set()
     failures: list[str] = []
     for source_id, obj in expected:
+        if obj.uuid in lagging:
+            continue
         found = stored.get(obj.uuid)
         problems = (
             ["missing in the target"] if found is None else _problems(entry, obj, found)
@@ -407,9 +456,15 @@ def verify_records(
         for r in in_target
     )
     detail = (
-        f"sampled {len(records)}, compared {len(expected)}, "
+        f"sampled {len(records)}, compared {len(expected) - len(lagging)}, "
         f"rejects skipped {len(rejects) - len(in_target)}, differing {len(failures)}"
     )
+    lag = ""
+    if lagging:
+        lag = (
+            f"; the search did not return {len(lagging)} of the sampled objects, "
+            f"which were not compared, and {REPLICA_LAG}"
+        )
     if not records:
         detail += f"; {NOTHING_COMPARED}"
     elif failures:
@@ -420,7 +475,7 @@ def verify_records(
             detail += f"; {REJECTS_IN_TARGET}"
     elif not expected:
         detail += f"; {EVERY_SAMPLE_REJECTED}"
-    return _check("records", entry, bool(expected) and not failures, detail)
+    return _check("records", entry, bool(expected) and not failures, detail + lag)
 
 
 def check_line(check: Check) -> str:

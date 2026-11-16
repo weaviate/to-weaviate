@@ -3,6 +3,7 @@ from collections.abc import Callable, Iterator
 from typing import Any, Protocol, TypeVar, cast
 
 import weaviate
+from weaviate.classes.config import ConsistencyLevel
 from weaviate.classes.query import Filter
 from weaviate.collections import Collection
 from weaviate.collections.classes.tenants import TenantActivityStatus
@@ -37,6 +38,10 @@ class TargetReader(Protocol):
     def fetch(
         self, entry: CollectionPlan, uuids: list[str]
     ) -> dict[str, TargetObject]: ...
+
+    def present(self, entry: CollectionPlan, uuids: list[str]) -> set[str]:
+        """The `uuids` that a quorum of the replicas holds."""
+        ...
 
     def near_vector(
         self, entry: CollectionPlan, vector: list[float], limit: int
@@ -129,6 +134,22 @@ class WeaviateReader:
                 }
                 found[str(obj.uuid)] = TargetObject(str(obj.uuid), properties, vectors)
         return found
+
+    def present(self, entry: CollectionPlan, uuids: list[str]) -> set[str]:
+        """The `uuids` that a quorum of the replicas holds, one request each.
+
+        A search or a listing reads one replica and returns only the objects
+        which that replica holds. A read by id asks the other replicas too,
+        so it finds an object that the replica of the search lacks.
+        """
+        collection = self._collection(entry).with_consistency_level(
+            ConsistencyLevel.QUORUM
+        )
+        return {
+            uuid
+            for uuid in uuids
+            if self._call(lambda u=uuid: collection.data.exists(u))  # type: ignore[misc]
+        }
 
     def near_vector(
         self, entry: CollectionPlan, vector: list[float], limit: int

@@ -373,6 +373,16 @@ with `plan_mismatch`. Copy into a new collection instead. Use another
 `--dir`, and give the target a name that does not exist, or delete the
 collection first.
 
+The listing of `ids` and the search of `records` read one replica of each
+shard. After a node restart during the copy, one replica can lack objects
+that the others hold. `verify` reads an id that the listing or the search did
+not return again by id, at consistency level QUORUM. When a quorum of the
+replicas holds the object, it is not counted as missing. The check passes,
+and its detail gives the number of such objects. Weaviate repairs the
+replica; a second `verify` shows whether the replicas agree. `ids` reads at
+most 500 missing ids of a collection again. With more, it reads none and
+fails. `count` reads one replica and has no second read.
+
 A failed check exits 1, `verification_failed`. Its detail names the cause,
 and the fix where there is one. Extra objects with a `source_id` lost their
 source record, and `sync --prune` deletes them. Extra objects without a

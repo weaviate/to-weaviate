@@ -11,6 +11,8 @@ from fakes import FakeFactories, FakeReader, FakeSource, FakeWriter, cli_records
 from to_weaviate import plan as p
 from to_weaviate.engine.verify import (
     ID_BATCH,
+    RECHECK_LIMIT,
+    REPLICA_LAG,
     Check,
     IdDiff,
     _same,
@@ -271,6 +273,128 @@ def test_id_diff_removes_its_file_when_it_raises(tmp_path):
     with pytest.raises(RuntimeError, match="connection lost"):
         diff_ids(source, LostReader(writer), ENTRY, collection_of(source), tmp_path)
     assert list(tmp_path.iterdir()) == []
+
+
+def lagging_reader(writer: FakeWriter, ids: list[str]) -> FakeReader:
+    """A reader whose search and listing lack the objects of `ids`."""
+    reader = FakeReader(writer)
+    reader.lagging = {to_uuid(i) for i in ids}
+    return reader
+
+
+def test_ids_that_the_listing_lacks_and_a_read_by_id_finds_are_not_missing(tmp_path):
+    source, writer = migrated(make_records(50), ENTRY)
+    reader = lagging_reader(writer, ["id-3", "id-7", "id-9"])
+    diff = diff_ids(source, reader, ENTRY, collection_of(source), tmp_path)
+    assert (diff.missing, diff.extra, diff.lagging) == (0, 0, 3)
+    assert diff.missing_sample == [] and diff.rechecked
+    assert [sorted(call) for call in reader.present_calls] == [
+        sorted(to_uuid(i) for i in ("id-3", "id-7", "id-9"))
+    ]
+    check = verify_ids(diff, ENTRY)
+    assert check.passed
+    assert check.detail == (
+        "missing 0, extra 0; the listing of the target lacked 3 more, and "
+        f"{REPLICA_LAG}"
+    )
+
+
+def test_ids_that_no_replica_holds_stay_missing_next_to_lagging_ones(tmp_path):
+    source, writer = migrated(make_records(50), ENTRY, skip={"id-4", "id-5"})
+    reader = lagging_reader(writer, ["id-3"])
+    diff = diff_ids(source, reader, ENTRY, collection_of(source), tmp_path)
+    assert (diff.missing, diff.lagging) == (2, 1)
+    assert sorted(diff.missing_sample) == ["id-4", "id-5"]
+    check = verify_ids(diff, ENTRY)
+    assert not check.passed
+    assert check.detail.startswith("missing 2, extra 0; missing ids [")
+    assert '"id-3"' not in check.detail
+    assert check.detail.endswith(
+        f"{COPY_AGAIN}; the listing of the target lacked 1 more, and {REPLICA_LAG}"
+    )
+
+
+def test_a_complete_listing_reads_no_object_by_id(tmp_path):
+    source, writer = migrated(make_records(50), ENTRY)
+    reader = FakeReader(writer)
+    diff = diff_ids(source, reader, ENTRY, collection_of(source), tmp_path)
+    assert (diff.missing, diff.lagging) == (0, 0) and reader.present_calls == []
+
+
+@pytest.mark.parametrize(
+    ("absent", "calls", "rechecked"),
+    [(RECHECK_LIMIT, 1, True), (RECHECK_LIMIT + 1, 0, False)],
+    ids=["at the limit", "above the limit"],
+)
+def test_missing_ids_are_read_again_up_to_the_limit(tmp_path, absent, calls, rechecked):
+    records = make_records(RECHECK_LIMIT + 10)
+    source, writer = migrated(records, ENTRY)
+    reader = lagging_reader(writer, [r.id for r in records[:absent]])
+    diff = diff_ids(source, reader, ENTRY, collection_of(source), tmp_path)
+    assert len(reader.present_calls) == calls and diff.rechecked is rechecked
+    expected = (0, absent) if rechecked else (absent, 0)
+    assert (diff.missing, diff.lagging) == expected
+    check = verify_ids(diff, ENTRY)
+    assert check.passed is rechecked
+    if not rechecked:
+        assert check.detail.endswith(
+            f"{COPY_AGAIN} More than 500 ids are missing, so none was read again "
+            "by id; replicas that disagree, as after a node restart during the "
+            "copy, also show as missing ids."
+        )
+
+
+def test_a_sampled_record_that_only_a_read_by_id_finds_is_not_a_difference():
+    records = make_records(10)
+    source, writer = migrated(records, ENTRY)
+    reader = lagging_reader(writer, ["id-3", "id-6"])
+    check = verify_records(
+        source, reader, ENTRY, collection_of(source), 10, random.Random(0)
+    )
+    assert check.passed
+    assert check.detail == (
+        "sampled 10, compared 8, rejects skipped 0, differing 0; the search did "
+        "not return 2 of the sampled objects, which were not compared, and "
+        f"{REPLICA_LAG}"
+    )
+    assert [sorted(c) for c in reader.present_calls] == [
+        sorted([to_uuid("id-3"), to_uuid("id-6")])
+    ]
+
+
+def test_a_sampled_record_that_no_replica_holds_still_fails():
+    records = make_records(10)
+    source, writer = migrated(records, ENTRY, skip={"id-3"})
+    reader = lagging_reader(writer, ["id-6"])
+    check = verify_records(
+        source, reader, ENTRY, collection_of(source), 10, random.Random(0)
+    )
+    assert not check.passed
+    assert check.detail == (
+        'sampled 10, compared 9, rejects skipped 0, differing 1: "id-3": missing '
+        "in the target; the search did not return 1 of the sampled objects, "
+        f"which were not compared, and {REPLICA_LAG}"
+    )
+
+
+def test_records_that_the_search_returns_read_no_object_by_id():
+    records = make_records(10)
+    source, writer = migrated(records, ENTRY)
+    reader = FakeReader(writer)
+    verify_records(source, reader, ENTRY, collection_of(source), 10, random.Random(0))
+    assert reader.present_calls == []
+
+
+def test_verify_passes_and_warns_when_one_replica_lacks_objects(in_tmp):
+    fakes = copied()
+    fakes.lagging = {to_uuid("id-2"), to_uuid("id-5")}
+    r = invoke(fakes, "verify", "--json", "--sample", "10")
+    assert r.exit_code == 0, r.output
+    checks = {c["name"]: c for c in json.loads(r.stdout)["checks"]}
+    assert all(c["passed"] for c in checks.values())
+    assert "lacked 2 more" in checks["ids"]["detail"]
+    assert "did not return 2 of the sampled objects" in checks["records"]["detail"]
+    assert "lacked 2 more" in (DIR / "report.md").read_text()
 
 
 def test_verify_ids_passes_only_without_differences():
